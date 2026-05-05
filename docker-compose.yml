@@ -1,0 +1,79 @@
+version: "3.9"
+
+services:
+  diagnostic-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: algo-diagnostic
+    ports:
+      - "8002:8002"
+    environment:
+      DATABASE_URL: postgresql://algo:algo_password@postgres:5432/algo_v1
+      REDIS_URL: redis://redis:6379
+      APP_ENV: ${APP_ENV:-development}
+      DEBUG: ${DEBUG:-true}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      CORS_ORIGINS: '["http://localhost:3000","http://localhost:8000"]'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - algo-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: algo-postgres-diag
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: algo
+      POSTGRES_PASSWORD: algo_password
+      POSTGRES_DB: algo_v1
+    volumes:
+      - diag_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U algo -d algo_v1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - algo-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: algo-redis-diag
+    ports:
+      - "6380:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - diag_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - algo-network
+
+volumes:
+  diag_postgres_data:
+  diag_redis_data:
+
+networks:
+  algo-network:
+    name: algo-network
+    driver: bridge

@@ -1,0 +1,177 @@
+"""
+Diagnostic Service — Alpha Engine (IRT 3PL + Partial Credit)
+
+IRT 3PL model:
+  P(θ) = c + (1 − c) / (1 + exp(−a·(θ − b)))
+
+Outcome scale:
+  1.0 → correct answer
+  0.5 → distractor (partial credit, reveals misconception)
+  0.0 → wrong / idk
+
+Likelihood for partial credit:
+  correct   → L = P(θ)
+  distractor → L = sqrt(P(θ) · (1 − P(θ)))   # geometric mean
+  wrong     → L = 1 − P(θ)
+
+EAP theta estimation:
+  61-point uniform grid over [−4, 4] with Gaussian prior.
+  Posterior updated multiplicatively after each response.
+
+AlphaTracker:
+  Tracks per-topic mastery (alpha) independently of global theta.
+  Uses additive update with K = 0.4 learning rate.
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import Dict, List
+
+import numpy as np
+
+# ── Quadrature grid ────────────────────────────────────────────────────────
+_THETA_GRID: np.ndarray = np.linspace(-4.0, 4.0, 61)
+_PRIOR: np.ndarray = np.exp(-0.5 * _THETA_GRID ** 2) / math.sqrt(2 * math.pi)
+_PRIOR = _PRIOR / _PRIOR.sum()  # normalize to sum = 1
+
+
+# ── Data classes ──────────────────────────────────────────────────────────
+
+@dataclass
+class IRTParams:
+    """3PL IRT parameters for a single task."""
+    a: float = 1.0   # discrimination
+    b: float = 0.0   # difficulty
+    c: float = 0.0   # guessing (pseudo-chance)
+
+
+@dataclass
+class ThetaState:
+    """Current EAP ability estimate."""
+    theta: float = 0.0
+    se: float = 1.0
+    posterior: List[float] = field(
+        default_factory=lambda: list(_PRIOR.tolist())
+    )
+
+
+# ── Core IRT functions ─────────────────────────────────────────────────────
+
+def _p3pl(theta: float, a: float, b: float, c: float) -> float:
+    """3PL probability of a correct response at ability theta."""
+    return c + (1.0 - c) / (1.0 + math.exp(-a * (theta - b)))
+
+
+def _likelihood(outcome: float, p: float) -> float:
+    """
+    Response likelihood for 3PL with partial credit.
+      1.0 → p
+      0.5 → sqrt(p * (1 − p))
+      0.0 → 1 − p
+    """
+    if outcome == 1.0:
+        return p
+    if outcome == 0.5:
+        # Partial credit: geometric mean of correct and wrong likelihoods
+        return math.sqrt(max(p * (1.0 - p), 1e-15))
+    return 1.0 - p
+
+
+def update_theta(state: ThetaState, params: IRTParams, outcome: float) -> ThetaState:
+    """
+    Bayesian EAP update after one response.
+    Returns a new ThetaState (immutable).
+    """
+    posterior = np.array(state.posterior, dtype=float)
+
+    for i, theta_pt in enumerate(_THETA_GRID):
+        p = _p3pl(float(theta_pt), params.a, params.b, params.c)
+        posterior[i] *= _likelihood(outcome, p)
+
+    total = posterior.sum()
+    if total < 1e-300:
+        posterior = _PRIOR.copy()
+    else:
+        posterior /= total
+
+    # EAP point estimate
+    new_theta = float(np.dot(_THETA_GRID, posterior))
+
+    # Standard Error = sqrt(Var[θ|data])
+    e_theta2 = float(np.dot(_THETA_GRID ** 2, posterior))
+    variance = max(0.0, e_theta2 - new_theta ** 2)
+    new_se = math.sqrt(variance)
+
+    return ThetaState(
+        theta=round(new_theta, 4),
+        se=round(new_se, 4),
+        posterior=posterior.tolist(),
+    )
+
+
+def fisher_information(theta: float, params: IRTParams) -> float:
+    """Fisher Information I(θ) — higher = more informative task at this ability."""
+    p = _p3pl(theta, params.a, params.b, params.c)
+    q = 1.0 - p
+    if p <= params.c or p >= 1.0 or q <= 0:
+        return 0.0
+    num = (params.a ** 2) * ((p - params.c) ** 2)
+    den = ((1.0 - params.c) ** 2) * p * q
+    return num / den if den > 0 else 0.0
+
+
+def theta_to_level(theta: float) -> str:
+    """Map theta to pedagogical level label."""
+    if theta >= 1.0:
+        return "above_grade"
+    if theta >= -0.5:
+        return "at_grade"
+    return "below_grade"
+
+
+# ── Per-topic mastery tracker ─────────────────────────────────────────────
+
+class AlphaTracker:
+    """
+    Tracks per-topic mastery score (alpha) on a logit-like scale.
+    Separate from the global IRT theta — used for topic-level breakdown.
+
+    Update rule:
+      delta = outcome − 0.5          # correct=+0.5, distractor=0, wrong=−0.5
+      alpha_new = alpha_old + K * delta
+    """
+
+    K: float = 0.4  # learning rate
+
+    def __init__(self) -> None:
+        self._alphas: Dict[str, float] = {}
+        self._counts: Dict[str, int] = {}
+
+    def update(self, topic_id: str, outcome: float) -> float:
+        """Update alpha for topic_id after one answer. Returns new alpha."""
+        old = self._alphas.get(topic_id, 0.0)
+        delta = outcome - 0.5
+        new_alpha = round(old + self.K * delta, 4)
+        self._alphas[topic_id] = new_alpha
+        self._counts[topic_id] = self._counts.get(topic_id, 0) + 1
+        return new_alpha
+
+    def get_alpha(self, topic_id: str) -> float:
+        return self._alphas.get(topic_id, 0.0)
+
+    def get_all(self) -> Dict[str, float]:
+        return dict(self._alphas)
+
+    def topic_level(self, topic_id: str) -> str:
+        return theta_to_level(self.get_alpha(topic_id))
+
+    def to_dict(self) -> dict:
+        return {"alphas": self._alphas, "counts": self._counts}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AlphaTracker":
+        tracker = cls()
+        tracker._alphas = data.get("alphas", {})
+        tracker._counts = data.get("counts", {})
+        return tracker
