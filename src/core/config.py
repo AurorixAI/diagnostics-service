@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: List[str] = ["http://localhost:3000"]
 
+    # Standalone mode: True  → service owns its own Postgres, runs ALL migrations
+    #                  False → connects to monolith DB, runs ONLY owned-table migrations (001)
+    standalone: bool = Field(default=True)
+
     @property
     def is_development(self) -> bool:
         return self.app_env == "development"

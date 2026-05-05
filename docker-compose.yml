@@ -13,6 +13,7 @@ services:
       REDIS_URL: redis://redis:6379
       APP_ENV: ${APP_ENV:-development}
       DEBUG: ${DEBUG:-true}
+      STANDALONE: ${STANDALONE:-true}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       CORS_ORIGINS: '["http://localhost:3000","http://localhost:8000"]'
     depends_on:

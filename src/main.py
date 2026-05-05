@@ -32,12 +32,17 @@ async def lifespan(app: FastAPI):
     )
     # Run Alembic migrations on startup
     try:
-        from alembic import command
-        from alembic.config import Config
-
-        alembic_cfg = Config("alembic.ini")
-        command.upgrade(alembic_cfg, "head")
-        log.info("Alembic migrations applied")
+        import subprocess
+        # standalone=True  → full upgrade (includes knowledge tables seed)
+        # standalone=False → only owned tables (001), knowledge tables live in monolith
+        target = "head" if settings.standalone else "001_diag_tables"
+        result = subprocess.run(
+            ["alembic", "upgrade", target],
+            capture_output=True, text=True, check=True
+        )
+        log.info("Alembic migrations applied (target=%s):\n%s", target, result.stdout)
+    except subprocess.CalledProcessError as exc:
+        log.error("Alembic migration FAILED:\n%s\n%s", exc.stdout, exc.stderr)
     except Exception as exc:
         log.warning("Alembic migration skipped: %s", exc)
 
