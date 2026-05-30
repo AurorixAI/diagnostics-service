@@ -3,7 +3,6 @@ Diagnostic Service — Repositories for owned tables:
   DiagSessionRepository
   DiagAnswerRepository
   DiagReportRepository
-  GradeTopicMapRepository
 """
 from __future__ import annotations
 
@@ -14,7 +13,7 @@ from typing import List, Optional
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from src.models.diag_models import DiagAnswer, DiagReport, DiagSession, GradeTopicMap
+from src.models.diag_models import DiagAnswer, DiagReport, DiagSession
 from src.repositories.base import BaseRepository
 
 
@@ -155,18 +154,3 @@ class DiagReportRepository(BaseRepository[DiagReport]):
         )
 
 
-class GradeTopicMapRepository(BaseRepository[GradeTopicMap]):
-    model = GradeTopicMap
-
-    def get_grade_topics(self, grade_level: int) -> List[GradeTopicMap]:
-        """Return active topic map entries for a grade, ordered by section + position."""
-        return list(
-            self.session.scalars(
-                select(GradeTopicMap)
-                .where(
-                    GradeTopicMap.grade_level == grade_level,
-                    GradeTopicMap.is_active == True,  # noqa: E712
-                )
-                .order_by(GradeTopicMap.section_id, GradeTopicMap.position)
-            )
-        )

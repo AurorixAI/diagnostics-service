@@ -4,7 +4,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Generator
 
-import sqlalchemy
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 

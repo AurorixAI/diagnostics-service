@@ -2,10 +2,9 @@
 Diagnostic Service — ORM Models (owned tables)
 
 Tables managed exclusively by this service:
-  diag_sessions   — one row per diagnostic attempt
-  diag_answers    — append-only log of every answer
-  diag_reports    — final report generated at completion
-  grade_topic_map — configuration: grade → L1/L2 topic ordering & importance
+  diag_sessions  — one row per diagnostic attempt
+  diag_answers   — append-only log of every answer
+  diag_reports   — final report generated at completion
 """
 from __future__ import annotations
 
@@ -148,25 +147,3 @@ class DiagReport(Base):
     )
 
 
-class GradeTopicMap(Base):
-    """
-    Configuration: maps grade levels to topics with ordering and importance.
-    Used by TopicNavigator to build the navigable topic grid.
-    Managed by methodology team, never written by student flow.
-    """
-
-    __tablename__ = "grade_topic_map"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    grade_level = Column(Integer, nullable=False)
-    topic_id = Column(String(30), nullable=False)    # FK → knowledge_hierarchy L2
-    section_id = Column(String(30), nullable=False)  # FK → knowledge_hierarchy L1
-    position = Column(Integer, nullable=False)        # 0-indexed within grade+section
-    importance = Column(Integer, nullable=False, default=5)  # 1–10
-    is_active = Column(Boolean, default=True)
-
-    __table_args__ = (
-        Index("idx_gtm_grade", "grade_level"),
-        CheckConstraint("grade_level BETWEEN 5 AND 11", name="ck_gtm_grade"),
-        CheckConstraint("importance BETWEEN 1 AND 10", name="ck_gtm_importance"),
-    )

@@ -22,8 +22,10 @@ class Settings(BaseSettings):
     app_env: str = Field(default="production", pattern="^(development|production|testing)$")
     debug: bool = False
 
-    # Database (Phase 1: shared; Phase 2: own diag_db)
+    # Database — own DB for sessions/answers
     database_url: str = "postgresql://algo:algo_password@localhost:5432/algo_v1"
+    # Content Service — HTTP read API (replaces direct content-db connection)
+    content_service_url: str = "http://content-service:8004"
 
     # Redis — session state (JSON, no Pickle)
     redis_url: str = "redis://localhost:6379"
@@ -41,9 +43,13 @@ class Settings(BaseSettings):
     se_threshold: float = 0.30
     deep_scan_importance_threshold: int = 8
     deep_scan_max_items: int = 6
+    mastery_threshold: float = 0.6   # min fraction correct to move UP a topic
 
     # CORS
     cors_origins: List[str] = ["http://localhost:3000"]
+
+    # Auth Service callback URL — for notifying invite status changes
+    auth_service_url: str = Field(default="http://localhost:8000")
 
     # Standalone mode: True  → service owns its own Postgres, runs ALL migrations
     #                  False → connects to monolith DB, runs ONLY owned-table migrations (001)

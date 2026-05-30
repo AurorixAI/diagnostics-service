@@ -98,44 +98,8 @@ def upgrade() -> None:
     )
     op.create_index("idx_diag_reports_student", "diag_reports", ["student_id"])
 
-    # ── grade_topic_map ────────────────────────────────────────────────────
-    op.create_table(
-        "grade_topic_map",
-        sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-        sa.Column("grade_level", sa.Integer, nullable=False),
-        sa.Column("topic_id", sa.String(30), nullable=False),
-        sa.Column("section_id", sa.String(30), nullable=False),
-        sa.Column("position", sa.Integer, nullable=False),
-        sa.Column("importance", sa.Integer, nullable=False, server_default="5"),
-        sa.Column("is_active", sa.Boolean, server_default="true"),
-        sa.CheckConstraint("grade_level BETWEEN 5 AND 11", name="ck_gtm_grade"),
-        sa.CheckConstraint("importance BETWEEN 1 AND 10", name="ck_gtm_importance"),
-    )
-    op.create_index("idx_gtm_grade", "grade_topic_map", ["grade_level"])
-
-    # ── Seed grade 5 topics ────────────────────────────────────────────────
-    # G5_NAT = Natural Numbers section (5 topics, positions 0-4)
-    # G5_FRAC = Fractions section     (5 topics, positions 0-4)
-    op.execute("""
-        INSERT INTO grade_topic_map
-            (grade_level, topic_id, section_id, position, importance)
-        VALUES
-            (5, 'G5_T01', 'G5_NAT',  0, 6),
-            (5, 'G5_T02', 'G5_NAT',  1, 7),
-            (5, 'G5_T03', 'G5_NAT',  2, 9),
-            (5, 'G5_T04', 'G5_NAT',  3, 5),
-            (5, 'G5_T05', 'G5_NAT',  4, 6),
-            (5, 'G5_T06', 'G5_FRAC', 0, 9),
-            (5, 'G5_T07', 'G5_FRAC', 1, 8),
-            (5, 'G5_T08', 'G5_FRAC', 2, 8),
-            (5, 'G5_T09', 'G5_FRAC', 3, 5),
-            (5, 'G5_T10', 'G5_FRAC', 4, 6)
-        ON CONFLICT DO NOTHING;
-    """)
-
 
 def downgrade() -> None:
-    op.drop_table("grade_topic_map")
     op.drop_table("diag_reports")
     op.drop_table("diag_answers")
     op.drop_table("diag_sessions")

@@ -9,13 +9,15 @@ services:
     ports:
       - "8002:8002"
     environment:
-      DATABASE_URL: postgresql://algo:algo_password@postgres:5432/algo_v1
+      DATABASE_URL: postgresql://algo:algo_password@algo-postgres-diag:5432/algo_diagnostic
+      CONTENT_DB_URL: postgresql://algo:algo_password@content-postgres:5432/algo_content
       REDIS_URL: redis://redis:6379
-      APP_ENV: ${APP_ENV:-development}
-      DEBUG: ${DEBUG:-true}
+      APP_ENV: ${APP_ENV:-production}
+      DEBUG: ${DEBUG:-false}
       STANDALONE: ${STANDALONE:-true}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       CORS_ORIGINS: '["http://localhost:3000","http://localhost:8000"]'
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:-http://algo-auth:8000}
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,11 +41,11 @@ services:
     environment:
       POSTGRES_USER: algo
       POSTGRES_PASSWORD: algo_password
-      POSTGRES_DB: algo_v1
+      POSTGRES_DB: algo_diagnostic
     volumes:
       - diag_postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U algo -d algo_v1"]
+      test: ["CMD-SHELL", "pg_isready -U algo -d algo_diagnostic"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -76,5 +78,5 @@ volumes:
 
 networks:
   algo-network:
+    external: true
     name: algo-network
-    driver: bridge

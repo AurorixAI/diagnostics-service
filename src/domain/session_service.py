@@ -3,7 +3,7 @@ Diagnostic Service — SessionService (Main Orchestrator)
 
 Implements the T-Shape adaptive diagnostic algorithm:
 
-  Phase 0  INIT        Build topic grid from grade_topic_map
+  Phase 0  INIT        Build topic grid from knowledge_hierarchy (L2 nodes)
   Phase 1  WARMUP      3 tasks centered around prior_theta (IRT-matched)
   Phase 2  NAVIGATION  Binary search L2 (topic) → L3 (subtopic) → L4 (skill)
   Phase 3  DEEP_SCAN   Prerequisite traversal on fail for high-importance topics
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -32,13 +32,13 @@ from src.domain.alpha_engine import (
 from src.domain.navigators.skill_navigator import DeepScanState, SkillEntry, SkillNavigator
 from src.domain.navigators.subtopic_navigator import SubtopicEntry, SubtopicNavigator
 from src.domain.navigators.topic_navigator import TopicEntry, TopicNavigator
+from src.domain.answer_evaluator import AnswerEvaluator
 from src.domain.session_state import SessionState
 from src.models.diag_models import DiagSession
 from src.models.knowledge import TaskMaster
 from src.repositories.diag_repo import (
     DiagAnswerRepository,
     DiagSessionRepository,
-    GradeTopicMapRepository,
 )
 from src.repositories.knowledge_repo import (
     KnowledgeRepository,
@@ -47,6 +47,7 @@ from src.repositories.knowledge_repo import (
 )
 from src.schemas.diag_schemas import AnswerResult, TaskOut
 from src.state.redis_state import RedisStateManager
+from src.core import auth_client
 
 log = logging.getLogger(__name__)
 settings = get_settings()
@@ -59,11 +60,12 @@ class SessionService:
         self.db = db
         self.session_repo = DiagSessionRepository(db)
         self.answer_repo = DiagAnswerRepository(db)
-        self.gtm_repo = GradeTopicMapRepository(db)
-        self.knowledge_repo = KnowledgeRepository(db)
-        self.prereq_repo = SkillPrerequisiteRepository(db)
-        self.task_repo = TaskRepository(db)
+        # Knowledge/tasks come from content-service HTTP API (read-only)
+        self.knowledge_repo = KnowledgeRepository()
+        self.prereq_repo = SkillPrerequisiteRepository()
+        self.task_repo = TaskRepository()
         self.redis = RedisStateManager()
+        self.evaluator = AnswerEvaluator()
 
     # ══════════════════════════════════════════════════════════════════════
     # PUBLIC — Create session
@@ -111,6 +113,10 @@ class SessionService:
         # 5. Persist state to Redis
         self.redis.save(state)
 
+        # 6. Notify monolith: invite → in_progress
+        if invite_code:
+            auth_client.notify_start(invite_code, str(db_session.id))
+
         return db_session.id, first_task
 
     # ══════════════════════════════════════════════════════════════════════
@@ -141,7 +147,7 @@ class SessionService:
             raise NoTasksAvailableError(task_id)
 
         # 3. Evaluate answer
-        outcome, category = self._evaluate_answer(task, student_answer)
+        outcome, category = self.evaluator.evaluate(task, student_answer)
         correct = outcome >= 0.5
 
         # 4. Update IRT theta
@@ -235,18 +241,20 @@ class SessionService:
     # ══════════════════════════════════════════════════════════════════════
 
     def _build_topic_grid(self, state: SessionState) -> None:
-        """Load grade_topic_map and build TopicNavigator per L1 section."""
-        entries = self.gtm_repo.get_grade_topics(state.grade_level)
+        """Build TopicNavigator per L1 section directly from knowledge_hierarchy (L2 nodes)."""
+        topics_l2 = self.knowledge_repo.get_by_level_and_grade("L2", state.grade_level)
         sections: dict[str, list[TopicEntry]] = {}
-        for e in entries:
-            if e.section_id not in sections:
-                sections[e.section_id] = []
-            sections[e.section_id].append(
+        for t in topics_l2:
+            sid = t.parent_id  # L1 section id
+            if sid not in sections:
+                sections[sid] = []
+            sections[sid].append(
                 TopicEntry(
-                    topic_id=e.topic_id,
-                    section_id=e.section_id,
-                    position=e.position,
-                    importance=e.importance,
+                    topic_id=t.id,
+                    section_id=sid,
+                    position=t.sequence_order or 0,
+                    importance=t.importance or 5,
+                    name_ru=t.name_ru or "",
                 )
             )
         state.section_ids = list(sections.keys())
@@ -297,35 +305,6 @@ class SessionService:
         return self._task_to_out(task, state)
 
     # ── Answer evaluation ──────────────────────────────────────────────────
-
-    def _evaluate_answer(
-        self, task: TaskMaster, student_answer: str
-    ) -> Tuple[float, str]:
-        """
-        Simple deterministic evaluation.
-        AI evaluation (Gemini) will be layered in Phase 2.
-        Returns (outcome, category).
-        """
-        correct = str(task.correct_answer).strip().lower()
-        given = str(student_answer).strip().lower()
-
-        if given == correct:
-            return 1.0, "correct"
-
-        # Distractor check
-        if task.distractor_meta and isinstance(task.distractor_meta, list):
-            distractor_values = {
-                str(d.get("value", "")).strip().lower()
-                for d in task.distractor_meta
-                if isinstance(d, dict)
-            }
-            if given in distractor_values:
-                return 0.5, "distractor"
-
-        if given in {"не знаю", "?", "skip", "idk", ""}:
-            return 0.0, "idk"
-
-        return 0.0, "wrong"
 
     # ── Stopping criteria ─────────────────────────────────────────────────
 
@@ -400,12 +379,17 @@ class SessionService:
                     state.is_in_deep_scan = True
                     return self._init_deep_scan(state, skill_nav.get_failing_skill())
 
-                # Move subtopic
-                next_sub = sub_nav.move(correct)
+                # Aggregate: skill results → subtopic score → binary direction
+                skill_score = skill_nav.subtopic_score()
+                subtopic_pass = skill_score >= settings.mastery_threshold
+                sub_nav.record_score(skill_score)
+                next_sub = sub_nav.move(subtopic_pass)
                 state.current_subtopic_nav = sub_nav.to_dict()
 
                 if next_sub is None:
-                    return self._advance_topic(state, correct)
+                    # Aggregate: subtopic scores → topic score → topic direction
+                    topic_pass = sub_nav.topic_score() >= settings.mastery_threshold
+                    return self._advance_topic(state, topic_pass)
                 return self._pick_task_from_subtopic(state, sub_nav)
 
             # Continue within skill navigator
@@ -414,12 +398,17 @@ class SessionService:
             state.current_subtopic_id = next_skill.subtopic_id
             return self._pick_task_for_skill(state, next_skill.skill_id)
 
-        # No skill navigator yet — move subtopic cursor
+        # No skill navigator yet — move subtopic cursor (safety path)
         next_sub = sub_nav.move(correct)
         state.current_subtopic_nav = sub_nav.to_dict()
 
         if next_sub is None:
-            return self._advance_topic(state, correct)
+            sub_scores = sub_nav.state.scores
+            topic_pass = (
+                sub_nav.topic_score() >= settings.mastery_threshold
+                if sub_scores else correct
+            )
+            return self._advance_topic(state, topic_pass)
 
         return self._pick_task_from_subtopic(state, sub_nav)
 
@@ -431,6 +420,7 @@ class SessionService:
                 subtopic_id=s.id,
                 topic_id=topic.topic_id,
                 position=s.sequence_order,
+                importance=s.importance or 5,
                 name_ru=s.name_ru or "",
             )
             for s in raw_subs
@@ -461,23 +451,28 @@ class SessionService:
         state.current_subtopic_id = current_sub.subtopic_id
 
         raw_skills = self.knowledge_repo.get_skills_for_subtopic(current_sub.subtopic_id)
-        skills = [
-            SkillEntry(
-                skill_id=s.id,
-                subtopic_id=current_sub.subtopic_id,
-                sequence_order=s.sequence_order,
-                irt_difficulty=float(s.importance or 0),
-                name_ru=s.name_ru or "",
-            )
-            for s in raw_skills
-        ]
-        if not skills:
+        if not raw_skills:
             # Skip subtopic
             next_sub = sub_nav.move(True)
             state.current_subtopic_nav = sub_nav.to_dict()
             if next_sub is None:
                 return self._advance_topic(state, True)
             return self._pick_task_from_subtopic(state, sub_nav)
+
+        # Fetch real avg IRT b-params from tasks_master in ONE query (no N+1)
+        skill_ids = [s.id for s in raw_skills]
+        avg_difficulty = self.task_repo.get_avg_difficulty_for_skills(skill_ids)
+
+        skills = [
+            SkillEntry(
+                skill_id=s.id,
+                subtopic_id=current_sub.subtopic_id,
+                sequence_order=s.sequence_order,
+                irt_difficulty=avg_difficulty.get(s.id, 0.0),  # real IRT b-param
+                name_ru=s.name_ru or "",
+            )
+            for s in raw_skills
+        ]
 
         skill_nav = SkillNavigator.create(current_sub.subtopic_id, skills)
         state.current_skill_nav = skill_nav.to_dict()
@@ -515,12 +510,45 @@ class SessionService:
 
     # ── Deep scan phase ───────────────────────────────────────────────────
 
+    def _prereq_l4_ids(self, skill_or_para_id: str) -> List[str]:
+        """
+        Resolve prerequisites to a list of testable L4 skill IDs.
+
+        skill_prerequisites stores L3→L3 paragraph links.
+        If we receive an L4 skill ID we first map it to its parent L3 paragraph,
+        then look up L3-level prerequisites, and finally resolve each prerequisite
+        paragraph to its middle L4 skill (sorted by sequence_order).
+        This lets the deep-scan engine stay L4-native (tasks live at L4).
+        """
+        node = self.knowledge_repo.get_by_id(skill_or_para_id)
+        if node is None:
+            return []
+
+        # If L4 skill → map to parent L3 paragraph first
+        lookup_id = node.parent_id if (node.level == "L4" and node.parent_id) else skill_or_para_id
+
+        prereqs = self.prereq_repo.get_prerequisites(lookup_id, hard_only=True)
+        result: List[str] = []
+        for p in prereqs:
+            prereq_id = p.prerequisite_id
+            # prerequisite_id may be L3 (paragraph) → pick middle L4 child
+            prereq_node = self.knowledge_repo.get_by_id(prereq_id)
+            if prereq_node is None:
+                continue
+            if prereq_node.level == "L3":
+                children = self.knowledge_repo.get_skills_for_subtopic(prereq_id)
+                if children:
+                    result.append(children[len(children) // 2].id)
+            else:
+                # Already L4 (future-proof)
+                result.append(prereq_id)
+        return result
+
     def _init_deep_scan(
         self, state: SessionState, failing_skill_id: str
     ) -> Optional[TaskOut]:
         """Build a DeepScanState from the prerequisite graph of the failing skill."""
-        prereqs = self.prereq_repo.get_prerequisites(failing_skill_id, hard_only=True)
-        prereq_ids = [p.prerequisite_id for p in prereqs]
+        prereq_ids = self._prereq_l4_ids(failing_skill_id)
 
         scan = DeepScanState(
             origin_skill_id=failing_skill_id,
@@ -574,16 +602,13 @@ class SessionService:
             self._finish_deep_scan(state, scan)
             return self._advance_topic(state, False)
 
-        # Go deeper: prepend this skill's prerequisites
+        # Go deeper: prepend this skill's prerequisites (resolved via L3 map)
         if scan.current_skill_id:
-            deeper = self.prereq_repo.get_prerequisites(
-                scan.current_skill_id, hard_only=True
-            )
             new_prereqs = [
-                p.prerequisite_id
-                for p in deeper
-                if p.prerequisite_id not in scan.tested
-                and p.prerequisite_id not in scan.queue
+                pid
+                for pid in self._prereq_l4_ids(scan.current_skill_id)
+                if pid not in scan.tested
+                and pid not in scan.queue
             ]
             scan.queue = new_prereqs + scan.queue
 
@@ -667,6 +692,20 @@ class SessionService:
             state.theta.se,
             overall_level,
             len(state.confirmed_gaps),
+        )
+
+        # Notify monolith: invite → completed + save StudentDiagnosticResult
+        invite_code = getattr(db_session, "invite_code", None)
+        auth_client.notify_complete(
+            invite_code or "",
+            state.session_id,
+            {
+                "final_theta": state.theta.theta,
+                "se": state.theta.se,
+                "total_items": state.items_answered,
+                "identified_gaps": state.confirmed_gaps,
+                "topic_breakdown": topic_breakdown,
+            },
         )
 
         return AnswerResult(

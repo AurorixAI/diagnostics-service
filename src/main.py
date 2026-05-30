@@ -10,16 +10,17 @@ from contextlib import asynccontextmanager
 import sqlalchemy
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from src.core.config import get_settings
+from src.core.middleware import RequestIDMiddleware, configure_logging
 from src.api.router import router as diagnostic_router
+from src.api.analytics_router import router as analytics_router
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-log = logging.getLogger(__name__)
 settings = get_settings()
+configure_logging(is_development=settings.is_development)
+log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -30,11 +31,8 @@ async def lifespan(app: FastAPI):
         settings.app_version,
         settings.app_env,
     )
-    # Run Alembic migrations on startup
     try:
         import subprocess
-        # standalone=True  → full upgrade (includes knowledge tables seed)
-        # standalone=False → only owned tables (001), knowledge tables live in monolith
         target = "head" if settings.standalone else "001_diag_tables"
         result = subprocess.run(
             ["alembic", "upgrade", target],
@@ -59,6 +57,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -68,34 +67,55 @@ app.add_middleware(
 )
 
 app.include_router(diagnostic_router, prefix="/api/v1")
+app.include_router(analytics_router, prefix="/api/v1")
+
+# Prometheus metrics at /metrics
+Instrumentator(excluded_handlers=["/metrics", "/health/live", "/health/ready"]).instrument(app).expose(app)
 
 
-@app.get("/health", tags=["System"])
-def health():
-    """Liveness + dependency check."""
+# ---------------------------------------------------------------------------
+# Health endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/health/live", tags=["System"], summary="Liveness probe")
+def health_live():
+    """Always returns 200 — no dependency checks (for K8s/Docker liveness)."""
+    return {"status": "alive"}
+
+
+@app.get("/health/ready", tags=["System"], summary="Readiness probe")
+def health_ready():
+    """Returns 200 if DB + Redis are reachable, 503 otherwise."""
     from src.core.database import engine
     from src.core.redis_client import get_redis_client
 
-    db_ok = "ok"
-    redis_ok = "ok"
+    db_ok = True
+    redis_ok = True
 
     try:
         with engine.connect() as conn:
             conn.execute(sqlalchemy.text("SELECT 1"))
     except Exception as exc:
-        log.warning("DB health check failed: %s", exc)
-        db_ok = "error"
+        log.warning("Readiness DB check failed: %s", exc)
+        db_ok = False
 
     try:
         get_redis_client().ping()
     except Exception as exc:
-        log.warning("Redis health check failed: %s", exc)
-        redis_ok = "error"
+        log.warning("Readiness Redis check failed: %s", exc)
+        redis_ok = False
 
-    overall = "healthy" if db_ok == "ok" and redis_ok == "ok" else "degraded"
-    return {
-        "status": overall,
+    ready = db_ok and redis_ok
+    payload = {
+        "status": "ready" if ready else "not_ready",
         "version": settings.app_version,
-        "database": db_ok,
-        "redis": redis_ok,
+        "database": "ok" if db_ok else "error",
+        "redis": "ok" if redis_ok else "error",
     }
+    return JSONResponse(status_code=200 if ready else 503, content=payload)
+
+
+@app.get("/health", tags=["System"], summary="Health check (legacy)")
+def health():
+    """Backward-compatible — delegates to readiness check."""
+    return health_ready()

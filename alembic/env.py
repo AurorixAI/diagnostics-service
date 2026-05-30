@@ -11,7 +11,7 @@ from sqlalchemy import engine_from_config, pool
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.models.base import Base
-from src.models.diag_models import DiagAnswer, DiagReport, DiagSession, GradeTopicMap  # noqa: F401
+from src.models.diag_models import DiagAnswer, DiagReport, DiagSession  # noqa: F401
 
 config = context.config
 
@@ -25,8 +25,8 @@ if db_url:
 
 target_metadata = Base.metadata
 
-# Only manage these four tables — never touch monolith tables
-_MANAGED = {"diag_sessions", "diag_answers", "diag_reports", "grade_topic_map"}
+# Only manage these three tables — never touch monolith tables
+_MANAGED = {"diag_sessions", "diag_answers", "diag_reports"}
 
 
 def include_object(obj, name, type_, reflected, compare_to):

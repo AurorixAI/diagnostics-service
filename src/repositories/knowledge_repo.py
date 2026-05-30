@@ -1,78 +1,76 @@
 """
-Diagnostic Service — Read-only repositories for shared knowledge tables.
-NEVER writes to knowledge_hierarchy, skill_prerequisites, or tasks_master.
+Diagnostic Service — Read-only repositories for knowledge / task data.
+
+Previously these classes held a SQLAlchemy Session and queried content-db
+directly.  Now they call the content-service HTTP read API so that each
+service owns only its own database.
+
+The public method signatures are unchanged — session_service.py does not
+need to know about the transport switch.
 """
 from __future__ import annotations
 
+import types
 from typing import List, Optional
 
-from sqlalchemy import and_, select
-from sqlalchemy.orm import Session
+from src.clients import content_client
 
-from src.models.knowledge import KnowledgeHierarchy, SkillPrerequisite, TaskMaster
-from src.repositories.base import BaseRepository
+BASE = "/api/v1/content"
 
 
-class KnowledgeRepository(BaseRepository[KnowledgeHierarchy]):
-    model = KnowledgeHierarchy
+def _ns(d: dict) -> types.SimpleNamespace:
+    """Wrap a dict so attribute access works the same as on ORM objects."""
+    return types.SimpleNamespace(**d)
 
-    def get_children(self, parent_id: str) -> List[KnowledgeHierarchy]:
-        """All direct children of a node, sorted by sequence_order."""
-        return list(
-            self.session.scalars(
-                select(KnowledgeHierarchy)
-                .where(
-                    KnowledgeHierarchy.parent_id == parent_id,
-                    KnowledgeHierarchy.is_active == True,  # noqa: E712
-                )
-                .order_by(KnowledgeHierarchy.sequence_order)
-            )
+
+class KnowledgeRepository:
+    """Read knowledge_hierarchy via content-service API."""
+
+    def get_by_id(self, node_id: str) -> Optional[types.SimpleNamespace]:
+        resp = content_client.get(f"{BASE}/skills/{node_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return _ns(resp.json())
+
+    def get_children(self, parent_id: str) -> List[types.SimpleNamespace]:
+        resp = content_client.get(f"{BASE}/skills/{parent_id}/children")
+        resp.raise_for_status()
+        return [_ns(r) for r in resp.json()]
+
+    def get_by_level_and_grade(self, level: str, grade: int) -> List[types.SimpleNamespace]:
+        resp = content_client.get(
+            f"{BASE}/skills",
+            params={"level": level, "grade": grade},
         )
+        resp.raise_for_status()
+        return [_ns(r) for r in resp.json()]
 
-    def get_by_level_and_grade(self, level: str, grade: int) -> List[KnowledgeHierarchy]:
-        return list(
-            self.session.scalars(
-                select(KnowledgeHierarchy)
-                .where(
-                    KnowledgeHierarchy.level == level,
-                    KnowledgeHierarchy.class_level_start <= grade,
-                    KnowledgeHierarchy.class_level_end >= grade,
-                    KnowledgeHierarchy.is_active == True,  # noqa: E712
-                )
-                .order_by(KnowledgeHierarchy.sequence_order)
-            )
-        )
-
-    def get_subtopics_for_topic(self, topic_id: str) -> List[KnowledgeHierarchy]:
-        """All L3 subtopics for an L2 topic."""
+    def get_subtopics_for_topic(self, topic_id: str) -> List[types.SimpleNamespace]:
+        """All L3 subtopics for an L2 topic (= direct children)."""
         return self.get_children(topic_id)
 
-    def get_skills_for_subtopic(self, subtopic_id: str) -> List[KnowledgeHierarchy]:
-        """All L4 atomic skills for an L3 subtopic."""
+    def get_skills_for_subtopic(self, subtopic_id: str) -> List[types.SimpleNamespace]:
+        """All L4 atomic skills for an L3 subtopic (= direct children)."""
         return self.get_children(subtopic_id)
 
 
-class SkillPrerequisiteRepository(BaseRepository[SkillPrerequisite]):
-    model = SkillPrerequisite
+class SkillPrerequisiteRepository:
+    """Read skill_prerequisites via content-service API."""
 
     def get_prerequisites(
         self, skill_id: str, *, hard_only: bool = False
-    ) -> List[SkillPrerequisite]:
-        """Prerequisites for skill_id, ordered by weight desc."""
-        conditions = [SkillPrerequisite.skill_id == skill_id]
-        if hard_only:
-            conditions.append(SkillPrerequisite.is_hard == True)  # noqa: E712
-        return list(
-            self.session.scalars(
-                select(SkillPrerequisite)
-                .where(and_(*conditions))
-                .order_by(SkillPrerequisite.weight.desc())
-            )
+    ) -> List[types.SimpleNamespace]:
+        resp = content_client.get(
+            f"{BASE}/skills/{skill_id}/prerequisites",
+            params={"hard_only": hard_only},
         )
+        resp.raise_for_status()
+        return [_ns(r) for r in resp.json()]
 
 
-class TaskRepository(BaseRepository[TaskMaster]):
-    model = TaskMaster
+class TaskRepository:
+    """Read tasks_master via content-service API."""
 
     def get_tasks_for_skill(
         self,
@@ -81,24 +79,15 @@ class TaskRepository(BaseRepository[TaskMaster]):
         difficulty: Optional[str] = None,
         exclude_ids: Optional[List[str]] = None,
         limit: int = 10,
-    ) -> List[TaskMaster]:
-        conditions = [
-            TaskMaster.skill_id == skill_id,
-            TaskMaster.is_active == True,  # noqa: E712
-        ]
+    ) -> List[types.SimpleNamespace]:
+        params: dict = {"skill_id": skill_id, "limit": limit}
         if difficulty:
-            conditions.append(TaskMaster.difficulty == difficulty)
+            params["difficulty"] = difficulty
         if exclude_ids:
-            conditions.append(TaskMaster.id.notin_(exclude_ids))
-
-        return list(
-            self.session.scalars(
-                select(TaskMaster)
-                .where(and_(*conditions))
-                .order_by(TaskMaster.irt_difficulty)
-                .limit(limit)
-            )
-        )
+            params["exclude_ids"] = exclude_ids
+        resp = content_client.get(f"{BASE}/tasks", params=params)
+        resp.raise_for_status()
+        return [_ns(r) for r in resp.json()]
 
     def get_task_by_difficulty_target(
         self,
@@ -106,14 +95,28 @@ class TaskRepository(BaseRepository[TaskMaster]):
         target_b: float,
         *,
         exclude_ids: Optional[List[str]] = None,
-    ) -> Optional[TaskMaster]:
-        """
-        Pick the task whose IRT b-parameter is closest to target_b.
-        Used by all phases for ability-matched task selection.
-        """
+    ) -> Optional[types.SimpleNamespace]:
+        """Fetch up to 20 IRT-sorted candidates and pick closest to target_b."""
         candidates = self.get_tasks_for_skill(
             skill_id, exclude_ids=exclude_ids, limit=20
         )
         if not candidates:
             return None
-        return min(candidates, key=lambda t: abs(float(t.irt_difficulty or 0) - target_b))
+        return min(
+            candidates,
+            key=lambda t: abs(float(getattr(t, "irt_difficulty", 0) or 0) - target_b),
+        )
+
+    def get_avg_difficulty_for_skills(
+        self, skill_ids: List[str]
+    ) -> dict[str, float]:
+        """Returns {skill_id: avg_irt_difficulty} for the given skill list."""
+        if not skill_ids:
+            return {}
+        resp = content_client.post(
+            f"{BASE}/tasks/avg-difficulty",
+            json={"skill_ids": skill_ids},
+        )
+        resp.raise_for_status()
+        return resp.json()
+

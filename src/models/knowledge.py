@@ -42,6 +42,11 @@ class KnowledgeHierarchy(Base):
     sequence_order = Column(Integer, default=0)
     cognitive_type = Column(String(20))
     is_active = Column(Boolean, default=True)
+    # L4 skill metadata — used by AI digitization pipeline and task display
+    example_task = Column(Text)                        # reference example from methodology
+    assessed_ability = Column(Text)                    # what this skill measures
+    difficulty_level = Column(String(50))              # Low (A) | Medium (B) | High (C)
+    formula = Column(Text)                             # formula/rule if applicable
 
     parent = relationship(
         "KnowledgeHierarchy",
@@ -67,8 +72,9 @@ class SkillPrerequisite(Base):
     prerequisite_id = Column(
         String(30), ForeignKey("knowledge_hierarchy.id"), nullable=False
     )
-    weight = Column(Numeric(4, 2), default=1.0)  # 0.0–1.0 dependency strength
-    is_hard = Column(Boolean, default=True)       # hard = mandatory, soft = recommended
+    weight = Column(Numeric(4, 2), default=1.0)   # 0.0–1.0 dependency strength
+    dependency_type = Column(String(10), default="hard")  # hard | soft
+    criticality = Column(Integer, default=5)              # 1–10, mirrors monolith schema
 
     skill = relationship(
         "KnowledgeHierarchy",
@@ -92,6 +98,8 @@ class TaskMaster(Base):
     question_latex = Column(Text)
     answer_type = Column(String(20), nullable=False)   # mcq | open | numeric | etc.
     correct_answer = Column(Text, nullable=False)
+    correct_answer_latex = Column(Text)                            # LaTeX form for display
+    sympy_solution = Column(Text)                                  # sympy-parseable canonical form
     answer_options = Column(JSONB)
     difficulty = Column(String(1), nullable=False, default="B")  # A | B | C
     irt_discrimination = Column(Numeric(6, 4), default=1.0)       # a param

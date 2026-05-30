@@ -79,6 +79,14 @@ class SkillNavigator:
     def get_failing_skill(self) -> Optional[str]:
         return self.state.failing_skill_id
 
+    def subtopic_score(self) -> float:
+        """Fraction of correct answers across all tested skills [0.0–1.0].
+        Returns 0.0 if no skills were tested yet."""
+        results = self.state.results
+        if not results:
+            return 0.0
+        return round(sum(1 for v in results.values() if v) / len(results), 4)
+
     def move(self, correct: bool) -> Optional[SkillEntry]:
         s = self.state
         current = s.current_skill

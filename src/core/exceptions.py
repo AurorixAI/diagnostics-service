@@ -42,6 +42,6 @@ class InvalidAnswerError(DiagnosticError):
 class GradeNotConfiguredError(DiagnosticError):
     def __init__(self, grade: int):
         super().__init__(
-            f"Grade {grade} has no topics configured in grade_topic_map",
+            f"Grade {grade} has no topics configured in knowledge_hierarchy",
             "GRADE_NOT_CONFIGURED",
         )

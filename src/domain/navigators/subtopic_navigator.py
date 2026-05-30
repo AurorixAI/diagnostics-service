@@ -20,6 +20,7 @@ class SubtopicEntry:
     subtopic_id: str
     topic_id: str
     position: int       # sequence_order from knowledge_hierarchy
+    importance: int = 5  # L3 paragraph importance (1-10)
     name_ru: str = ""
 
 
@@ -33,6 +34,7 @@ class SubtopicNavigatorState:
     hi: int
     tested: List[str] = field(default_factory=list)
     results: Dict[str, bool] = field(default_factory=dict)
+    scores: Dict[str, float] = field(default_factory=dict)  # skill-score per subtopic [0.0–1.0]
     exhausted: bool = False
     boundary_subtopic_id: Optional[str] = None  # last failed subtopic
 
@@ -75,11 +77,27 @@ class SubtopicNavigator:
         return self.state.exhausted
 
     def needs_deep_scan(self, threshold: int) -> bool:
-        """True if topic is important enough and a subtopic was failed."""
-        return (
-            self.state.topic_importance >= threshold
-            and self.state.boundary_subtopic_id is not None
-        )
+        """True if the failed subtopic itself is important enough to warrant deep scan."""
+        if self.state.boundary_subtopic_id is None:
+            return False
+        for sub in self.state.subtopics:
+            if sub.subtopic_id == self.state.boundary_subtopic_id:
+                return sub.importance >= threshold
+        return False
+
+    def record_score(self, score: float) -> None:
+        """Store the skill-aggregated score [0.0–1.0] for the current subtopic.
+        Call this BEFORE move() so the current subtopic is still set."""
+        current = self.state.current_subtopic
+        if current is not None:
+            self.state.scores[current.subtopic_id] = round(score, 4)
+
+    def topic_score(self) -> float:
+        """Mean of all recorded subtopic scores. Returns 0.0 if nothing scored yet."""
+        s = self.state.scores
+        if not s:
+            return 0.0
+        return round(sum(s.values()) / len(s), 4)
 
     def move(self, correct: bool) -> Optional[SubtopicEntry]:
         """
@@ -118,6 +136,7 @@ class SubtopicNavigator:
                     "subtopic_id": st.subtopic_id,
                     "topic_id": st.topic_id,
                     "position": st.position,
+                    "importance": st.importance,
                     "name_ru": st.name_ru,
                 }
                 for st in s.subtopics
@@ -127,6 +146,7 @@ class SubtopicNavigator:
             "hi": s.hi,
             "tested": s.tested,
             "results": s.results,
+            "scores": s.scores,
             "exhausted": s.exhausted,
             "boundary_subtopic_id": s.boundary_subtopic_id,
         }
@@ -143,6 +163,7 @@ class SubtopicNavigator:
             hi=data["hi"],
             tested=data["tested"],
             results=data["results"],
+            scores=data.get("scores", {}),
             exhausted=data["exhausted"],
             boundary_subtopic_id=data.get("boundary_subtopic_id"),
         )
