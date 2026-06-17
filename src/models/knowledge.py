@@ -105,7 +105,5 @@ class TaskMaster(Base):
     irt_discrimination = Column(Numeric(6, 4), default=1.0)       # a param
     irt_difficulty = Column(Numeric(6, 4), default=0.0)            # b param
     irt_guessing = Column(Numeric(6, 4), default=0.0)              # c param
-    solution_steps = Column(JSONB)
-    hints = Column(JSONB)
     distractor_meta = Column(JSONB)  # [{value, misconception}, ...]
     is_active = Column(Boolean, default=True)

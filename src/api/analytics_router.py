@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from src.core.database import get_db
 from src.models.diag_models import DiagAnswer, DiagReport, DiagSession
+from src.repositories.knowledge_repo import KnowledgeRepository
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,16 @@ def student_skill_map(
     breakdown: dict = session.topic_breakdown or {}
     weak_skills: list = session.weak_skills or []
 
+    # Резолвим человекочитаемые имена тем из content-service
+    knowledge_repo = KnowledgeRepository()
+    topic_names: dict = {}
+    for tid in breakdown:
+        try:
+            node = knowledge_repo.get_by_id(tid)
+            topic_names[tid] = node.name if node and hasattr(node, "name") else tid
+        except Exception:
+            topic_names[tid] = tid
+
     skills = []
     counts = {"mastered": 0, "learning": 0, "struggling": 0, "gap": 0}
 
@@ -100,23 +111,28 @@ def student_skill_map(
         if status in counts:
             counts[status] += 1
         skills.append({
-            "skill_id": topic_id,
-            "mastery": mastery,
-            "status": status,
+            "name": topic_names.get(topic_id, topic_id),
+            "status": _LEVEL_RU.get(status, status),
+            "mastery_pct": round(mastery * 100, 1),
             "level": info.get("level", "unknown"),
-            "alpha": alpha,
         })
 
+    _LEVEL_RU_MAP = {
+        "mastered":   "Отличное владение",
+        "learning":   "Хорошее понимание",
+        "struggling": "Есть затруднения",
+        "gap":        "Пробел",
+        "below_grade":"Ниже уровня",
+        "at_grade":   "Уровень класса",
+        "above_grade":"Выше уровня",
+    }
     return {
-        "student_id": student_id,
-        "session_id": str(session.id),
         "grade_level": session.grade_level,
-        "overall_theta": float(session.theta) if session.theta else None,
-        "overall_level": session.overall_level,
+        "overall_level": _LEVEL_RU_MAP.get(session.overall_level or "", session.overall_level),
         "diagnosed_at": session.completed_at.isoformat() if session.completed_at else None,
         "total_topics": len(skills),
         **counts,
-        "skills": sorted(skills, key=lambda x: x["mastery"]),
+        "skills": sorted(skills, key=lambda x: x["mastery_pct"]),
     }
 
 
@@ -185,21 +201,32 @@ def student_report(
     )
 
     if not report:
-        return {"student_id": student_id, "report": None}
+        return {"report": None}
+
+    # Резолвим имена слабых навыков
+    knowledge_repo = KnowledgeRepository()
+    weak_names = []
+    for sid in (report.weak_skills or []):
+        try:
+            node = knowledge_repo.get_by_id(sid)
+            weak_names.append(node.name if node and hasattr(node, "name") else sid)
+        except Exception:
+            weak_names.append(sid)
+
+    _LEVEL_RU_MAP = {
+        "mastered":   "Отличное владение",
+        "learning":   "Хорошее понимание",
+        "struggling": "Есть затруднения",
+        "gap":        "Пробел в знаниях",
+        "below_grade":"Ниже уровня класса",
+        "at_grade":   "Соответствует программе",
+        "above_grade":"Выше уровня класса",
+    }
 
     return {
-        "student_id": student_id,
-        "session_id": str(report.session_id),
         "grade_level": report.grade_level,
-        "overall_theta": float(report.overall_theta) if report.overall_theta else None,
-        "overall_level": report.overall_level,
-        "confidence_interval": {
-            "lo": float(report.confidence_interval_lo) if report.confidence_interval_lo else None,
-            "hi": float(report.confidence_interval_hi) if report.confidence_interval_hi else None,
-        },
-        "topic_breakdown": report.topic_breakdown or {},
-        "weak_skills": report.weak_skills or [],
-        "recommended_start": report.recommended_start,
+        "overall_level": _LEVEL_RU_MAP.get(report.overall_level or "", report.overall_level),
+        "weak_topics": weak_names,
         "narrative_ru": report.narrative_ru,
         "generated_at": report.generated_at.isoformat() if report.generated_at else None,
     }

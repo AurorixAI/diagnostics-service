@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from src.core.config import get_settings
 from src.core.exceptions import GradeNotConfiguredError, NoTasksAvailableError, SessionExpiredError
+from src.domain.report_generator import generate_and_save_report
 from src.domain.alpha_engine import (
     AlphaTracker,
     IRTParams,
@@ -694,6 +695,31 @@ class SessionService:
             len(state.confirmed_gaps),
         )
 
+        # Generate diagnostic report with Gemini narrative (fire-and-forget)
+        # Uses a fresh DB session to isolate from the main transaction —
+        # report failure must never roll back the completed session.
+        if db_session:
+            try:
+                from src.core.database import SessionLocal
+                report_db = SessionLocal()
+                try:
+                    generate_and_save_report(
+                        report_db,
+                        session_id=uuid.UUID(state.session_id),
+                        student_id=db_session.student_id,
+                        grade_level=db_session.grade_level,
+                        theta=state.theta.theta,
+                        theta_se=state.theta.se,
+                        overall_level=overall_level,
+                        topic_breakdown=topic_breakdown,
+                        weak_skills=state.confirmed_gaps,
+                        items_total=state.items_answered,
+                    )
+                finally:
+                    report_db.close()
+            except Exception as exc:
+                log.warning("Report generation skipped (session safe): %s", exc)
+
         # Notify monolith: invite → completed + save StudentDiagnosticResult
         invite_code = getattr(db_session, "invite_code", None)
         auth_client.notify_complete(
@@ -721,7 +747,6 @@ class SessionService:
     # ── Utilities ──────────────────────────────────────────────────────────
 
     def _task_to_out(self, task: TaskMaster, state: SessionState) -> TaskOut:
-        hints = task.hints if isinstance(task.hints, list) else []
         options = task.answer_options if isinstance(task.answer_options, list) else None
         return TaskOut(
             task_id=task.id,
@@ -731,7 +756,6 @@ class SessionService:
             question_latex=task.question_latex,
             answer_type=task.answer_type,
             answer_options=options,
-            hints=hints,
             phase=state.phase,
             items_answered=state.items_answered,
             items_max=settings.max_items,
