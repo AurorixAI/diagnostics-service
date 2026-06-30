@@ -33,6 +33,10 @@ from src.domain.alpha_engine import (
 from src.domain.navigators.skill_navigator import DeepScanState, SkillEntry, SkillNavigator
 from src.domain.navigators.subtopic_navigator import SubtopicEntry, SubtopicNavigator
 from src.domain.navigators.topic_navigator import TopicEntry, TopicNavigator
+from src.domain.task_display import (
+    build_diag_answer_options,
+    diag_answer_type_for_display,
+)
 from src.domain.answer_evaluator import AnswerEvaluator
 from src.domain.session_state import SessionState
 from src.models.diag_models import DiagSession
@@ -747,15 +751,16 @@ class SessionService:
     # ── Utilities ──────────────────────────────────────────────────────────
 
     def _task_to_out(self, task: TaskMaster, state: SessionState) -> TaskOut:
-        options = task.answer_options if isinstance(task.answer_options, list) else None
+        options, options_latex = build_diag_answer_options(task)
         return TaskOut(
             task_id=task.id,
             skill_id=state.current_skill_id or "",
             topic_id=state.current_topic_id or "",
             question_text=task.question_text,
             question_latex=task.question_latex,
-            answer_type=task.answer_type,
+            answer_type=diag_answer_type_for_display(task, options),
             answer_options=options,
+            answer_options_latex=options_latex,
             phase=state.phase,
             items_answered=state.items_answered,
             items_max=settings.max_items,

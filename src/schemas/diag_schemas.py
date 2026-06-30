@@ -32,6 +32,7 @@ class TaskOut(BaseModel):
     question_latex: Optional[str] = None
     answer_type: str
     answer_options: Optional[List[Any]] = None
+    answer_options_latex: Optional[List[str]] = None
     # Navigation context (used by frontend progress bar)
     phase: str
     items_answered: int
