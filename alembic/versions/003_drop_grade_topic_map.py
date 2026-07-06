@@ -14,8 +14,11 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.drop_index("idx_gtm_grade", table_name="grade_topic_map")
-    op.drop_table("grade_topic_map")
+    # IF EXISTS: grade_topic_map was created by 002 only in old deployments.
+    # On fresh databases, migration 002 is a no-op (superseded), so the
+    # table and index never exist. Both drops must be idempotent.
+    op.execute(sa.text("DROP INDEX IF EXISTS idx_gtm_grade"))
+    op.execute(sa.text("DROP TABLE IF EXISTS grade_topic_map"))
 
 
 def downgrade() -> None:

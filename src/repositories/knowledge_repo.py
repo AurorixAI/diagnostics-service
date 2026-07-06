@@ -72,6 +72,13 @@ class SkillPrerequisiteRepository:
 class TaskRepository:
     """Read tasks_master via content-service API."""
 
+    def get_by_id(self, task_id: str) -> Optional[types.SimpleNamespace]:
+        resp = content_client.get(f"{BASE}/tasks/{task_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return _ns(resp.json())
+
     def get_tasks_for_skill(
         self,
         skill_id: str,

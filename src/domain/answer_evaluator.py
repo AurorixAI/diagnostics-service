@@ -191,11 +191,8 @@ class AnswerEvaluator:
 
             # Layer 3: SymPy symbolic equivalence
             if not skip_sympy:
-                canonical = (
-                    str(task.sympy_solution).strip()
-                    if task.sympy_solution
-                    else correct
-                )
+                sympy_solution = getattr(task, "sympy_solution", None)
+                canonical = str(sympy_solution).strip() if sympy_solution else correct
                 if _sympy_equivalent(given, canonical):
                     return 1.0, "correct"
 
