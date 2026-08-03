@@ -271,7 +271,7 @@ def student_report(
 
     overall_level_key = (report.overall_level if report else None) or (session.overall_level if session else None)
 
-    # Enrich topic_breakdown with human-readable names (name_ru)
+    # Enrich topic_breakdown with human-readable names (name_ru) and mastery [0, 1]
     raw_breakdown = session.topic_breakdown if session else {}
     enriched_breakdown = {}
     for tid, info in raw_breakdown.items():
@@ -281,8 +281,12 @@ def student_report(
             name = getattr(node, "name_ru", getattr(node, "name", tid)) if node else tid
         except Exception:
             name = tid
+        alpha = float(info.get("alpha", 0.0))
+        mastery = round(max(0.0, min(1.0, 0.5 + alpha / 4.0)), 4)
         info_copy["name_ru"] = name
         info_copy["name"] = name
+        info_copy["mastery"] = mastery
+        info_copy["mastery_pct"] = round(mastery * 100, 1)
         enriched_breakdown[tid] = info_copy
 
     return {
