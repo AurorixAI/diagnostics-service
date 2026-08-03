@@ -95,7 +95,7 @@ def student_skill_map(
     for tid in breakdown:
         try:
             node = knowledge_repo.get_by_id(tid)
-            topic_names[tid] = node.name if node and hasattr(node, "name") else tid
+            topic_names[tid] = getattr(node, "name_ru", getattr(node, "name", tid)) if node else tid
         except Exception:
             topic_names[tid] = tid
 
@@ -120,11 +120,16 @@ def student_skill_map(
         mastery = round(max(0.0, min(1.0, 0.5 + alpha / 4.0)), 4)
         if status in counts:
             counts[status] += 1
+        front_level = "strong" if status == "mastered" else ("medium" if status in ("learning", "struggling") else "gap")
+        name_str = topic_names.get(topic_id, topic_id)
         skills.append({
-            "name": topic_names.get(topic_id, topic_id),
+            "skill_id": topic_id,
+            "skill_name": name_str,
+            "name": name_str,
             "status": _LEVEL_RU_MAP.get(status, status),
+            "mastery": mastery,
             "mastery_pct": round(mastery * 100, 1),
-            "level": info.get("level", "unknown"),
+            "level": front_level,
         })
 
     return {
@@ -266,6 +271,20 @@ def student_report(
 
     overall_level_key = (report.overall_level if report else None) or (session.overall_level if session else None)
 
+    # Enrich topic_breakdown with human-readable names (name_ru)
+    raw_breakdown = session.topic_breakdown if session else {}
+    enriched_breakdown = {}
+    for tid, info in raw_breakdown.items():
+        info_copy = dict(info)
+        try:
+            node = knowledge_repo.get_by_id(tid)
+            name = getattr(node, "name_ru", getattr(node, "name", tid)) if node else tid
+        except Exception:
+            name = tid
+        info_copy["name_ru"] = name
+        info_copy["name"] = name
+        enriched_breakdown[tid] = info_copy
+
     return {
         # Core report fields
         "grade_level":    (report.grade_level if report else None) or (session.grade_level if session else None),
@@ -278,8 +297,8 @@ def student_report(
         "confidence_interval": confidence_interval,
         "items_total":    session.items_answered if session else None,
         "correct_answers": correct_count,
-        # Topic breakdown — {topic_id: {alpha, level, ...}}
-        "topic_breakdown": session.topic_breakdown if session else {},
+        # Topic breakdown — {topic_id: {alpha, level, name_ru, name}}
+        "topic_breakdown": enriched_breakdown,
         # Weak skills
         "weak_topics":   weak_names,           # human-readable list
         "weak_skills":   weak_skill_ids,        # raw IDs (for frontend mapping)
