@@ -86,44 +86,68 @@ def student_skill_map(
             "skills": [],
         }
 
-    breakdown: dict = session.topic_breakdown or {}
-    weak_skills: list = session.weak_skills or []
+    # Query actual L4 atomic skills tested in this session from DiagAnswer
+    answers = (
+        db.query(DiagAnswer)
+        .filter(DiagAnswer.session_id == session.id)
+        .order_by(DiagAnswer.answered_at)
+        .all()
+    )
 
-    # Резолвим человекочитаемые имена тем из content-service
+    confirmed_gaps = set(session.weak_skills or [])
+
+    # Aggregate outcomes by L4 skill_id
+    skill_stats: dict[str, dict] = {}
+    for a in answers:
+        if not a.skill_id:
+            continue
+        if a.skill_id not in skill_stats:
+            skill_stats[a.skill_id] = {"total": 0, "correct": 0, "outcomes": []}
+        skill_stats[a.skill_id]["total"] += 1
+        skill_stats[a.skill_id]["outcomes"].append(float(a.outcome))
+        if a.outcome >= 1.0:
+            skill_stats[a.skill_id]["correct"] += 1
+
     knowledge_repo = KnowledgeRepository()
-    topic_names: dict = {}
-    for tid in breakdown:
-        try:
-            node = knowledge_repo.get_by_id(tid)
-            topic_names[tid] = getattr(node, "name_ru", getattr(node, "name", tid)) if node else tid
-        except Exception:
-            topic_names[tid] = tid
 
     _LEVEL_RU_MAP = {
         "mastered":   "Отличное владение",
         "learning":   "Хорошее понимание",
         "struggling": "Есть затруднения",
         "gap":        "Пробел",
-        "below_grade":"Ниже уровня",
-        "at_grade":   "Уровень класса",
-        "above_grade":"Выше уровня",
     }
 
     skills = []
     counts = {"mastered": 0, "learning": 0, "struggling": 0, "gap": 0}
 
-    for topic_id, info in breakdown.items():
-        alpha = float(info.get("alpha", 0.0))
-        status = _alpha_to_status(alpha)
-        if topic_id in weak_skills:
+    for skill_id, stats in skill_stats.items():
+        outcomes = stats["outcomes"]
+        avg_outcome = sum(outcomes) / len(outcomes) if outcomes else 0.0
+
+        if skill_id in confirmed_gaps or avg_outcome < 0.5:
             status = "gap"
-        mastery = round(max(0.0, min(1.0, 0.5 + alpha / 4.0)), 4)
+            front_level = "gap"
+            mastery = round(min(0.4, avg_outcome), 4)
+        elif avg_outcome >= 0.8:
+            status = "mastered"
+            front_level = "strong"
+            mastery = round(max(0.75, avg_outcome), 4)
+        else:
+            status = "learning"
+            front_level = "medium"
+            mastery = round(avg_outcome, 4)
+
         if status in counts:
             counts[status] += 1
-        front_level = "strong" if status == "mastered" else ("medium" if status in ("learning", "struggling") else "gap")
-        name_str = topic_names.get(topic_id, topic_id)
+
+        try:
+            node = knowledge_repo.get_by_id(skill_id)
+            name_str = getattr(node, "name_ru", getattr(node, "name", skill_id)) if node else skill_id
+        except Exception:
+            name_str = skill_id
+
         skills.append({
-            "skill_id": topic_id,
+            "skill_id": skill_id,
             "skill_name": name_str,
             "name": name_str,
             "status": _LEVEL_RU_MAP.get(status, status),
@@ -138,7 +162,7 @@ def student_skill_map(
         "diagnosed_at": session.completed_at.isoformat() if session.completed_at else None,
         "total_topics": len(skills),
         **counts,
-        "skills": sorted(skills, key=lambda x: x["mastery_pct"]),
+        "skills": sorted(skills, key=lambda x: (x["level"] != "gap", x["mastery_pct"])),
     }
 
 
