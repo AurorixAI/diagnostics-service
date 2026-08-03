@@ -15,6 +15,7 @@ Stopping criteria (outside deep scan):
 from __future__ import annotations
 
 import logging
+import random
 import uuid
 from typing import List, Optional, Tuple
 
@@ -123,6 +124,57 @@ class SessionService:
             auth_client.notify_start(invite_code, str(db_session.id))
 
         return db_session.id, first_task
+
+    # ══════════════════════════════════════════════════════════════════════
+    # PUBLIC — Resume active session
+    # ══════════════════════════════════════════════════════════════════════
+
+    def get_active_session(
+        self, invite_code: str
+    ) -> Optional[Tuple[uuid.UUID, int, TaskOut]]:
+        """Return (session_id, items_answered, current_task) for an active session.
+
+        Called on page load to check if the student has an unfinished session
+        so the frontend can offer «Continue where you left off?» instead of
+        starting a new one.
+
+        Returns None when:
+          - No session found for this invite_code
+          - Session is already completed
+          - Redis state has expired (TTL elapsed) — session is unrecoverable
+        """
+        db_session = self.session_repo.get_by_invite_code(invite_code)
+        if db_session is None or db_session.phase == "completed":
+            return None
+
+        state = self.redis.load(str(db_session.id))
+        if state is None:
+            # Redis TTL expired — state is gone, cannot resume
+            return None
+
+        # Re-build current task from state
+        try:
+            task = self._current_task_from_state(state)
+        except Exception:
+            log.warning("get_active_session: could not rebuild task for %s", db_session.id)
+            return None
+
+        return db_session.id, state.items_answered, task
+
+    def _current_task_from_state(self, state: SessionState) -> TaskOut:
+        """Re-serve the current task stored in state (no DB write)."""
+        skill_id = state.current_skill_id
+        task_id = state.current_task_id
+
+        if not skill_id or not task_id:
+            raise ValueError("No current skill/task in state")
+
+        # Load the task object by ID
+        task = self.task_repo.get_by_id(task_id)
+        if task is None:
+            raise ValueError(f"Task {task_id} not found")
+
+        return self._task_to_out(task, state)
 
     # ══════════════════════════════════════════════════════════════════════
     # PUBLIC — Submit answer
@@ -246,7 +298,18 @@ class SessionService:
     # ══════════════════════════════════════════════════════════════════════
 
     def _build_topic_grid(self, state: SessionState) -> None:
-        """Build TopicNavigator per L1 section directly from knowledge_hierarchy (L2 nodes)."""
+        """Build TopicNavigator per L1 section from knowledge_hierarchy (L2 nodes).
+
+        Topics are sorted by sequence_order (curriculum / textbook order) — NOT by
+        avg IRT difficulty.  Curriculum order encodes pedagogical prerequisites:
+          T03 (Rational eq) comes before T04 (Irrational eq)
+          T05 (Exponential)  comes before T06 (Logarithmic)
+          T07 (Trig basics)  comes before T08 (Trig equations)
+
+        Binary search on curriculum-ordered topics exploits the prerequisite
+        guarantee: if a student passes a later topic they must know all earlier
+        (prerequisite) topics, so we don't need to test them separately.
+        """
         topics_l2 = self.knowledge_repo.get_by_level_and_grade("L2", state.grade_level)
         sections: dict[str, list[TopicEntry]] = {}
         for t in topics_l2:
@@ -270,7 +333,8 @@ class SessionService:
     def _pick_warmup_task(self, state: SessionState) -> TaskOut:
         """
         Pick a warmup task centered around current theta.
-        Uses mid-topic of current section → mid-subtopic → mid-skill.
+        Randomly samples from mid±1 window of subtopics and skills so
+        different students receive varied (but equally appropriate) warmup tasks.
         """
         section_id = state.section_ids[state.current_section_idx]
         nav = TopicNavigator.from_dict(state.topic_navigator_states[section_id])
@@ -282,12 +346,18 @@ class SessionService:
         if not subtopics:
             raise NoTasksAvailableError(topic.topic_id)
 
-        mid_sub = subtopics[len(subtopics) // 2]
+        # Random sample from mid ±1 window (not always the same centre)
+        mid = len(subtopics) // 2
+        sub_candidates = subtopics[max(0, mid - 1): mid + 2]
+        mid_sub = random.choice(sub_candidates)
+
         skills = self.knowledge_repo.get_skills_for_subtopic(mid_sub.id)
         if not skills:
             raise NoTasksAvailableError(mid_sub.id)
 
-        mid_skill = skills[len(skills) // 2]
+        mid = len(skills) // 2
+        skill_candidates = skills[max(0, mid - 1): mid + 2]
+        mid_skill = random.choice(skill_candidates)
 
         task = self.task_repo.get_task_by_difficulty_target(
             mid_skill.id,
@@ -370,29 +440,37 @@ class SessionService:
             next_skill = skill_nav.move(correct)
 
             if next_skill is None:
-                # Skill navigator exhausted
+                # Skill navigator exhausted — aggregate results to subtopic level
                 state.current_skill_nav = None
-                importance = sub_nav.state.topic_importance
 
-                if (
-                    not correct
-                    and importance >= settings.deep_scan_importance_threshold
-                    and skill_nav.get_failing_skill()
-                ):
-                    # Trigger deep scan
-                    state.phase = "deep_scan"
-                    state.is_in_deep_scan = True
-                    return self._init_deep_scan(state, skill_nav.get_failing_skill())
-
-                # Aggregate: skill results → subtopic score → binary direction
                 skill_score = skill_nav.subtopic_score()
                 subtopic_pass = skill_score >= settings.mastery_threshold
                 sub_nav.record_score(skill_score)
+                # move() sets boundary_subtopic_id when subtopic fails — MUST happen before
+                # needs_deep_scan() which reads boundary_subtopic_id to check importance.
                 next_sub = sub_nav.move(subtopic_pass)
                 state.current_subtopic_nav = sub_nav.to_dict()
 
+                # Check Deep Scan AFTER sub_nav.move() so boundary_subtopic_id is populated.
+                # needs_deep_scan() reads the FAILED L3 subtopic's own importance (8–10).
+                if (
+                    not subtopic_pass
+                    and sub_nav.needs_deep_scan(settings.deep_scan_importance_threshold)
+                    and skill_nav.get_failing_skill()
+                ):
+                    failing_skill = skill_nav.get_failing_skill()
+                    log.info(
+                        "Deep scan triggered for skill %s (failed subtopic %s, importance >= %d)",
+                        failing_skill,
+                        sub_nav.state.boundary_subtopic_id,
+                        settings.deep_scan_importance_threshold,
+                    )
+                    state.phase = "deep_scan"
+                    state.is_in_deep_scan = True
+                    return self._init_deep_scan(state, failing_skill)
+
                 if next_sub is None:
-                    # Aggregate: subtopic scores → topic score → topic direction
+                    # All subtopics exhausted → advance to next topic
                     topic_pass = sub_nav.topic_score() >= settings.mastery_threshold
                     return self._advance_topic(state, topic_pass)
                 return self._pick_task_from_subtopic(state, sub_nav)
@@ -418,7 +496,16 @@ class SessionService:
         return self._pick_task_from_subtopic(state, sub_nav)
 
     def _init_subtopic_nav(self, state: SessionState, topic: TopicEntry) -> Optional[TaskOut]:
-        """Create a fresh SubtopicNavigator for a topic and pick first task."""
+        """Create a fresh SubtopicNavigator for a topic and pick first task.
+
+        Subtopics are sorted by sequence_order (curriculum order) which encodes
+        pedagogical prerequisites between subtopics within a topic.
+        Binary search on curriculum-ordered subtopics exploits the same prerequisite
+        guarantee as for topics: passing a later subtopic implies mastery of earlier ones.
+
+        NOTE: L4 skills within a subtopic are sorted by irt_difficulty (in SkillNavigator)
+        because skills within one subtopic have no strict inter-prerequisite structure.
+        """
         raw_subs = self.knowledge_repo.get_subtopics_for_topic(topic.topic_id)
         subtopics = [
             SubtopicEntry(
@@ -517,36 +604,60 @@ class SessionService:
 
     def _prereq_l4_ids(self, skill_or_para_id: str) -> List[str]:
         """
-        Resolve prerequisites to a list of testable L4 skill IDs.
+        Resolve a failing L4 skill to a list of testable prerequisite L4 skill IDs.
 
-        skill_prerequisites stores L3→L3 paragraph links.
-        If we receive an L4 skill ID we first map it to its parent L3 paragraph,
-        then look up L3-level prerequisites, and finally resolve each prerequisite
-        paragraph to its middle L4 skill (sorted by sequence_order).
-        This lets the deep-scan engine stay L4-native (tasks live at L4).
+        Data model: skill_prerequisites stores L3 (paragraph) → L3 links.
+        Algorithm:
+          1. If input is L4 → map to its parent L3 paragraph via parent_id.
+          2. Look up hard prerequisites for that L3 paragraph.
+          3. For each prerequisite L3 paragraph → resolve to its middle L4 child skill.
+        This keeps the deep-scan engine purely L4-native (tasks live at L4).
         """
         node = self.knowledge_repo.get_by_id(skill_or_para_id)
         if node is None:
+            log.warning("_prereq_l4_ids: node not found for %s", skill_or_para_id)
             return []
 
-        # If L4 skill → map to parent L3 paragraph first
-        lookup_id = node.parent_id if (node.level == "L4" and node.parent_id) else skill_or_para_id
+        # L4 skill → map to parent L3 paragraph for prerequisites lookup
+        if node.level == "L4" and node.parent_id:
+            lookup_id = node.parent_id
+        else:
+            lookup_id = skill_or_para_id
 
         prereqs = self.prereq_repo.get_prerequisites(lookup_id, hard_only=True)
+        log.info(
+            "_prereq_l4_ids: skill=%s → lookup_id=%s → %d hard prereqs",
+            skill_or_para_id, lookup_id, len(prereqs),
+        )
+
         result: List[str] = []
         for p in prereqs:
             prereq_id = p.prerequisite_id
-            # prerequisite_id may be L3 (paragraph) → pick middle L4 child
+            # prerequisite_id is typically an L3 paragraph → resolve to its middle L4 child
             prereq_node = self.knowledge_repo.get_by_id(prereq_id)
             if prereq_node is None:
+                log.warning("_prereq_l4_ids: prereq node not found for %s", prereq_id)
                 continue
             if prereq_node.level == "L3":
                 children = self.knowledge_repo.get_skills_for_subtopic(prereq_id)
                 if children:
-                    result.append(children[len(children) // 2].id)
-            else:
-                # Already L4 (future-proof)
+                    # Pick middle child for representative difficulty
+                    mid_child = children[len(children) // 2]
+                    result.append(mid_child.id)
+                    log.debug(
+                        "_prereq_l4_ids: L3 %s → L4 child %s",
+                        prereq_id, mid_child.id,
+                    )
+            elif prereq_node.level == "L4":
+                # Already L4 — future-proof for direct L4 prerequisite links
                 result.append(prereq_id)
+            else:
+                log.warning(
+                    "_prereq_l4_ids: unexpected level %s for prereq %s",
+                    prereq_node.level, prereq_id,
+                )
+
+        log.info("_prereq_l4_ids: resolved %d testable L4 skills for %s", len(result), skill_or_para_id)
         return result
 
     def _init_deep_scan(
@@ -686,6 +797,7 @@ class SessionService:
                 weak_skills=state.confirmed_gaps,
                 topic_breakdown=topic_breakdown,
                 state_snapshot=state.to_dict(),
+                items_answered=state.items_answered,    # ← Fix: was 0, now correct
             )
             self.db.commit()
 
@@ -752,12 +864,18 @@ class SessionService:
 
     def _task_to_out(self, task: TaskMaster, state: SessionState) -> TaskOut:
         options, options_latex = build_diag_answer_options(task)
+        img_url = (
+            getattr(task, "question_image_url", None)
+            or getattr(task, "image_url", None)
+            or getattr(task, "figure_url", None)
+        )
         return TaskOut(
             task_id=task.id,
             skill_id=state.current_skill_id or "",
             topic_id=state.current_topic_id or "",
             question_text=task.question_text,
             question_latex=task.question_latex,
+            question_image_url=img_url,
             answer_type=diag_answer_type_for_display(task, options),
             answer_options=options,
             answer_options_latex=options_latex,
@@ -766,3 +884,4 @@ class SessionService:
             items_max=settings.max_items,
             is_deep_scan=state.is_in_deep_scan,
         )
+

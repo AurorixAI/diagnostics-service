@@ -1,18 +1,20 @@
 """
-Diagnostic Service — Alpha Engine (IRT 3PL + Partial Credit)
+Diagnostic Service — Alpha Engine (IRT 3PL)
 
 IRT 3PL model:
   P(θ) = c + (1 − c) / (1 + exp(−a·(θ − b)))
 
-Outcome scale:
+Outcome scale (binary):
   1.0 → correct answer
-  0.5 → distractor (partial credit, reveals misconception)
-  0.0 → wrong / idk
+  0.0 → wrong / distractor / idk
 
-Likelihood for partial credit:
-  correct   → L = P(θ)
-  distractor → L = sqrt(P(θ) · (1 − P(θ)))   # geometric mean
-  wrong     → L = 1 − P(θ)
+Distractor answers are scored as 0.0 (wrong) — the diagnostic value
+(which misconception was triggered) is stored in eval_category field,
+not in the IRT outcome.
+
+Likelihood:
+  correct → L = P(θ)
+  wrong   → L = 1 − P(θ)
 
 EAP theta estimation:
   61-point uniform grid over [−4, 4] with Gaussian prior.
@@ -65,16 +67,14 @@ def _p3pl(theta: float, a: float, b: float, c: float) -> float:
 
 def _likelihood(outcome: float, p: float) -> float:
     """
-    Response likelihood for 3PL with partial credit.
-      1.0 → p
-      0.5 → sqrt(p * (1 − p))
-      0.0 → 1 − p
+    Response likelihood for 3PL (binary scoring).
+      1.0 → correct  → L = P(θ)
+      0.0 → wrong    → L = 1 − P(θ)
+    Distractors are scored as 0.0 (wrong); their diagnostic value
+    is captured in eval_category, not in the IRT outcome.
     """
     if outcome == 1.0:
         return p
-    if outcome == 0.5:
-        # Partial credit: geometric mean of correct and wrong likelihoods
-        return math.sqrt(max(p * (1.0 - p), 1e-15))
     return 1.0 - p
 
 
@@ -138,7 +138,7 @@ class AlphaTracker:
     Separate from the global IRT theta — used for topic-level breakdown.
 
     Update rule:
-      delta = outcome − 0.5          # correct=+0.5, distractor=0, wrong=−0.5
+      delta = outcome − 0.5          # correct=+0.5, wrong=−0.5
       alpha_new = alpha_old + K * delta
     """
 
@@ -151,7 +151,7 @@ class AlphaTracker:
     def update(self, topic_id: str, outcome: float) -> float:
         """Update alpha for topic_id after one answer. Returns new alpha."""
         old = self._alphas.get(topic_id, 0.0)
-        delta = outcome - 0.5
+        delta = outcome - 0.5          # correct=+0.5, wrong=−0.5
         new_alpha = round(old + self.K * delta, 4)
         self._alphas[topic_id] = new_alpha
         self._counts[topic_id] = self._counts.get(topic_id, 0) + 1

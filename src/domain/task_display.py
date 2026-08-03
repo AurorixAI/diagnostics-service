@@ -48,6 +48,26 @@ def _latex_for_value(task: Any, value: str) -> str:
     return ""
 
 
+def _extract_option_text(x: Any) -> str:
+    """Safely extract display text from an option.
+
+    answer_options rows can be stored in multiple formats:
+      - plain string:  "x > 0"
+      - dict:          {'text': 'x > 0', 'is_correct': True}
+      - nested dict:   {'value': 'x > 0'}
+
+    Using str() on a dict produces "{'text': '...', 'is_correct': True}"
+    which breaks both display and IRT scoring (student_answer mismatch).
+    """
+    if isinstance(x, dict):
+        for key in ("text", "value", "content"):
+            v = x.get(key)
+            if v is not None:
+                return str(v).strip()
+        return ""
+    return str(x).strip()
+
+
 def build_diag_answer_options(task: Any) -> tuple[Optional[list[str]], Optional[list[str]]]:
     """
     Build shuffled MCQ options (+ parallel LaTeX) for diagnostic presentation.
@@ -55,7 +75,7 @@ def build_diag_answer_options(task: Any) -> tuple[Optional[list[str]], Optional[
     """
     existing = getattr(task, "answer_options", None)
     if isinstance(existing, list) and len(existing) >= 2:
-        opts = [str(x) for x in existing]
+        opts = [_extract_option_text(x) for x in existing]
         latex = [_latex_for_value(task, o) for o in opts]
         return opts, latex
 

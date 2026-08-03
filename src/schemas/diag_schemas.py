@@ -30,6 +30,7 @@ class TaskOut(BaseModel):
     topic_id: str
     question_text: str
     question_latex: Optional[str] = None
+    question_image_url: Optional[str] = None
     answer_type: str
     answer_options: Optional[List[Any]] = None
     answer_options_latex: Optional[List[str]] = None
@@ -40,9 +41,10 @@ class TaskOut(BaseModel):
     is_deep_scan: bool = False
 
 
+
 class AnswerResult(BaseModel):
     is_correct: bool
-    outcome: float          # 0.0 | 0.5 | 1.0
+    outcome: float          # 0.0 (wrong/distractor/idk) | 1.0 (correct)
     eval_category: str      # correct | distractor | wrong | idk
     theta: float
     se: float
@@ -55,6 +57,13 @@ class AnswerResult(BaseModel):
 class CreateSessionResponse(BaseModel):
     session_id: uuid.UUID
     first_task: TaskOut
+
+
+class ActiveSessionResponse(BaseModel):
+    """Returned when an unfinished session exists for an invite_code."""
+    session_id: uuid.UUID
+    items_answered: int
+    current_task: TaskOut
 
 
 # ── Report ────────────────────────────────────────────────────────────────

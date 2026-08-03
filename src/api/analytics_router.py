@@ -99,6 +99,16 @@ def student_skill_map(
         except Exception:
             topic_names[tid] = tid
 
+    _LEVEL_RU_MAP = {
+        "mastered":   "Отличное владение",
+        "learning":   "Хорошее понимание",
+        "struggling": "Есть затруднения",
+        "gap":        "Пробел",
+        "below_grade":"Ниже уровня",
+        "at_grade":   "Уровень класса",
+        "above_grade":"Выше уровня",
+    }
+
     skills = []
     counts = {"mastered": 0, "learning": 0, "struggling": 0, "gap": 0}
 
@@ -112,20 +122,11 @@ def student_skill_map(
             counts[status] += 1
         skills.append({
             "name": topic_names.get(topic_id, topic_id),
-            "status": _LEVEL_RU.get(status, status),
+            "status": _LEVEL_RU_MAP.get(status, status),
             "mastery_pct": round(mastery * 100, 1),
             "level": info.get("level", "unknown"),
         })
 
-    _LEVEL_RU_MAP = {
-        "mastered":   "Отличное владение",
-        "learning":   "Хорошее понимание",
-        "struggling": "Есть затруднения",
-        "gap":        "Пробел",
-        "below_grade":"Ниже уровня",
-        "at_grade":   "Уровень класса",
-        "above_grade":"Выше уровня",
-    }
     return {
         "grade_level": session.grade_level,
         "overall_level": _LEVEL_RU_MAP.get(session.overall_level or "", session.overall_level),
@@ -192,7 +193,7 @@ def student_report(
     student_id: str,
     db: Session = Depends(get_db),
 ):
-    """Последний diag_report ученика."""
+    """Последний diag_report ученика + данные из DiagSession."""
     report = (
         db.query(DiagReport)
         .filter(DiagReport.student_id == student_id)
@@ -200,35 +201,91 @@ def student_report(
         .first()
     )
 
-    if not report:
+    # Latest completed session — needed for theta, accuracy, topic_breakdown
+    session = (
+        db.query(DiagSession)
+        .filter(
+            DiagSession.student_id == student_id,
+            DiagSession.phase == "completed",
+        )
+        .order_by(desc(DiagSession.completed_at))
+        .first()
+    )
+
+    if not report and not session:
         return {"report": None}
 
-    # Резолвим имена слабых навыков
+    # Resolve human-readable names for weak skills
     knowledge_repo = KnowledgeRepository()
-    weak_names = []
-    for sid in (report.weak_skills or []):
+    weak_skill_ids: list = (report.weak_skills if report else None) or (session.weak_skills if session else None) or []
+    weak_names: list[str] = []
+    skill_names: dict[str, str] = {}
+    for sid in weak_skill_ids:
         try:
             node = knowledge_repo.get_by_id(sid)
-            weak_names.append(node.name if node and hasattr(node, "name") else sid)
+            name = node.name if node and hasattr(node, "name") else sid
         except Exception:
-            weak_names.append(sid)
+            name = sid
+        weak_names.append(name)
+        skill_names[sid] = name
 
     _LEVEL_RU_MAP = {
-        "mastered":   "Отличное владение",
-        "learning":   "Хорошее понимание",
-        "struggling": "Есть затруднения",
-        "gap":        "Пробел в знаниях",
-        "below_grade":"Ниже уровня класса",
-        "at_grade":   "Соответствует программе",
-        "above_grade":"Выше уровня класса",
+        "mastered":    "Отличное владение",
+        "learning":    "Хорошее понимание",
+        "struggling":  "Есть затруднения",
+        "gap":         "Пробел в знаниях",
+        "below_grade": "Ниже уровня класса",
+        "at_grade":    "Соответствует программе",
+        "above_grade": "Выше уровня класса",
     }
 
+    # Build confidence interval from theta_se if available
+    theta_val = float(session.theta) if session and session.theta is not None else None
+    theta_se = float(session.theta_se) if session and session.theta_se is not None else 0.5
+    confidence_interval = (
+        [round(theta_val - 1.96 * theta_se, 3), round(theta_val + 1.96 * theta_se, 3)]
+        if theta_val is not None
+        else None
+    )
+
+    # Calculate accuracy and correct count from diag_answers
+    accuracy_val = None
+    correct_count = 0
+    if session:
+        ans_stats = (
+            db.query(
+                func.count(DiagAnswer.id).label("total"),
+                func.sum(DiagAnswer.outcome).label("correct")
+            )
+            .filter(DiagAnswer.session_id == session.id)
+            .first()
+        )
+        if ans_stats and ans_stats.total and ans_stats.total > 0:
+            correct_count = int(ans_stats.correct or 0)
+            accuracy_val = round(float(correct_count) / float(ans_stats.total), 4)
+
+    overall_level_key = (report.overall_level if report else None) or (session.overall_level if session else None)
+
     return {
-        "grade_level": report.grade_level,
-        "overall_level": _LEVEL_RU_MAP.get(report.overall_level or "", report.overall_level),
-        "weak_topics": weak_names,
-        "narrative_ru": report.narrative_ru,
-        "generated_at": report.generated_at.isoformat() if report.generated_at else None,
+        # Core report fields
+        "grade_level":    (report.grade_level if report else None) or (session.grade_level if session else None),
+        "overall_level":  _LEVEL_RU_MAP.get(overall_level_key or "", overall_level_key),
+        "narrative_ru":   report.narrative_ru if report else None,
+        "generated_at":   report.generated_at.isoformat() if report and report.generated_at else None,
+        # IRT fields (from DiagSession)
+        "overall_theta":  theta_val,
+        "accuracy":       accuracy_val,
+        "confidence_interval": confidence_interval,
+        "items_total":    session.items_answered if session else None,
+        "correct_answers": correct_count,
+        # Topic breakdown — {topic_id: {alpha, level, ...}}
+        "topic_breakdown": session.topic_breakdown if session else {},
+        # Weak skills
+        "weak_topics":   weak_names,           # human-readable list
+        "weak_skills":   weak_skill_ids,        # raw IDs (for frontend mapping)
+        "skill_names":   skill_names,           # id → name map
+        # Distractor errors (not yet populated per-report — empty list safe default)
+        "distractor_errors": [],
     }
 
 

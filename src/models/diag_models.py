@@ -85,7 +85,7 @@ class DiagAnswer(Base):
     time_ms = Column(Integer, nullable=True)
 
     # Evaluation
-    outcome = Column(Numeric(3, 1), nullable=False)  # 0.0 | 0.5 | 1.0
+    outcome = Column(Numeric(3, 1), nullable=False)  # 0.0 (wrong/distractor/idk) | 1.0 (correct)
     eval_category = Column(String(20))               # correct | distractor | wrong | idk
     ai_evaluated = Column(Boolean, default=False)
 

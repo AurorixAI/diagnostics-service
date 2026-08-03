@@ -57,6 +57,7 @@ class DiagSessionRepository(BaseRepository[DiagSession]):
         weak_skills: list,
         topic_breakdown: dict,
         state_snapshot: dict,
+        items_answered: int = 0,
     ) -> DiagSession:
         session.phase = "completed"
         session.theta = theta
@@ -65,6 +66,7 @@ class DiagSessionRepository(BaseRepository[DiagSession]):
         session.weak_skills = weak_skills
         session.topic_breakdown = topic_breakdown
         session.state_snapshot = state_snapshot
+        session.items_answered = items_answered          # ← was missing, always 0
         session.completed_at = datetime.utcnow()
         self.session.flush()
         return session

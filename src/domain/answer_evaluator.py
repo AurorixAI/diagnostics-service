@@ -159,16 +159,26 @@ class AnswerEvaluator:
     def evaluate(self, task, student_answer: str) -> Tuple[float, str]:
         """
         Returns (outcome, category):
-          outcome   — 0.0 | 0.5 | 1.0
+          outcome   — 0.0 | 1.0
           category  — correct | distractor | wrong | idk
+
+        Outcome mapping:
+          correct    → 1.0  — student solved the problem correctly
+          distractor → 0.0  — student chose a known misconception answer (wrong, no credit)
+          wrong      → 0.0  — any other incorrect answer
+          idk        → 0.0  — student explicitly skipped
+
+        NOTE: Distractors are wrong answers. The diagnostic value is captured in
+        eval_category="distractor" so that AI reports and analytics can identify
+        WHICH specific misconception the student triggered — but the IRT outcome
+        is 0.0 (incorrect) to avoid inflating theta with wrong answers.
 
         MCQ:          Layer 1 → distractor → idk → wrong
         Open/numeric: Layer 1 → numeric → SymPy → distractor → idk → wrong
 
-        Distractors exist in both types:
+        Distractors exist in both answer types:
           MCQ  — wrong answer options shown to student (distractor_meta has their misconceptions)
           Open — hidden; caught when student types a known misconception value
-        In both cases a distractor hit gives outcome=0.5 and records the misconception.
         """
         correct = str(task.correct_answer).strip()
         given = student_answer.strip()
@@ -197,8 +207,8 @@ class AnswerEvaluator:
                     return 1.0, "correct"
 
         # ── Layer 4: Distractor check (MCQ and open) ─────────────────────
-        # MCQ:  student picked a wrong option — check if it's a known distractor
-        # Open: student typed a known misconception value
+        # Records the specific misconception for analytics/AI report.
+        # outcome=0.0 because a distractor hit is a wrong answer — no IRT credit.
         if task.distractor_meta and isinstance(task.distractor_meta, list):
             distractor_values = {
                 str(d.get("value", "")).strip().lower()
@@ -206,7 +216,7 @@ class AnswerEvaluator:
                 if isinstance(d, dict)
             }
             if given.lower() in distractor_values:
-                return 0.5, "distractor"
+                return 0.0, "distractor"   # ← was 0.5; distractor = wrong answer
 
         # ── Layer 5: IDK / explicit skip ──────────────────────────────────
         if given.lower() in _IDK_TOKENS:

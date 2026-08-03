@@ -1,5 +1,4 @@
-"""
-Diagnostic Service — Read-only repositories for knowledge / task data.
+"""Diagnostic Service — Read-only repositories for knowledge / task data.
 
 Previously these classes held a SQLAlchemy Session and queried content-db
 directly.  Now they call the content-service HTTP read API so that each
@@ -10,12 +9,18 @@ need to know about the transport switch.
 """
 from __future__ import annotations
 
+import random
 import types
 from typing import List, Optional
 
 from src.clients import content_client
 
 BASE = "/api/v1/content"
+
+# Maximum additional IRT b-param distance allowed beyond the closest match.
+# Keeps pool tight: tasks in pool differ by at most 0.1 from the best-matching task.
+# Wider values (e.g. 0.5) incorrectly mix tasks of very different difficulty levels.
+_IRT_TOLERANCE = 0.1
 
 
 def _ns(d: dict) -> types.SimpleNamespace:
@@ -103,16 +108,27 @@ class TaskRepository:
         *,
         exclude_ids: Optional[List[str]] = None,
     ) -> Optional[types.SimpleNamespace]:
-        """Fetch up to 20 IRT-sorted candidates and pick closest to target_b."""
+        """Fetch up to 20 IRT-sorted candidates and randomly pick one from those
+        closest to target_b (within _IRT_TOLERANCE band).
+
+        Using random.choice instead of min() ensures that students with the same
+        theta receive different task variants from the pool — critical for fairness
+        when many tasks share the same irt_difficulty value.
+        """
         candidates = self.get_tasks_for_skill(
             skill_id, exclude_ids=exclude_ids, limit=20
         )
         if not candidates:
             return None
-        return min(
-            candidates,
-            key=lambda t: abs(float(getattr(t, "irt_difficulty", 0) or 0) - target_b),
-        )
+
+        # Find the closest difficulty to target
+        best_dist = min(abs(float(getattr(t, "irt_difficulty", 0) or 0) - target_b) for t in candidates)
+        # Build pool of all candidates within tolerance of the best
+        pool = [
+            t for t in candidates
+            if abs(float(getattr(t, "irt_difficulty", 0) or 0) - target_b) <= best_dist + _IRT_TOLERANCE
+        ]
+        return random.choice(pool)
 
     def get_avg_difficulty_for_skills(
         self, skill_ids: List[str]
