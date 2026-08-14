@@ -4,6 +4,9 @@ from __future__ import annotations
 import random
 from typing import Any, Optional
 
+from .proof_answer import extract_proof_expression, format_proof_answer, is_proof_placeholder
+from .answer_value import answer_value_key
+
 # Types that never get auto-built MCQ (no meaningful button choices).
 _DIAG_ALWAYS_OPEN_TYPES = frozenset({
     "open_text",
@@ -17,10 +20,18 @@ def _distractor_values(task: Any) -> list[str]:
     out: list[str] = []
     for d in dm:
         if isinstance(d, dict):
-            v = str(d.get("value", "")).strip()
+            # `text` is a legacy canonical shape. Read it at the API boundary
+            # without mutating the stored task or inventing a new answer.
+            v = str(d.get("value") or d.get("text") or d.get("content") or "").strip()
             if v:
                 out.append(v)
     return out
+
+
+def _has_stored_options(task: Any) -> bool:
+    """True when an author supplied a complete-enough UI option list."""
+    existing = getattr(task, "answer_options", None)
+    return isinstance(existing, list) and len(existing) >= 2
 
 
 def should_show_diag_mcq(task: Any) -> bool:
@@ -29,22 +40,35 @@ def should_show_diag_mcq(task: Any) -> bool:
     if at in _DIAG_ALWAYS_OPEN_TYPES:
         return False
 
-    existing = getattr(task, "answer_options", None)
-    if isinstance(existing, list) and len(existing) >= 2:
+    # An author-supplied option list is the exact UI source. distractor_meta
+    # enriches matching wrong choices with error logic, but never replaces an
+    # independently authored list.
+    if _has_stored_options(task):
         return True
-
     return len(_distractor_values(task)) >= 2
 
 
 def _latex_for_value(task: Any, value: str) -> str:
     correct = str(getattr(task, "correct_answer", "") or "").strip()
-    if value == correct:
+    if answer_value_key(value) == answer_value_key(correct):
         return str(getattr(task, "correct_answer_latex", "") or "").strip()
     for d in getattr(task, "distractor_meta", None) or []:
         if not isinstance(d, dict):
             continue
-        if str(d.get("value", "")).strip() == value:
-            return str(d.get("value_latex", "") or "").strip()
+        canonical = str(d.get("value") or d.get("text") or d.get("content") or "").strip()
+        if answer_value_key(canonical) == answer_value_key(value):
+            return str(d.get("value_latex") or d.get("text_latex") or d.get("content_latex") or "").strip()
+    return ""
+
+
+def _extract_option_latex(x: Any) -> str:
+    """Return an explicitly stored display representation, if present."""
+    if not isinstance(x, dict):
+        return ""
+    for key in ("latex", "value_latex", "content_latex", "text_latex"):
+        value = x.get(key)
+        if value:
+            return str(value).strip()
     return ""
 
 
@@ -67,41 +91,50 @@ def _extract_option_text(x: Any) -> str:
         return ""
     return str(x).strip()
 
+def _clean_correct_answer(task: Any) -> str:
+    ca = str(getattr(task, "correct_answer", "") or "").strip()
+    if is_proof_placeholder(ca):
+        return format_proof_answer(str(getattr(task, "question_text", "") or ""))
+    return ca
+
 
 def build_diag_answer_options(task: Any) -> tuple[Optional[list[str]], Optional[list[str]]]:
     """
     Build shuffled MCQ options (+ parallel LaTeX) for diagnostic presentation.
     Returns (None, None) when task should use open input.
     """
+    correct = _clean_correct_answer(task)
+    distractors = _distractor_values(task)
     existing = getattr(task, "answer_options", None)
-    if isinstance(existing, list) and len(existing) >= 2:
+    if _has_stored_options(task) and isinstance(existing, list):
         opts = [_extract_option_text(x) for x in existing]
-        latex = [_latex_for_value(task, o) for o in opts]
+        stored_latex = getattr(task, "answer_options_latex", None)
+        latex = [
+            (str(stored_latex[index]).strip() if isinstance(stored_latex, list) and index < len(stored_latex) and stored_latex[index] else "")
+            or _extract_option_latex(option)
+            or _latex_for_value(task, value)
+            for index, (option, value) in enumerate(zip(existing, opts))
+        ]
+        correct_key = answer_value_key(correct)
+        if correct and correct_key and not any(answer_value_key(option) == correct_key for option in opts):
+            opts.append(correct)
+            latex.append(_latex_for_value(task, correct) or correct)
         return opts, latex
 
-    if not should_show_diag_mcq(task):
-        return None, None
+    if correct and len(distractors) >= 2:
+        seen: set[str] = set()
+        opts: list[str] = []
+        for value in [correct, *distractors]:
+            key = answer_value_key(value)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            opts.append(value)
+        shuffled = list(opts)
+        random.shuffle(shuffled)
+        return shuffled, [_latex_for_value(task, value) for value in shuffled]
 
-    correct = str(getattr(task, "correct_answer", "") or "").strip()
-    if not correct:
-        return None, None
-
-    seen: set[str] = set()
-    opts: list[str] = []
-    for v in [correct, *_distractor_values(task)]:
-        key = v.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        opts.append(v)
-
-    if len(opts) < 2:
-        return None, None
-
-    shuffled = list(opts)
-    random.shuffle(shuffled)
-    latex = [_latex_for_value(task, o) for o in shuffled]
-    return shuffled, latex
+    return None, None
 
 
 def diag_answer_type_for_display(task: Any, options: Optional[list[str]]) -> str:

@@ -35,6 +35,8 @@ from sympy.parsing.sympy_parser import (
     implicit_multiplication_application,
 )
 
+from .answer_value import answer_value_key
+
 log = logging.getLogger(__name__)
 
 _SYMPY_TRANSFORMATIONS = standard_transformations + (implicit_multiplication_application,)
@@ -184,7 +186,7 @@ class AnswerEvaluator:
         given = student_answer.strip()
 
         # ── Layer 1: Exact match (case-insensitive) ───────────────────────
-        if given.lower() == correct.lower():
+        if answer_value_key(given) == answer_value_key(correct):
             return 1.0, "correct"
 
         # ── Open/numeric only: numeric normalization + SymPy ─────────────
@@ -211,11 +213,13 @@ class AnswerEvaluator:
         # outcome=0.0 because a distractor hit is a wrong answer — no IRT credit.
         if task.distractor_meta and isinstance(task.distractor_meta, list):
             distractor_values = {
-                str(d.get("value", "")).strip().lower()
+                key
                 for d in task.distractor_meta
                 if isinstance(d, dict)
+                for key in [answer_value_key(d.get("value") or d.get("text") or d.get("content"))]
+                if key
             }
-            if given.lower() in distractor_values:
+            if answer_value_key(given) in distractor_values:
                 return 0.0, "distractor"   # ← was 0.5; distractor = wrong answer
 
         # ── Layer 5: IDK / explicit skip ──────────────────────────────────

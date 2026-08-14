@@ -132,8 +132,9 @@ class DiagReport(Base):
     weak_skills = Column(JSONB)       # [skill_id, ...]
     recommended_start = Column(String(30))  # skill_id to start from
 
-    # LLM narrative
-    narrative_ru = Column(Text)
+    # LLM narrative — structured JSON (new) + text fallback (legacy)
+    report_json = Column(JSONB)                         # structured 8-block JSON
+    narrative_ru = Column(Text)                         # legacy text (kept for compat)
     narrative_generated = Column(Boolean, default=False)
 
     # PDF

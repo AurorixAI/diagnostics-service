@@ -44,6 +44,7 @@ from src.models.diag_models import DiagSession
 from src.models.knowledge import TaskMaster
 from src.repositories.diag_repo import (
     DiagAnswerRepository,
+    DiagReportRepository,
     DiagSessionRepository,
 )
 from src.repositories.knowledge_repo import (
@@ -66,6 +67,7 @@ class SessionService:
         self.db = db
         self.session_repo = DiagSessionRepository(db)
         self.answer_repo = DiagAnswerRepository(db)
+        self.report_repo = DiagReportRepository(db)
         # Knowledge/tasks come from content-service HTTP API (read-only)
         self.knowledge_repo = KnowledgeRepository()
         self.prereq_repo = SkillPrerequisiteRepository()
@@ -278,6 +280,15 @@ class SessionService:
         answers = self.answer_repo.get_session_answers(session_id)
         theta = float(db_session.theta or 0)
         se = float(db_session.theta_se or 1)
+
+        # Pull full report_json (including error_patterns) from diag_reports
+        report = self.report_repo.get_by_session(session_id)
+        report_json: dict = {}
+        error_patterns: list = []
+        if report and report.report_json and isinstance(report.report_json, dict):
+            report_json = report.report_json
+            error_patterns = report_json.get("error_patterns", [])
+
         return {
             "session_id": str(session_id),
             "student_id": str(db_session.student_id),
@@ -291,6 +302,11 @@ class SessionService:
                 db_session.weak_skills[0] if db_session.weak_skills else None
             ),
             "items_total": len(answers),
+            # Unified journal: error_patterns + full report_json
+            "error_patterns": error_patterns,
+            "report_json": report_json,
+            # Explicit flag so frontend knows full report is available
+            "has_full_report": bool(report_json),
         }
 
     # ══════════════════════════════════════════════════════════════════════
@@ -333,49 +349,86 @@ class SessionService:
     def _pick_warmup_task(self, state: SessionState) -> TaskOut:
         """
         Pick a warmup task centered around current theta.
-        Randomly samples from mid±1 window of subtopics and skills so
-        different students receive varied (but equally appropriate) warmup tasks.
+        Distributes warmup items across DIFFERENT topics in the section so that
+        the 3 warmup questions establish a broad multi-domain baseline.
         """
         section_id = state.section_ids[state.current_section_idx]
         nav = TopicNavigator.from_dict(state.topic_navigator_states[section_id])
-        topic = nav.peek_current()
-        if topic is None:
+        topics = nav.state.topics
+        if not topics:
             raise GradeNotConfiguredError(state.grade_level)
+
+        # Distribute warmup questions across distinct topics (0, 1, 2)
+        topic_idx = state.items_answered % len(topics)
+        topic = topics[topic_idx]
 
         subtopics = self.knowledge_repo.get_subtopics_for_topic(topic.topic_id)
         if not subtopics:
+            # Fallback to current nav topic if selected topic has no subtopics
+            topic = nav.peek_current() or topics[0]
+            subtopics = self.knowledge_repo.get_subtopics_for_topic(topic.topic_id)
+
+        if not subtopics:
             raise NoTasksAvailableError(topic.topic_id)
 
-        # Random sample from mid ±1 window (not always the same centre)
         mid = len(subtopics) // 2
         sub_candidates = subtopics[max(0, mid - 1): mid + 2]
-        mid_sub = random.choice(sub_candidates)
+        random.shuffle(sub_candidates)
 
-        skills = self.knowledge_repo.get_skills_for_subtopic(mid_sub.id)
-        if not skills:
-            raise NoTasksAvailableError(mid_sub.id)
+        task = None
+        selected_skill_id = None
+        selected_sub_id = None
 
-        mid = len(skills) // 2
-        skill_candidates = skills[max(0, mid - 1): mid + 2]
-        mid_skill = random.choice(skill_candidates)
+        # 1. Search subtopic candidates for unused tasks matching current theta
+        for sub in sub_candidates:
+            skills = self.knowledge_repo.get_skills_for_subtopic(sub.id)
+            if not skills:
+                continue
+            skills_shuffled = list(skills)
+            random.shuffle(skills_shuffled)
+            for sk in skills_shuffled:
+                t = self.task_repo.get_task_by_difficulty_target(
+                    sk.id, target_b=state.theta.theta, exclude_ids=state.used_task_ids
+                )
+                if t is None:
+                    ts = self.task_repo.get_tasks_for_skill(
+                        sk.id, exclude_ids=state.used_task_ids, limit=1
+                    )
+                    if ts:
+                        t = ts[0]
+                if t is not None:
+                    task = t
+                    selected_skill_id = sk.id
+                    selected_sub_id = sub.id
+                    break
+            if task is not None:
+                break
 
-        task = self.task_repo.get_task_by_difficulty_target(
-            mid_skill.id,
-            target_b=state.theta.theta,
-            exclude_ids=state.used_task_ids,
-        )
+        # 2. Fallback: search all subtopics in topic
         if task is None:
-            tasks = self.task_repo.get_tasks_for_skill(
-                mid_skill.id, exclude_ids=state.used_task_ids, limit=1
-            )
-            if not tasks:
-                raise NoTasksAvailableError(mid_skill.id)
-            task = tasks[0]
+            for sub in subtopics:
+                skills = self.knowledge_repo.get_skills_for_subtopic(sub.id)
+                for sk in skills:
+                    ts = self.task_repo.get_tasks_for_skill(
+                        sk.id, exclude_ids=state.used_task_ids, limit=1
+                    )
+                    if not ts:
+                        ts = self.task_repo.get_tasks_for_skill(sk.id, limit=1)
+                    if ts:
+                        task = ts[0]
+                        selected_skill_id = sk.id
+                        selected_sub_id = sub.id
+                        break
+                if task is not None:
+                    break
+
+        if task is None:
+            raise NoTasksAvailableError(topic.topic_id)
 
         state.current_task_id = task.id
-        state.current_skill_id = mid_skill.id
+        state.current_skill_id = selected_skill_id
         state.current_topic_id = topic.topic_id
-        state.current_subtopic_id = mid_sub.id
+        state.current_subtopic_id = selected_sub_id
 
         return self._task_to_out(task, state)
 
@@ -384,10 +437,10 @@ class SessionService:
     # ── Stopping criteria ─────────────────────────────────────────────────
 
     def _should_stop(self, state: SessionState) -> bool:
-        if state.is_in_deep_scan:
-            return False
         if state.items_answered >= settings.max_items:
             return True
+        if state.is_in_deep_scan:
+            return False
         if state.theta.se <= settings.se_threshold:
             return True
         return False
@@ -762,6 +815,11 @@ class SessionService:
                 skill_id, exclude_ids=state.used_task_ids, limit=1
             )
             if not tasks:
+                # Retry without exclude_ids so we don't return None/stall if skill has tasks
+                tasks = self.task_repo.get_tasks_for_skill(
+                    skill_id, exclude_ids=None, limit=1
+                )
+            if not tasks:
                 log.warning("No tasks for skill %s — skipping", skill_id)
                 return None
             task = tasks[0]
@@ -811,30 +869,48 @@ class SessionService:
             len(state.confirmed_gaps),
         )
 
-        # Generate diagnostic report with Gemini narrative (fire-and-forget)
-        # Uses a fresh DB session to isolate from the main transaction —
-        # report failure must never roll back the completed session.
+        # Generate diagnostic report with Gemini narrative in background thread
+        # Fire-and-forget: does not block answer submission HTTP response.
         if db_session:
-            try:
-                from src.core.database import SessionLocal
-                report_db = SessionLocal()
+            import threading
+
+            def _bg_generate_report(sid_str: str, st_id: uuid.UUID, g_lvl: int, th: float, th_se: float, ov_lvl: str, t_bd: dict, w_sk: list, items_tot: int):
                 try:
-                    generate_and_save_report(
-                        report_db,
-                        session_id=uuid.UUID(state.session_id),
-                        student_id=db_session.student_id,
-                        grade_level=db_session.grade_level,
-                        theta=state.theta.theta,
-                        theta_se=state.theta.se,
-                        overall_level=overall_level,
-                        topic_breakdown=topic_breakdown,
-                        weak_skills=state.confirmed_gaps,
-                        items_total=state.items_answered,
-                    )
-                finally:
-                    report_db.close()
-            except Exception as exc:
-                log.warning("Report generation skipped (session safe): %s", exc)
+                    from src.core.database import SessionLocal
+                    report_db = SessionLocal()
+                    try:
+                        generate_and_save_report(
+                            report_db,
+                            session_id=uuid.UUID(sid_str),
+                            student_id=st_id,
+                            grade_level=g_lvl,
+                            theta=th,
+                            theta_se=th_se,
+                            overall_level=ov_lvl,
+                            topic_breakdown=t_bd,
+                            weak_skills=w_sk,
+                            items_total=items_tot,
+                        )
+                    finally:
+                        report_db.close()
+                except Exception as exc:
+                    log.warning("Report generation skipped (session safe): %s", exc)
+
+            threading.Thread(
+                target=_bg_generate_report,
+                args=(
+                    state.session_id,
+                    db_session.student_id,
+                    db_session.grade_level,
+                    state.theta.theta,
+                    state.theta.se,
+                    overall_level,
+                    topic_breakdown,
+                    state.confirmed_gaps,
+                    state.items_answered,
+                ),
+                daemon=True,
+            ).start()
 
         # Notify monolith: invite → completed + save StudentDiagnosticResult
         invite_code = getattr(db_session, "invite_code", None)

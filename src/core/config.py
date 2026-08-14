@@ -32,10 +32,15 @@ class Settings(BaseSettings):
     redis_session_ttl: int = 7200   # 2 hours
     redis_task_cache_ttl: int = 600  # 10 minutes
 
-    # Gemini AI (stubbed in Phase 1)
+    # Gemini AI
     gemini_api_key: str = ""
     gemini_model_eval: str = "gemini-2.0-flash"
     gemini_model_report: str = "gemini-2.0-flash"
+
+    # Azure OpenAI / DeepSeek API
+    azure_deepseek_api_key: str = "ArSjteP5YKOUBTQRyB0fb1hXBgq2Sui96wZmoAou7eiHOdSPa0JHJQQJ99CFACYeBjFXJ3w3AAAAACOGxVOz"
+    azure_deepseek_endpoint: str = "https://arslan15114.services.ai.azure.com/openai/v1/chat/completions"
+    azure_deepseek_model: str = "deepseek-v4-flash"
 
     # Algorithm parameters
     warmup_items: int = 3
