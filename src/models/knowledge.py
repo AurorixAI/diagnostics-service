@@ -106,4 +106,5 @@ class TaskMaster(Base):
     irt_difficulty = Column(Numeric(6, 4), default=0.0)            # b param
     irt_guessing = Column(Numeric(6, 4), default=0.0)              # c param
     distractor_meta = Column(JSONB)  # [{value, misconception}, ...]
+    question_image_url = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True)

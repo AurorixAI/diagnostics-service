@@ -4,10 +4,10 @@ from src.domain.answer_evaluator import AnswerEvaluator
 from src.domain.answer_value import answer_value_key
 
 
-def test_answer_value_key_removes_only_outer_math_delimiters():
+def test_answer_value_key_normalizes_display_equivalent_math_values():
     assert answer_value_key(" $88779$ ") == "88779"
-    assert answer_value_key("$$ x + 1 $$") == "x + 1"
-    assert answer_value_key(r"\dfrac{1}{2}") == r"\dfrac{1}{2}"
+    assert answer_value_key("$$ x + 1 $$") == "x+1"
+    assert answer_value_key(r"\dfrac{1}{2}") == r"\frac{1}{2}"
 
 
 def test_mcq_display_wrapped_distractor_is_recorded_as_distractor():

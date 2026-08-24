@@ -4,7 +4,10 @@ FastAPI application entry point. Port 8002.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+from contextlib import suppress
 from contextlib import asynccontextmanager
 
 import sqlalchemy
@@ -31,21 +34,44 @@ async def lifespan(app: FastAPI):
         settings.app_version,
         settings.app_env,
     )
-    try:
-        import subprocess
-        target = "head" if settings.standalone else "001_diag_tables"
-        result = subprocess.run(
-            ["alembic", "upgrade", target],
-            capture_output=True, text=True, check=True
-        )
-        log.info("Alembic migrations applied (target=%s):\n%s", target, result.stdout)
-    except subprocess.CalledProcessError as exc:
-        log.error("Alembic migration FAILED:\n%s\n%s", exc.stdout, exc.stderr)
-    except Exception as exc:
-        log.warning("Alembic migration skipped: %s", exc)
+    # Docker starts migration_runner before it launches any Uvicorn worker.
+    # Keep the switch for direct local ``uvicorn`` development only.
+    if os.getenv("RUN_MIGRATIONS_IN_LIFESPAN", "true").lower() == "true":
+        try:
+            from src.core.migration_runner import main as migrate
+            await asyncio.to_thread(migrate)
+        except Exception:
+            log.exception("Alembic migration failed during startup")
+            raise
 
+    # The database table is the report queue.  A durable worker loop makes a
+    # report request survive a web-process restart; each job is row-locked in
+    # ``process_next_report_job`` so multiple replicas remain safe.
+    from src.domain.auth_sync_jobs import process_next_auth_completion_sync
+    from src.domain.report_jobs import process_next_report_job
+
+    stop_report_worker = asyncio.Event()
+
+    async def report_worker() -> None:
+        while not stop_report_worker.is_set():
+            did_report_work = await asyncio.to_thread(process_next_report_job)
+            did_sync_work = await asyncio.to_thread(process_next_auth_completion_sync)
+            did_work = did_report_work or did_sync_work
+            try:
+                await asyncio.wait_for(
+                    stop_report_worker.wait(),
+                    timeout=0.2 if did_work else 2.0,
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    worker_task = asyncio.create_task(report_worker(), name="diagnostic-report-worker")
     yield
 
+    stop_report_worker.set()
+    worker_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await worker_task
     log.info("Diagnostic Service shutting down")
 
 

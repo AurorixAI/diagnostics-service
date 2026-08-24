@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from typing import Optional
 
 import redis
@@ -17,6 +18,7 @@ import redis
 from src.core.config import get_settings
 from src.core.redis_client import get_redis_client
 from src.domain.session_state import SessionState
+from src.core.exceptions import AnswerInProgressError
 
 log = logging.getLogger(__name__)
 
@@ -64,3 +66,29 @@ class RedisStateManager:
             self._redis.delete(self._key(session_id))
         except Exception as exc:
             log.warning("Redis delete failed for session %s: %s", session_id, exc)
+
+    @contextmanager
+    def answer_lock(self, session_id: str):
+        """Serialize answer submissions for one session.
+
+        State lives in Redis.  Without a short per-session lock two browser
+        requests can read the same state, both update theta, and both append an
+        answer row.  The lock covers the full read/evaluate/persist transition.
+        """
+        lock = self._redis.lock(
+            f"{self._key(session_id)}:answer-lock",
+            timeout=30,
+            blocking_timeout=0,
+        )
+        acquired = False
+        try:
+            acquired = bool(lock.acquire(blocking=False))
+            if not acquired:
+                raise AnswerInProgressError(session_id)
+            yield
+        finally:
+            if acquired:
+                try:
+                    lock.release()
+                except Exception as exc:
+                    log.warning("Redis answer lock release failed for %s: %s", session_id, exc)

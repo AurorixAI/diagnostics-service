@@ -19,11 +19,19 @@ import random
 import uuid
 from typing import List, Optional, Tuple
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.core.config import get_settings
-from src.core.exceptions import GradeNotConfiguredError, NoTasksAvailableError, SessionExpiredError
-from src.domain.report_generator import generate_and_save_report
+from src.core.exceptions import (
+    GradeNotConfiguredError,
+    NoTasksAvailableError,
+    SessionExpiredError,
+    SessionAlreadyStartedError,
+    TaskOutOfSequenceError,
+)
+from src.domain.auth_sync_jobs import enqueue_auth_completion_sync, process_next_auth_completion_sync
+from src.domain.report_jobs import enqueue_report_generation, process_next_report_job
 from src.domain.alpha_engine import (
     AlphaTracker,
     IRTParams,
@@ -90,36 +98,72 @@ class SessionService:
         Initialize a new diagnostic session.
         Returns (session_id, first_task).
         """
-        # 1. Persist session row
+        # An invite represents exactly one attempt.  A normal refresh reaches
+        # ``get_active_session``; a duplicate POST must never create a second
+        # row just because two browser requests raced each other.
+        if invite_code:
+            existing = self.session_repo.get_by_invite_code(invite_code)
+            if existing is not None:
+                raise SessionAlreadyStartedError(str(existing.id))
+
+        # 1. Validate task availability before claiming the one-time invite.
+        # A temporary content-service outage must not leave a student with a
+        # permanently blocked code and an empty diagnostic session.
+        session_id = uuid.uuid4()
+        state = SessionState(
+            session_id=str(session_id),
+            student_id=str(student_id),
+            grade_level=grade_level,
+        )
+        state.theta = ThetaState(theta=prior_theta)
+
+        # 2. Load topic grid → build TopicNavigator states per L1 section
+        self._build_topic_grid(state)
+
+        if not state.section_ids:
+            raise GradeNotConfiguredError(grade_level)
+
+        # 3. Pick first warmup task
+        first_task = self._pick_warmup_task(state)
+
+        # 4. Persist the session only after the first task is available.  The
+        # partial unique index remains the final arbiter when two POSTs race.
         db_session = DiagSession(
+            id=session_id,
             student_id=student_id,
             grade_level=grade_level,
             invite_code=invite_code,
             phase="warmup",
         )
         self.session_repo.add(db_session)
-        self.db.commit()
-        self.db.refresh(db_session)
+        try:
+            self.db.commit()
+        except IntegrityError as exc:
+            self.db.rollback()
+            if invite_code:
+                existing = self.session_repo.get_by_invite_code(invite_code)
+                if existing is not None:
+                    raise SessionAlreadyStartedError(str(existing.id)) from exc
+            raise
 
-        # 2. Build in-memory state
-        state = SessionState(
-            session_id=str(db_session.id),
-            student_id=str(student_id),
-            grade_level=grade_level,
-        )
-        state.theta = ThetaState(theta=prior_theta)
-
-        # 3. Load topic grid → build TopicNavigator states per L1 section
-        self._build_topic_grid(state)
-
-        if not state.section_ids:
-            raise GradeNotConfiguredError(grade_level)
-
-        # 4. Pick first warmup task
-        first_task = self._pick_warmup_task(state)
-
-        # 5. Persist state to Redis
-        self.redis.save(state)
+        # 5. Persist resumable state before notifying auth-service.  If Redis
+        # is unavailable at this point, the just-created database row has no
+        # answers and no external side effect yet.  Remove it again instead of
+        # leaving a one-time invite permanently claimed by an unrecoverable
+        # session.
+        try:
+            self.redis.save(state)
+        except Exception:
+            try:
+                self.db.delete(db_session)
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                log.exception(
+                    "Could not compensate failed Redis initialization for session %s",
+                    db_session.id,
+                )
+            raise
 
         # 6. Notify monolith: invite → in_progress
         if invite_code:
@@ -133,8 +177,8 @@ class SessionService:
 
     def get_active_session(
         self, invite_code: str
-    ) -> Optional[Tuple[uuid.UUID, int, TaskOut]]:
-        """Return (session_id, items_answered, current_task) for an active session.
+    ) -> Optional[Tuple[uuid.UUID, int, TaskOut, int]]:
+        """Return (session_id, items_answered, current_task, total_time_ms) for an active session.
 
         Called on page load to check if the student has an unfinished session
         so the frontend can offer «Continue where you left off?» instead of
@@ -146,7 +190,7 @@ class SessionService:
           - Redis state has expired (TTL elapsed) — session is unrecoverable
         """
         db_session = self.session_repo.get_by_invite_code(invite_code)
-        if db_session is None or db_session.phase == "completed":
+        if db_session is None or db_session.phase in {"completed", "expired"}:
             return None
 
         state = self.redis.load(str(db_session.id))
@@ -161,7 +205,8 @@ class SessionService:
             log.warning("get_active_session: could not rebuild task for %s", db_session.id)
             return None
 
-        return db_session.id, state.items_answered, task
+        total_time_ms = self.answer_repo.get_total_time_ms(db_session.id)
+        return db_session.id, state.items_answered, task, total_time_ms
 
     def _current_task_from_state(self, state: SessionState) -> TaskOut:
         """Re-serve the current task stored in state (no DB write)."""
@@ -191,6 +236,27 @@ class SessionService:
     ) -> AnswerResult:
         """Process one answer. Returns result + next task (or completed flag)."""
 
+        # Redis state is read-modify-written.  A lock makes a double click,
+        # retry, or concurrent browser request harmless instead of counting the
+        # same item twice.
+        with self.redis.answer_lock(str(session_id)):
+            return self._submit_answer_locked(
+                session_id=session_id,
+                task_id=task_id,
+                student_answer=student_answer,
+                time_ms=time_ms,
+            )
+
+    def _submit_answer_locked(
+        self,
+        *,
+        session_id: uuid.UUID,
+        task_id: str,
+        student_answer: str,
+        time_ms: Optional[int],
+    ) -> AnswerResult:
+        """Process one answer while holding the per-session Redis lock."""
+
         # 1. Load state
         state = self.redis.load(str(session_id))
         if state is None:
@@ -199,6 +265,10 @@ class SessionService:
         if state.phase == "completed":
             from src.core.exceptions import SessionAlreadyCompletedError
             raise SessionAlreadyCompletedError(str(session_id))
+
+        # Never let a client choose an arbitrary task or replay a previous one.
+        # The requested task must be exactly the task the server issued.
+        self._ensure_current_task(state, task_id)
 
         # 2. Fetch task from DB
         task = self.task_repo.get_by_id(task_id)
@@ -209,14 +279,17 @@ class SessionService:
         outcome, category = self.evaluator.evaluate(task, student_answer)
         correct = outcome >= 0.5
 
-        # 4. Update IRT theta
-        params = IRTParams(
-            a=float(task.irt_discrimination or 1.0),
-            b=float(task.irt_difficulty or 0.0),
-            c=float(task.irt_guessing or 0.0),
-        )
+        # 4. Update global IRT theta only with measurement items.  Deep-scan
+        # tasks are causal probes for prerequisites; mixing their often easier
+        # content into global ability creates a misleadingly precise theta.
         theta_before = state.theta.theta
-        state.theta = update_theta(state.theta, params, outcome)
+        if not state.is_in_deep_scan:
+            params = IRTParams(
+                a=float(task.irt_discrimination or 1.0),
+                b=float(task.irt_difficulty or 0.0),
+                c=float(task.irt_guessing or 0.0),
+            )
+            state.theta = update_theta(state.theta, params, outcome)
 
         # 5. Update per-topic alpha
         if state.current_topic_id:
@@ -225,6 +298,9 @@ class SessionService:
         # 6. Track item
         state.items_answered += 1
         state.used_task_ids.append(task_id)
+        if not state.is_in_deep_scan and state.current_section_id:
+            if state.current_section_id not in state.covered_section_ids:
+                state.covered_section_ids.append(state.current_section_id)
 
         # 7. Log answer to DB
         self.answer_repo.log_answer(
@@ -254,6 +330,15 @@ class SessionService:
         next_task = self._advance(state, correct)
 
         if next_task is None:
+            if state.stop_reason is None:
+                # Exhaustion fallback:
+                # If target precision was not met, mark insufficient_precision
+                if state.theta.se > settings.se_threshold:
+                    state.stop_reason = "insufficient_precision"
+                elif state.current_section_idx >= len(state.section_ids):
+                    state.stop_reason = "precision_reached" if state.theta.se <= settings.se_threshold else "coverage_complete"
+                else:
+                    state.stop_reason = "bank_exhausted"
             return self._complete_session(state, outcome, category)
 
         # 10. Save updated state
@@ -289,6 +374,18 @@ class SessionService:
             report_json = report.report_json
             error_patterns = report_json.get("error_patterns", [])
 
+        report_generation = {
+            "status": report.generation_status if report else "pending",
+            "stage": report.generation_stage if report else "queued",
+            "attempts": int(report.generation_attempts or 0) if report else 0,
+            "is_current_schema": bool(
+                report
+                and report.report_json
+                and report.report_schema_version >= 2
+                and report.generation_status == "ready"
+            ),
+        }
+
         return {
             "session_id": str(session_id),
             "student_id": str(db_session.student_id),
@@ -302,11 +399,19 @@ class SessionService:
                 db_session.weak_skills[0] if db_session.weak_skills else None
             ),
             "items_total": len(answers),
+            "stop_reason": db_session.stop_reason,
             # Unified journal: error_patterns + full report_json
             "error_patterns": error_patterns,
+            "distractor_errors": [
+                ep for ep in error_patterns
+                if isinstance(ep, dict) and ep.get("eval_category") == "distractor"
+            ],
             "report_json": report_json,
             # Explicit flag so frontend knows full report is available
             "has_full_report": bool(report_json),
+            # The public invite route remains informative without disclosing
+            # raw worker exceptions or implementation details.
+            "report_generation": report_generation,
         }
 
     # ══════════════════════════════════════════════════════════════════════
@@ -346,13 +451,32 @@ class SessionService:
             nav = TopicNavigator.create(section_id, topics)
             state.topic_navigator_states[section_id] = nav.to_dict()
 
+    @staticmethod
+    def _warmup_target_count(state: SessionState) -> int:
+        return min(len(state.section_ids), settings.warmup_items)
+
+    @staticmethod
+    def _ensure_current_task(state: SessionState, task_id: str) -> None:
+        if task_id != state.current_task_id:
+            raise TaskOutOfSequenceError(state.session_id)
+
+    @staticmethod
+    def _has_minimum_section_coverage(state: SessionState) -> bool:
+        required = min(len(state.section_ids), settings.min_section_coverage)
+        return len(set(state.covered_section_ids)) >= required
+
     def _pick_warmup_task(self, state: SessionState) -> TaskOut:
         """
         Pick a warmup task centered around current theta.
-        Distributes warmup items across DIFFERENT topics in the section so that
-        the 3 warmup questions establish a broad multi-domain baseline.
+        Distributes warmup items across L1 sections so the baseline is not
+        dominated by the first curricular domain.
         """
-        section_id = state.section_ids[state.current_section_idx]
+        warmup_count = self._warmup_target_count(state)
+        if warmup_count <= 0:
+            raise GradeNotConfiguredError(state.grade_level)
+        # Baseline questions are distributed across L1 sections, not only the
+        # first one.  This gives the early theta estimate cross-domain support.
+        section_id = state.section_ids[state.items_answered % warmup_count]
         nav = TopicNavigator.from_dict(state.topic_navigator_states[section_id])
         topics = nav.state.topics
         if not topics:
@@ -412,8 +536,6 @@ class SessionService:
                     ts = self.task_repo.get_tasks_for_skill(
                         sk.id, exclude_ids=state.used_task_ids, limit=1
                     )
-                    if not ts:
-                        ts = self.task_repo.get_tasks_for_skill(sk.id, limit=1)
                     if ts:
                         task = ts[0]
                         selected_skill_id = sk.id
@@ -426,6 +548,7 @@ class SessionService:
             raise NoTasksAvailableError(topic.topic_id)
 
         state.current_task_id = task.id
+        state.current_section_id = section_id
         state.current_skill_id = selected_skill_id
         state.current_topic_id = topic.topic_id
         state.current_subtopic_id = selected_sub_id
@@ -438,10 +561,18 @@ class SessionService:
 
     def _should_stop(self, state: SessionState) -> bool:
         if state.items_answered >= settings.max_items:
+            state.stop_reason = "max_items_reached"
+            if state.is_in_deep_scan:
+                state.deep_scan_incomplete = True
             return True
         if state.is_in_deep_scan:
             return False
+        if state.items_answered < settings.min_items:
+            return False
+        if not self._has_minimum_section_coverage(state):
+            return False
         if state.theta.se <= settings.se_threshold:
+            state.stop_reason = "precision_reached"
             return True
         return False
 
@@ -454,12 +585,17 @@ class SessionService:
             return self._advance_navigation(state, correct)
         if state.phase == "deep_scan":
             return self._advance_deep_scan(state, correct)
+        if state.phase == "precision_targeting":
+            return self._advance_precision_targeting(state, correct)
         return None
+
+    def _advance_precision_targeting(self, state: SessionState, correct: bool) -> Optional[TaskOut]:
+        return self._pick_precision_targeting_task(state)
 
     # ── Warmup phase ──────────────────────────────────────────────────────
 
     def _advance_warmup(self, state: SessionState, correct: bool) -> Optional[TaskOut]:
-        if state.items_answered >= settings.warmup_items:
+        if state.items_answered >= self._warmup_target_count(state):
             state.phase = "navigation"
             return self._start_navigation(state)
         return self._pick_warmup_task(state)
@@ -469,6 +605,7 @@ class SessionService:
     def _start_navigation(self, state: SessionState) -> Optional[TaskOut]:
         """Initialize subtopic navigation for current L1 section's current topic."""
         section_id = state.section_ids[state.current_section_idx]
+        state.current_section_id = section_id
         nav = TopicNavigator.from_dict(state.topic_navigator_states[section_id])
         topic = nav.peek_current()
 
@@ -644,16 +781,167 @@ class SessionService:
         return self._init_subtopic_nav(state, next_topic)
 
     def _next_section_or_done(self, state: SessionState) -> Optional[TaskOut]:
-        """Advance to next L1 section; return None if all sections are done."""
+        """Advance to next L1 section; if all sections done, enter precision_targeting if SE > threshold."""
         state.current_section_idx += 1
         if state.current_section_idx >= len(state.section_ids):
-            return None   # all sections exhausted → session complete
+            # All L1 sections traversed.
+            if state.theta.se <= settings.se_threshold:
+                state.stop_reason = "precision_reached"
+                return None
+            if state.items_answered >= settings.max_items:
+                state.stop_reason = "max_items_reached"
+                return None
+
+            # Precision target not yet reached -> switch to precision_targeting CAT phase
+            log.info(
+                "Sections covered, but SE=%.2f > %.2f threshold. Entering precision_targeting phase (items=%d/%d)",
+                state.theta.se,
+                settings.se_threshold,
+                state.items_answered,
+                settings.max_items,
+            )
+            state.phase = "precision_targeting"
+            state.current_subtopic_nav = None
+            state.current_skill_nav = None
+            return self._pick_precision_targeting_task(state)
 
         state.current_subtopic_nav = None
         state.current_skill_nav = None
         return self._start_navigation(state)
 
+    def _pick_precision_targeting_task(self, state: SessionState) -> Optional[TaskOut]:
+        """Phase 2 CAT precision targeting: select IRT-informative tasks targeting b ≈ theta.
+
+        For students performing below grade level (theta < -0.5), we expand the candidate pool
+        to include foundational prerequisite skills from lower grades (Grade - 1, and if theta < -1.5,
+        down to Grade - 2, with a floor of grade 5).
+
+        Priority 1: Direct prerequisite skills linked to confirmed gaps / failed topics from Phase 1.
+        Priority 2: Foundational core L4 skills from target lower grade(s) matching target_b ≈ theta.
+        Priority 3: Available L4 skills in the current grade matching target_b ≈ theta.
+        """
+        current_grade = state.grade_level
+        theta_val = state.theta.theta
+        candidate_skills_ordered: List[str] = []
+        visited_skills: set = set()
+
+        if theta_val < -0.5:
+            # 1. Target Lower Grades Pool
+            min_grade = max(5, current_grade - 2 if theta_val < -1.5 else current_grade - 1)
+            lower_grades = list(range(min_grade, current_grade))
+
+            # Priority 1: Prerequisites of confirmed gaps / failed skills
+            prereq_candidates: List[str] = []
+            for gap_id in state.confirmed_gaps:
+                try:
+                    for pr_l4 in self._prereq_l4_ids(gap_id):
+                        if pr_l4 not in visited_skills:
+                            visited_skills.add(pr_l4)
+                            prereq_candidates.append(pr_l4)
+                except Exception as exc:
+                    log.warning("Failed to resolve prereq L4s for gap %s: %s", gap_id, exc)
+
+            random.shuffle(prereq_candidates)
+            candidate_skills_ordered.extend(prereq_candidates)
+
+            # Priority 2: Foundational L4 skills from lower grade(s)
+            for g in lower_grades:
+                lower_skills = self.knowledge_repo.get_by_level_and_grade("L4", g)
+                lower_skill_ids = [s.id for s in lower_skills if s.id not in visited_skills]
+                for sid in lower_skill_ids:
+                    visited_skills.add(sid)
+                random.shuffle(lower_skill_ids)
+                candidate_skills_ordered.extend(lower_skill_ids)
+
+        # Priority 3 (or Priority 1 for students with theta >= -0.5): Current grade L4 skills
+        current_skills = self.knowledge_repo.get_by_level_and_grade("L4", current_grade)
+        current_skill_ids = [s.id for s in current_skills if s.id not in visited_skills]
+        for sid in current_skill_ids:
+            visited_skills.add(sid)
+        random.shuffle(current_skill_ids)
+        candidate_skills_ordered.extend(current_skill_ids)
+
+        if not candidate_skills_ordered:
+            log.warning("No candidate skills found in precision targeting for grade %d", current_grade)
+            state.stop_reason = "insufficient_precision"
+            return None
+
+        # Search for a task matching target_b ≈ theta in candidate skills
+        for skill_id in candidate_skills_ordered:
+            task = self.task_repo.get_task_by_difficulty_target(
+                skill_id, target_b=theta_val, exclude_ids=state.used_task_ids
+            )
+            if task is not None:
+                self._set_context_for_skill(state, skill_id)
+                state.current_task_id = task.id
+                log.info(
+                    "Precision targeting selected task %s (skill %s, target_b=%.2f, current_se=%.2f, theta=%.2f)",
+                    task.id,
+                    skill_id,
+                    theta_val,
+                    state.theta.se,
+                    theta_val,
+                )
+                return self._task_to_out(task, state)
+
+        # Fallback: if difficulty-matching task wasn't found, pick any available task from candidate pool
+        for skill_id in candidate_skills_ordered:
+            tasks = self.task_repo.get_tasks_for_skill(
+                skill_id, exclude_ids=state.used_task_ids, limit=1
+            )
+            if tasks:
+                task = tasks[0]
+                self._set_context_for_skill(state, skill_id)
+                state.current_task_id = task.id
+                log.info(
+                    "Precision targeting fallback selected task %s (skill %s, current_se=%.2f)",
+                    task.id,
+                    skill_id,
+                    state.theta.se,
+                )
+                return self._task_to_out(task, state)
+
+        log.warning(
+            "Precision targeting exhausted available tasks in bank for grade %d (SE=%.2f, items=%d)",
+            current_grade,
+            state.theta.se,
+            state.items_answered,
+        )
+        state.stop_reason = "insufficient_precision"
+        return None
+
     # ── Deep scan phase ───────────────────────────────────────────────────
+
+    def _set_context_for_skill(self, state: SessionState, skill_id: str) -> None:
+        """Set the real L4 → L3 → L2 → L1 context for a task.
+
+        Deep-scan prerequisites can belong to a different topic than the
+        failed skill.  Keeping the origin context would corrupt the answer log
+        and topic-level report, so resolve it explicitly before issuing a task.
+        """
+        skill = self.knowledge_repo.get_by_id(skill_id)
+        subtopic = (
+            self.knowledge_repo.get_by_id(skill.parent_id)
+            if skill is not None and getattr(skill, "parent_id", None)
+            else None
+        )
+        topic = (
+            self.knowledge_repo.get_by_id(subtopic.parent_id)
+            if subtopic is not None and getattr(subtopic, "parent_id", None)
+            else None
+        )
+        if topic is None:
+            log.warning("Cannot resolve L1/L2 context for deep-scan skill %s", skill_id)
+            state.current_skill_id = skill_id
+            state.current_subtopic_id = None
+            state.current_topic_id = None
+            state.current_section_id = None
+            return
+
+        state.current_skill_id = skill_id
+        state.current_subtopic_id = getattr(subtopic, "id", None)
+        state.current_topic_id = topic.id
+        state.current_section_id = getattr(topic, "parent_id", None)
 
     def _prereq_l4_ids(self, skill_or_para_id: str) -> List[str]:
         """
@@ -733,10 +1021,20 @@ class SessionService:
             state.phase = "navigation"
             return self._advance_topic(state, False)
 
+        # Snapshot pre-deep-scan navigation context so traversing prerequisites
+        # in other topics or lower grades does not corrupt current section navigation.
+        state.saved_nav_context = {
+            "section_idx": state.current_section_idx,
+            "section_id": state.current_section_id,
+            "topic_id": state.current_topic_id,
+            "subtopic_id": state.current_subtopic_id,
+            "skill_id": state.current_skill_id,
+        }
+
         next_skill_id = scan.queue.pop(0)
         scan.current_skill_id = next_skill_id
         state.deep_scan = scan.to_dict()
-        state.current_skill_id = next_skill_id
+        self._set_context_for_skill(state, next_skill_id)
 
         return self._pick_task_for_skill(state, next_skill_id)
 
@@ -747,6 +1045,14 @@ class SessionService:
         if state.deep_scan is None:
             state.phase = "navigation"
             state.is_in_deep_scan = False
+            if state.saved_nav_context:
+                ctx = state.saved_nav_context
+                state.current_section_idx = ctx.get("section_idx", state.current_section_idx)
+                state.current_section_id = ctx.get("section_id")
+                state.current_topic_id = ctx.get("topic_id")
+                state.current_subtopic_id = ctx.get("subtopic_id")
+                state.current_skill_id = ctx.get("skill_id")
+                state.saved_nav_context = None
             return self._advance_topic(state, False)
 
         scan = DeepScanState.from_dict(state.deep_scan)
@@ -788,18 +1094,28 @@ class SessionService:
         next_skill_id = scan.queue.pop(0)
         scan.current_skill_id = next_skill_id
         state.deep_scan = scan.to_dict()
-        state.current_skill_id = next_skill_id
+        self._set_context_for_skill(state, next_skill_id)
 
         return self._pick_task_for_skill(state, next_skill_id)
 
     def _finish_deep_scan(self, state: SessionState, scan: DeepScanState) -> None:
-        """Finalize deep scan: collect gaps, reset flags."""
+        """Finalize deep scan: collect gaps, reset flags and restore navigation context."""
         state.confirmed_gaps.extend(scan.gaps)
         if scan.origin_skill_id not in state.confirmed_gaps:
             state.confirmed_gaps.append(scan.origin_skill_id)
         state.deep_scan = None
         state.is_in_deep_scan = False
         state.phase = "navigation"
+
+        # Restore pre-deep-scan navigation context
+        if state.saved_nav_context:
+            ctx = state.saved_nav_context
+            state.current_section_idx = ctx.get("section_idx", state.current_section_idx)
+            state.current_section_id = ctx.get("section_id")
+            state.current_topic_id = ctx.get("topic_id")
+            state.current_subtopic_id = ctx.get("subtopic_id")
+            state.current_skill_id = ctx.get("skill_id")
+            state.saved_nav_context = None
 
     # ── Task selection ─────────────────────────────────────────────────────
 
@@ -815,12 +1131,7 @@ class SessionService:
                 skill_id, exclude_ids=state.used_task_ids, limit=1
             )
             if not tasks:
-                # Retry without exclude_ids so we don't return None/stall if skill has tasks
-                tasks = self.task_repo.get_tasks_for_skill(
-                    skill_id, exclude_ids=None, limit=1
-                )
-            if not tasks:
-                log.warning("No tasks for skill %s — skipping", skill_id)
+                log.warning("No unused tasks for skill %s", skill_id)
                 return None
             task = tasks[0]
 
@@ -835,6 +1146,10 @@ class SessionService:
     ) -> AnswerResult:
         """Finalize: persist to DB, remove from Redis, return result."""
         state.phase = "completed"
+        if state.stop_reason is None:
+            # Completion without a next task is never silently treated as a
+            # precise result.  This default is mainly a guard for legacy paths.
+            state.stop_reason = "bank_exhausted"
 
         topic_breakdown = {
             topic_id: {
@@ -856,6 +1171,7 @@ class SessionService:
                 topic_breakdown=topic_breakdown,
                 state_snapshot=state.to_dict(),
                 items_answered=state.items_answered,    # ← Fix: was 0, now correct
+                stop_reason=state.stop_reason,
             )
             self.db.commit()
 
@@ -869,62 +1185,29 @@ class SessionService:
             len(state.confirmed_gaps),
         )
 
-        # Generate diagnostic report with Gemini narrative in background thread
-        # Fire-and-forget: does not block answer submission HTTP response.
+        # Persist a report job before starting background work.  A daemon thread
+        # only accelerates the first attempt; the database-backed worker resumes
+        # pending work after a restart instead of silently losing a report.
         if db_session:
-            import threading
+            try:
+                enqueue_report_generation(self.db, db_session.id)
+            except Exception as exc:
+                # The completed session is already durable.  A later service
+                # start will materialise its report if this enqueue attempt is
+                # interrupted, so never roll the student result back.
+                log.warning("Could not enqueue report for session %s: %s", db_session.id, exc)
 
-            def _bg_generate_report(sid_str: str, st_id: uuid.UUID, g_lvl: int, th: float, th_se: float, ov_lvl: str, t_bd: dict, w_sk: list, items_tot: int):
-                try:
-                    from src.core.database import SessionLocal
-                    report_db = SessionLocal()
-                    try:
-                        generate_and_save_report(
-                            report_db,
-                            session_id=uuid.UUID(sid_str),
-                            student_id=st_id,
-                            grade_level=g_lvl,
-                            theta=th,
-                            theta_se=th_se,
-                            overall_level=ov_lvl,
-                            topic_breakdown=t_bd,
-                            weak_skills=w_sk,
-                            items_total=items_tot,
-                        )
-                    finally:
-                        report_db.close()
-                except Exception as exc:
-                    log.warning("Report generation skipped (session safe): %s", exc)
-
-            threading.Thread(
-                target=_bg_generate_report,
-                args=(
-                    state.session_id,
-                    db_session.student_id,
-                    db_session.grade_level,
-                    state.theta.theta,
-                    state.theta.se,
-                    overall_level,
-                    topic_breakdown,
-                    state.confirmed_gaps,
-                    state.items_answered,
-                ),
-                daemon=True,
-            ).start()
-
-        # Notify monolith: invite → completed + save StudentDiagnosticResult
-        invite_code = getattr(db_session, "invite_code", None)
-        auth_client.notify_complete(
-            invite_code or "",
-            state.session_id,
-            {
-                "final_theta": state.theta.theta,
-                "se": state.theta.se,
-                "total_items": state.items_answered,
-                "identified_gaps": state.confirmed_gaps,
-                "topic_breakdown": topic_breakdown,
-            },
-        )
+        # Both derived report generation and the auth-service projection are
+        # durable queues.  The threads only reduce first-response latency;
+        # the lifespan worker resumes either job after a restart.
+        if db_session:
+            try:
+                enqueue_auth_completion_sync(self.db, db_session)
+                import threading
+                threading.Thread(target=process_next_report_job, daemon=True).start()
+                threading.Thread(target=process_next_auth_completion_sync, daemon=True).start()
+            except Exception as exc:
+                log.warning("Could not enqueue completion callbacks for session %s: %s", db_session.id, exc)
 
         return AnswerResult(
             is_correct=outcome >= 0.5,
@@ -934,6 +1217,7 @@ class SessionService:
             se=state.theta.se,
             next_task=None,
             session_completed=True,
+            stop_reason=state.stop_reason,
         )
 
     # ── Utilities ──────────────────────────────────────────────────────────
@@ -960,4 +1244,3 @@ class SessionService:
             items_max=settings.max_items,
             is_deep_scan=state.is_in_deep_scan,
         )
-

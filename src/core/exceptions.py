@@ -27,6 +27,16 @@ class SessionAlreadyCompletedError(DiagnosticError):
         )
 
 
+class SessionAlreadyStartedError(DiagnosticError):
+    """An invite already owns another unfinished diagnostic session."""
+
+    def __init__(self, session_id: str):
+        super().__init__(
+            f"Diagnostic invite already belongs to session {session_id}",
+            "SESSION_ALREADY_STARTED",
+        )
+
+
 class NoTasksAvailableError(DiagnosticError):
     def __init__(self, skill_id: str):
         super().__init__(
@@ -37,6 +47,26 @@ class NoTasksAvailableError(DiagnosticError):
 class InvalidAnswerError(DiagnosticError):
     def __init__(self, detail: str):
         super().__init__(detail, "INVALID_ANSWER")
+
+
+class TaskOutOfSequenceError(DiagnosticError):
+    """An answer was submitted for a task other than the active task."""
+
+    def __init__(self, session_id: str):
+        super().__init__(
+            f"Answer does not match the current task for session {session_id}",
+            "TASK_OUT_OF_SEQUENCE",
+        )
+
+
+class AnswerInProgressError(DiagnosticError):
+    """A second request arrived while the current answer is being processed."""
+
+    def __init__(self, session_id: str):
+        super().__init__(
+            f"Answer submission is already in progress for session {session_id}",
+            "ANSWER_IN_PROGRESS",
+        )
 
 
 class GradeNotConfiguredError(DiagnosticError):

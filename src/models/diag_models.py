@@ -21,6 +21,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.sql import func
@@ -41,9 +42,10 @@ class DiagSession(Base):
     # Algorithm state — stored in Redis during session, persisted here on completion
     state_snapshot = Column(JSONB, nullable=True)
 
-    # Phase: warmup | navigation | deep_scan | completed
+    # Phase: warmup | navigation | deep_scan | completed | expired
     phase = Column(String(20), nullable=False, default="warmup")
     items_answered = Column(Integer, default=0)
+    stop_reason = Column(String(40), nullable=True)
 
     # IRT result
     theta = Column(Numeric(8, 4), default=0.0)
@@ -56,11 +58,34 @@ class DiagSession(Base):
 
     is_valid = Column(Boolean, default=True)
     completed_at = Column(DateTime, nullable=True)
+
+    # Auth-service owns the public invite and student projection.  Completion
+    # is therefore synchronised through a durable, retryable outbox state
+    # rather than relying on a best-effort HTTP callback in the request path.
+    # ``requested_at`` stays null for historical rows so a deploy never sends
+    # unrequested callbacks for old diagnostics.
+    auth_sync_status = Column(String(20), nullable=False, default="not_requested")
+    auth_sync_attempts = Column(Integer, nullable=False, default=0)
+    auth_sync_requested_at = Column(DateTime, nullable=True)
+    auth_sync_started_at = Column(DateTime, nullable=True)
+    auth_sync_completed_at = Column(DateTime, nullable=True)
+    auth_sync_error = Column(Text, nullable=True)
+
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
         CheckConstraint("grade_level BETWEEN 5 AND 11", name="ck_diag_session_grade"),
+        # Completed and expired rows remain auditable.  Only resumable phases
+        # reserve an invite code and can prevent another concurrent start.
+        Index(
+            "uq_diag_sessions_active_invite_code",
+            "invite_code",
+            unique=True,
+            postgresql_where=text(
+                "invite_code IS NOT NULL AND phase IN ('warmup', 'navigation', 'deep_scan')"
+            ),
+        ),
     )
 
 
@@ -107,7 +132,7 @@ class DiagAnswer(Base):
 
 
 class DiagReport(Base):
-    """Final diagnostic report — generated once per completed session."""
+    """Derived diagnostic report with a durable, observable generation lifecycle."""
 
     __tablename__ = "diag_reports"
 
@@ -137,6 +162,21 @@ class DiagReport(Base):
     narrative_ru = Column(Text)                         # legacy text (kept for compat)
     narrative_generated = Column(Boolean, default=False)
 
+    # Report generation is deliberately tracked in the database rather than
+    # only in an in-memory thread.  A restart therefore cannot silently lose a
+    # completed student's report, and the UI can render an honest progress
+    # state while deterministic data / the narrative are being prepared.
+    report_schema_version = Column(Integer, nullable=False, default=0)
+    generation_status = Column(String(20), nullable=False, default="pending")
+    generation_stage = Column(String(40), nullable=True)
+    generation_attempts = Column(Integer, nullable=False, default=0)
+    # Null for reports that predate the durable queue.  Workers process only
+    # explicit requests, never historic diagnostics merely due to ordering.
+    generation_requested_at = Column(DateTime, nullable=True)
+    generation_error = Column(Text, nullable=True)
+    generation_started_at = Column(DateTime, nullable=True)
+    generation_completed_at = Column(DateTime, nullable=True)
+
     # PDF
     pdf_url = Column(Text)
     pdf_generated = Column(Boolean, default=False)
@@ -146,5 +186,3 @@ class DiagReport(Base):
     __table_args__ = (
         Index("idx_diag_reports_student", "student_id"),
     )
-
-

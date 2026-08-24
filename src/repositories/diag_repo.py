@@ -28,10 +28,16 @@ class DiagSessionRepository(BaseRepository[DiagSession]):
             )
         )
 
-    def get_by_invite_code(self, code: str) -> Optional[DiagSession]:
-        return self.session.scalar(
-            select(DiagSession).where(DiagSession.invite_code == code)
-        )
+    def get_by_invite_code(
+        self,
+        code: str,
+        *,
+        unfinished_only: bool = False,
+    ) -> Optional[DiagSession]:
+        statement = select(DiagSession).where(DiagSession.invite_code == code)
+        if unfinished_only:
+            statement = statement.where(DiagSession.phase != "completed")
+        return self.session.scalar(statement.order_by(DiagSession.created_at.desc()))
 
     def get_student_history(
         self, student_id: uuid.UUID, limit: int = 10
@@ -58,6 +64,7 @@ class DiagSessionRepository(BaseRepository[DiagSession]):
         topic_breakdown: dict,
         state_snapshot: dict,
         items_answered: int = 0,
+        stop_reason: Optional[str] = None,
     ) -> DiagSession:
         session.phase = "completed"
         session.theta = theta
@@ -67,6 +74,7 @@ class DiagSessionRepository(BaseRepository[DiagSession]):
         session.topic_breakdown = topic_breakdown
         session.state_snapshot = state_snapshot
         session.items_answered = items_answered          # ← was missing, always 0
+        session.stop_reason = stop_reason
         session.completed_at = datetime.utcnow()
         self.session.flush()
         return session
@@ -88,6 +96,16 @@ class DiagAnswerRepository(BaseRepository[DiagAnswer]):
         return (
             self.session.scalar(
                 select(func.count(DiagAnswer.id)).where(
+                    DiagAnswer.session_id == session_id
+                )
+            )
+            or 0
+        )
+
+    def get_total_time_ms(self, session_id: uuid.UUID) -> int:
+        return (
+            self.session.scalar(
+                select(func.coalesce(func.sum(DiagAnswer.time_ms), 0)).where(
                     DiagAnswer.session_id == session_id
                 )
             )
@@ -154,5 +172,3 @@ class DiagReportRepository(BaseRepository[DiagReport]):
                 .limit(limit)
             )
         )
-
-

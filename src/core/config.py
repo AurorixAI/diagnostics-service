@@ -38,23 +38,33 @@ class Settings(BaseSettings):
     gemini_model_report: str = "gemini-2.0-flash"
 
     # Azure OpenAI / DeepSeek API
-    azure_deepseek_api_key: str = "ArSjteP5YKOUBTQRyB0fb1hXBgq2Sui96wZmoAou7eiHOdSPa0JHJQQJ99CFACYeBjFXJ3w3AAAAACOGxVOz"
-    azure_deepseek_endpoint: str = "https://arslan15114.services.ai.azure.com/openai/v1/chat/completions"
+    # Credentials must be supplied through the environment.  Never ship a
+    # deployable service with an embedded model key.
+    azure_deepseek_api_key: str = ""
+    azure_deepseek_endpoint: str = ""
     azure_deepseek_model: str = "deepseek-v4-flash"
 
     # Algorithm parameters
-    warmup_items: int = 3
-    max_items: int = 25
+    # A short, cross-section baseline prevents a precise-looking theta from
+    # being inferred from one curricular area only.  Every currently supported
+    # grade has at most five L1 sections.
+    warmup_items: int = 5
+    min_items: int = 12
+    max_items: int = 42
     se_threshold: float = 0.30
+    min_section_coverage: int = 5
     deep_scan_importance_threshold: int = 8
     deep_scan_max_items: int = 6
     mastery_threshold: float = 0.6   # min fraction correct to move UP a topic
 
     # CORS
-    cors_origins: List[str] = ["http://localhost:3000"]
+    cors_origins: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
     # Auth Service callback URL — for notifying invite status changes
     auth_service_url: str = Field(default="http://localhost:8000")
+    # Shared only with auth-service. Required for all mutable internal
+    # callbacks; public diagnostic invite codes are never accepted there.
+    internal_service_token: str = ""
 
     # Standalone mode: True  → service owns its own Postgres, runs ALL migrations
     #                  False → connects to monolith DB, runs ONLY owned-table migrations (001)

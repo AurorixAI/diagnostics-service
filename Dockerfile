@@ -26,4 +26,5 @@ USER appuser
 
 EXPOSE 8002
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8002", "--workers", "2"]
+ENV RUN_MIGRATIONS_IN_LIFESPAN=false
+CMD ["sh", "-c", "python -m src.core.migration_runner && exec uvicorn src.main:app --host 0.0.0.0 --port 8002 --workers 2"]

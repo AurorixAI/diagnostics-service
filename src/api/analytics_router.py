@@ -17,11 +17,16 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import desc, func
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import case, desc, func
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db
+from src.core.access import (
+    DiagnosticActor,
+    require_diagnostic_staff,
+    require_student_report_access,
+)
 from src.models.diag_models import DiagAnswer, DiagReport, DiagSession
 from src.repositories.knowledge_repo import KnowledgeRepository
 
@@ -57,14 +62,16 @@ def _alpha_to_status(alpha: float) -> str:
 # ── 1. STUDENT SKILL MAP ───────────────────────────────────────────────────────
 
 @router.get("/students/{student_id}/skill-map")
-def student_skill_map(
+async def student_skill_map(
     student_id: str,
     db: Session = Depends(get_db),
+    actor: DiagnosticActor = Depends(require_diagnostic_staff),
 ):
     """
     Per-topic mastery карта ученика из последней завершённой диагностики.
     topic_breakdown: {topic_id: {alpha, level}}
     """
+    await require_student_report_access(actor, student_id)
     session = (
         db.query(DiagSession)
         .filter(
@@ -169,11 +176,13 @@ def student_skill_map(
 # ── 2. STUDENT TIMELINE ────────────────────────────────────────────────────────
 
 @router.get("/students/{student_id}/timeline")
-def student_timeline(
+async def student_timeline(
     student_id: str,
     db: Session = Depends(get_db),
+    actor: DiagnosticActor = Depends(require_diagnostic_staff),
 ):
     """Динамика θ ученика — все завершённые сессии по времени."""
+    await require_student_report_access(actor, student_id)
     sessions = (
         db.query(DiagSession)
         .filter(
@@ -218,31 +227,42 @@ def student_timeline(
 # ── 3. STUDENT REPORT ──────────────────────────────────────────────────────────
 
 @router.get("/students/{student_id}/report")
-def student_report(
+async def student_report(
     student_id: str,
+    session_id: Optional[str] = Query(None, description="Exact diagnostic session for this report"),
     db: Session = Depends(get_db),
+    actor: DiagnosticActor = Depends(require_diagnostic_staff),
 ):
     import uuid
-    from src.domain.report_generator import generate_and_save_report
 
     try:
         sid_uuid = uuid.UUID(student_id)
     except Exception:
         sid_uuid = None
 
-    # Prioritize exact match by invite_code or session_id
-    session = (
-        db.query(DiagSession)
-        .filter(
-            (DiagSession.invite_code == student_id) |
-            (DiagSession.id == sid_uuid),
-            DiagSession.phase == "completed",
+    if not sid_uuid:
+        raise HTTPException(status_code=404, detail="Ученик не найден")
+
+    exact_session_id = None
+    if session_id:
+        try:
+            exact_session_id = uuid.UUID(session_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Некорректный идентификатор сессии")
+
+    if exact_session_id:
+        session = (
+            db.query(DiagSession)
+            .filter(
+                DiagSession.id == exact_session_id,
+                DiagSession.student_id == sid_uuid,
+                DiagSession.phase == "completed",
+            )
+            .first()
         )
-        .order_by(desc(DiagSession.completed_at))
-        .first()
-    )
-    # Fallback to latest completed session by student_id
-    if not session and sid_uuid:
+        if not session:
+            raise HTTPException(status_code=404, detail="Отчёт этой диагностики не найден")
+    else:
         session = (
             db.query(DiagSession)
             .filter(
@@ -253,6 +273,11 @@ def student_report(
             .first()
         )
 
+    if session:
+        await require_student_report_access(actor, str(session.student_id))
+    else:
+        await require_student_report_access(actor, str(sid_uuid))
+
     # DiagReport by student_id, session_id, or session.id
     report = None
     if session:
@@ -261,7 +286,7 @@ def student_report(
             .filter(DiagReport.session_id == session.id)
             .first()
         )
-    if not report and sid_uuid:
+    if not report and not exact_session_id:
         report = (
             db.query(DiagReport)
             .filter(DiagReport.student_id == sid_uuid)
@@ -272,23 +297,10 @@ def student_report(
     if not report and not session:
         return {"report": None}
 
-    # On-the-fly generation if completed session exists but report/narrative missing
-    if session and (not report or not report.narrative_ru):
-        try:
-            report = generate_and_save_report(
-                db,
-                session_id=session.id,
-                student_id=session.student_id,
-                grade_level=session.grade_level,
-                theta=float(session.theta or 0.0),
-                theta_se=float(session.theta_se or 0.5),
-                overall_level=session.overall_level or "at_grade",
-                topic_breakdown=session.topic_breakdown or {},
-                weak_skills=session.weak_skills or [],
-                items_total=session.items_answered or 25,
-            )
-        except Exception as exc:
-            log.warning("On-the-fly report generation failed: %s", exc)
+    # A GET must remain read-only. Historically, merely opening this page
+    # could transmit a completed historic diagnostic to the narrative model.
+    # New diagnostics are queued at completion; historic rebuilds are an
+    # explicit, auditable operation.
 
     # Resolve human-readable names for weak skills
     knowledge_repo = KnowledgeRepository()
@@ -330,7 +342,9 @@ def student_report(
         ans_stats = (
             db.query(
                 func.count(DiagAnswer.id).label("total"),
-                func.sum(DiagAnswer.outcome).label("correct")
+                func.sum(
+                    case((DiagAnswer.outcome >= 1.0, 1), else_=0)
+                ).label("correct"),
             )
             .filter(DiagAnswer.session_id == session.id)
             .first()
@@ -374,6 +388,20 @@ def student_report(
     return {
         # ── Structured JSON report (v2) ─────────────────────────────────────
         "report_json":    out_report_json,
+        # Observable lifecycle for staff UI. This endpoint never starts work:
+        # a report is queued only when a new diagnostic is completed or when a
+        # staff member explicitly requests a historical rebuild.
+        "report_generation": {
+            "status": report.generation_status if report else "pending",
+            "stage": report.generation_stage if report else "queued",
+            "attempts": int(report.generation_attempts or 0) if report else 0,
+            "is_current_schema": bool(
+                report
+                and report.report_json
+                and report.report_schema_version >= 2
+                and report.generation_status == "ready"
+            ),
+        },
         # ── Core report fields ──────────────────────────────────────────────
         "grade_level":    (report.grade_level if report else None) or (session.grade_level if session else None),
         "overall_level":  _LEVEL_RU_MAP.get(overall_level_key or "", overall_level_key),
@@ -393,7 +421,10 @@ def student_report(
         "weak_topics":   weak_names,
         "weak_skills":   weak_skill_ids,
         "skill_names":   skill_names,
-        "distractor_errors": [],
+        "distractor_errors": [
+            ep for ep in (out_report_json.get("error_patterns", []) if isinstance(out_report_json, dict) else [])
+            if isinstance(ep, dict) and ep.get("eval_category") == "distractor"
+        ],
     }
 
 
@@ -554,9 +585,10 @@ def _build_diagnostic_trajectory(session: Optional[DiagSession], db: Session, kn
 # ── 4. GROUP OVERVIEW ──────────────────────────────────────────────────────────
 
 @router.get("/groups/overview")
-def group_overview(
+async def group_overview(
     student_ids: List[str] = Query(..., description="Список student_id группы"),
     db: Session = Depends(get_db),
+    actor: DiagnosticActor = Depends(require_diagnostic_staff),
 ):
     """
     Обзор группы — принимает список student_ids от фронта/монолита.
@@ -567,6 +599,7 @@ def group_overview(
     level_counts = {"mastered": 0, "learning": 0, "struggling": 0, "gap": 0, "no_data": 0}
 
     for sid in student_ids:
+        await require_student_report_access(actor, sid)
         session = (
             db.query(DiagSession)
             .filter(
@@ -609,9 +642,10 @@ def group_overview(
 # ── 5. GROUP SKILL HEATMAP ─────────────────────────────────────────────────────
 
 @router.get("/groups/heatmap")
-def group_skill_heatmap(
+async def group_skill_heatmap(
     student_ids: List[str] = Query(..., description="Список student_id группы"),
     db: Session = Depends(get_db),
+    actor: DiagnosticActor = Depends(require_diagnostic_staff),
 ):
     """
     Тепловая карта навыков группы (students × topics).
@@ -621,6 +655,7 @@ def group_skill_heatmap(
     student_breakdowns: dict = {}
 
     for sid in student_ids:
+        await require_student_report_access(actor, sid)
         session = (
             db.query(DiagSession)
             .filter(
@@ -676,15 +711,22 @@ def group_skill_heatmap(
 # ── 6. ORG LIVE QUEUE ──────────────────────────────────────────────────────────
 
 @router.get("/org/live-queue")
-def org_live_queue(
+async def org_live_queue(
     hours: int = Query(24, ge=1, le=168, description="Период в часах"),
     db: Session = Depends(get_db),
+    actor: DiagnosticActor = Depends(require_diagnostic_staff),
 ):
     """
     Живая очередь диагностик за последние N часов.
     Активные (in-progress) + завершённые.
     """
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    # Legacy diagnostic sessions do not yet persist org_id. Returning a global
+    # queue would cross organisation boundaries, so this route is deliberately
+    # disabled until the organisation-key migration is completed.
+    raise HTTPException(
+        status_code=409,
+        detail="Очередь диагностик временно недоступна до миграции tenant-изоляции",
+    )
 
     # Active sessions (not completed, created recently)
     active = (
@@ -735,16 +777,12 @@ def org_live_queue(
 # ── 7. ORG STATS ───────────────────────────────────────────────────────────────
 
 @router.get("/org/stats")
-def org_stats(
+async def org_stats(
     db: Session = Depends(get_db),
+    actor: DiagnosticActor = Depends(require_diagnostic_staff),
 ):
     """Общая статистика: всего сессий, завершённых, средний theta."""
-    total = db.query(func.count(DiagSession.id)).scalar()
-    completed = db.query(func.count(DiagSession.id)).filter(DiagSession.phase == "completed").scalar()
-    avg_theta = db.query(func.avg(DiagSession.theta)).filter(DiagSession.phase == "completed").scalar()
-
-    return {
-        "total_sessions": total,
-        "completed_sessions": completed,
-        "avg_theta": round(float(avg_theta), 3) if avg_theta else None,
-    }
+    raise HTTPException(
+        status_code=409,
+        detail="Статистика организации временно недоступна до миграции tenant-изоляции",
+    )

@@ -50,6 +50,7 @@ class AnswerResult(BaseModel):
     se: float
     next_task: Optional[TaskOut] = None
     session_completed: bool = False
+    stop_reason: Optional[str] = None
 
 
 # ── Session ───────────────────────────────────────────────────────────────
@@ -64,6 +65,7 @@ class ActiveSessionResponse(BaseModel):
     session_id: uuid.UUID
     items_answered: int
     current_task: TaskOut
+    total_time_ms: int = 0
 
 
 # ── Report ────────────────────────────────────────────────────────────────

@@ -37,6 +37,8 @@ class SessionState:
     # Section (L1) iteration
     current_section_idx: int = 0
     section_ids: List[str] = field(default_factory=list)
+    current_section_id: Optional[str] = None
+    covered_section_ids: List[str] = field(default_factory=list)
 
     # Navigator states (serialized as plain dicts)
     topic_navigator_states: Dict[str, dict] = field(default_factory=dict)
@@ -53,6 +55,12 @@ class SessionState:
 
     # Gaps found by deep scan
     confirmed_gaps: List[str] = field(default_factory=list)
+    deep_scan_incomplete: bool = False
+    saved_nav_context: Optional[dict] = None
+
+    # Why the diagnostic ended.  This is persisted into the final session and
+    # report so a max-length result is never presented as a precision result.
+    stop_reason: Optional[str] = None
 
     # ── Serialization ──────────────────────────────────────────────────────
 
@@ -72,6 +80,8 @@ class SessionState:
             "used_task_ids": self.used_task_ids,
             "current_section_idx": self.current_section_idx,
             "section_ids": self.section_ids,
+            "current_section_id": self.current_section_id,
+            "covered_section_ids": self.covered_section_ids,
             "topic_navigator_states": self.topic_navigator_states,
             "current_subtopic_nav": self.current_subtopic_nav,
             "current_skill_nav": self.current_skill_nav,
@@ -82,6 +92,9 @@ class SessionState:
             "current_subtopic_id": self.current_subtopic_id,
             "is_in_deep_scan": self.is_in_deep_scan,
             "confirmed_gaps": self.confirmed_gaps,
+            "deep_scan_incomplete": self.deep_scan_incomplete,
+            "saved_nav_context": self.saved_nav_context,
+            "stop_reason": self.stop_reason,
         }
 
     @classmethod
@@ -105,6 +118,8 @@ class SessionState:
             used_task_ids=data["used_task_ids"],
             current_section_idx=data.get("current_section_idx", 0),
             section_ids=data.get("section_ids", []),
+            current_section_id=data.get("current_section_id"),
+            covered_section_ids=data.get("covered_section_ids", []),
             topic_navigator_states=data.get("topic_navigator_states", {}),
             current_subtopic_nav=data.get("current_subtopic_nav"),
             current_skill_nav=data.get("current_skill_nav"),
@@ -115,4 +130,7 @@ class SessionState:
             current_subtopic_id=data.get("current_subtopic_id"),
             is_in_deep_scan=data.get("is_in_deep_scan", False),
             confirmed_gaps=data.get("confirmed_gaps", []),
+            deep_scan_incomplete=data.get("deep_scan_incomplete", False),
+            saved_nav_context=data.get("saved_nav_context"),
+            stop_reason=data.get("stop_reason"),
         )
