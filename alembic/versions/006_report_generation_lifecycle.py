@@ -5,6 +5,7 @@ Revises: 005_diag_session_stop_reason
 """
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "006_report_generation_lifecycle"
@@ -26,6 +27,12 @@ def upgrade() -> None:
         if name not in existing:
             op.add_column("diag_reports", column)
 
+    # The structured report body itself was only ever created by
+    # ``Base.metadata.create_all()``; no revision has ever added it.  Without it
+    # the backfill below raises ``UndefinedColumn`` on any database that has not
+    # been touched by that call, which is what made the service crash-loop on
+    # preview.  It has to exist before the ``report_json`` read further down.
+    add_if_missing("report_json", sa.Column("report_json", postgresql.JSONB(), nullable=True))
     add_if_missing(
         "report_schema_version",
         sa.Column("report_schema_version", sa.Integer(), nullable=False, server_default="0"),
