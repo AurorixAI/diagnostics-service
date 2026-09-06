@@ -74,6 +74,12 @@ async def create_session(
         raise HTTPException(status_code=409, detail={"code": exc.code, "message": exc.message})
     except DiagnosticError as exc:
         raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message})
+    except HTTPException:
+        # A deliberate 4xx (missing invite capability, wrong student, a
+        # session already started) must reach the client as itself. The
+        # generic handler below would relabel it 500, and the UI would
+        # report a server failure instead of what the user has to do.
+        raise
     except Exception as exc:
         log.error("create_session error: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error creating session")
@@ -147,6 +153,12 @@ async def submit_answer(
         raise HTTPException(status_code=410, detail={"code": exc.code, "message": exc.message})
     except DiagnosticError as exc:
         raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message})
+    except HTTPException:
+        # A deliberate 4xx (missing invite capability, wrong student, a
+        # session already started) must reach the client as itself. The
+        # generic handler below would relabel it 500, and the UI would
+        # report a server failure instead of what the user has to do.
+        raise
     except Exception as exc:
         log.error("submit_answer error: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error processing answer")
@@ -174,6 +186,12 @@ async def get_report(
         return service.get_report_data(session_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except HTTPException:
+        # A deliberate 4xx (missing invite capability, wrong student, a
+        # session already started) must reach the client as itself. The
+        # generic handler below would relabel it 500, and the UI would
+        # report a server failure instead of what the user has to do.
+        raise
     except Exception as exc:
         log.error("get_report error: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error fetching report")
