@@ -28,8 +28,9 @@ import logging
 import re
 from typing import Optional, Tuple
 
-from sympy import simplify
+from sympy import Abs, E, Float, Integer, Rational, Symbol, cos, exp, log as sympy_log, pi, simplify, sin, sqrt, tan
 from sympy.parsing.sympy_parser import (
+    auto_symbol,
     parse_expr,
     standard_transformations,
     implicit_multiplication_application,
@@ -39,7 +40,45 @@ from .answer_value import answer_value_key
 
 log = logging.getLogger(__name__)
 
-_SYMPY_TRANSFORMATIONS = standard_transformations + (implicit_multiplication_application,)
+# ``parse_expr`` ultimately delegates to Python ``eval``.  In particular, its
+# default global namespace imports all of SymPy, which is not acceptable for a
+# string sent by a student.  We remove auto_symbol (all accepted variables are
+# supplied explicitly below) and pass a deliberately tiny parser namespace.
+_SYMPY_TRANSFORMATIONS = tuple(
+    transformation
+    for transformation in standard_transformations
+    if transformation is not auto_symbol
+) + (implicit_multiplication_application,)
+
+_MAX_SYMBOLIC_INPUT_LENGTH = 256
+_MAX_PARENTHESES_DEPTH = 32
+_MAX_OPERATOR_COUNT = 64
+_MAX_POWER_OPERATORS = 4
+_MAX_INTEGER_DIGITS = 16
+_MAX_ABSOLUTE_INTEGER_POWER = 12
+_ALLOWED_SYMBOLIC_CHARACTERS = re.compile(r"[0-9A-Za-z+*/().\-\s]+")
+_IDENTIFIER = re.compile(r"[A-Za-z]+")
+_INTEGER_LITERAL = re.compile(r"\d+")
+_INTEGER_POWER = re.compile(r"\*\*\s*\(?\s*(-?\d+)\s*\)?")
+_SAFE_FUNCTIONS = {
+    "sqrt": sqrt,
+    "sin": sin,
+    "cos": cos,
+    "tan": tan,
+    "log": sympy_log,
+    "exp": exp,
+    "abs": Abs,
+}
+_SAFE_CONSTANTS = {"pi": pi, "E": E}
+_SAFE_GLOBALS = {
+    "__builtins__": {},
+    # Numeric transformations emitted by SymPy's parser need only these
+    # constructors. No module, file, reflection or arbitrary callable is
+    # available in this namespace.
+    "Integer": Integer,
+    "Float": Float,
+    "Rational": Rational,
+}
 
 # ── Math notation preprocessing ───────────────────────────────────────────────
 
@@ -114,6 +153,74 @@ def _normalize_number(value: str) -> Optional[float]:
 
 # ── SymPy equivalence ─────────────────────────────────────────────────────────
 
+def _safe_parse_symbolic_expression(value: str):
+    """Parse a bounded school-math expression without executable Python input.
+
+    This is an input boundary for student answers, not a general SymPy parser.
+    It accepts the notation already supported by the evaluator (numbers,
+    single-letter variables, arithmetic, parentheses and a small function
+    allow-list), then creates every symbol explicitly. Any other token is
+    rejected before ``parse_expr`` is reached.
+    """
+    expression = _preprocess_for_sympy(value)
+    if not expression or len(expression) > _MAX_SYMBOLIC_INPUT_LENGTH:
+        raise ValueError("symbolic expression has invalid length")
+    if not _ALLOWED_SYMBOLIC_CHARACTERS.fullmatch(expression):
+        raise ValueError("symbolic expression contains unsupported characters")
+    if "__" in expression:
+        raise ValueError("dunder names are not valid math")
+    # A decimal point is allowed only inside a numeric literal. This rejects
+    # attribute syntax such as ``x.__class__`` even if future character rules
+    # are relaxed by accident.
+    if re.search(r"(?<!\d)\.|\.(?!\d)", expression):
+        raise ValueError("decimal point must be surrounded by digits")
+    if sum(expression.count(operator) for operator in ("+", "-", "*", "/")) > _MAX_OPERATOR_COUNT:
+        raise ValueError("symbolic expression has too many operators")
+    if any(len(number.group(0)) > _MAX_INTEGER_DIGITS for number in _INTEGER_LITERAL.finditer(expression)):
+        raise ValueError("numeric literal is too large")
+
+    powers = list(_INTEGER_POWER.finditer(expression))
+    if len(powers) > _MAX_POWER_OPERATORS:
+        raise ValueError("symbolic expression has too many powers")
+    if any(abs(int(power.group(1))) > _MAX_ABSOLUTE_INTEGER_POWER for power in powers):
+        raise ValueError("integer power is outside the supported school range")
+
+    depth = 0
+    for character in expression:
+        if character == "(":
+            depth += 1
+            if depth > _MAX_PARENTHESES_DEPTH:
+                raise ValueError("symbolic expression is too deeply nested")
+        elif character == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("symbolic expression has unbalanced parentheses")
+    if depth != 0:
+        raise ValueError("symbolic expression has unbalanced parentheses")
+
+    local_dict = {**_SAFE_FUNCTIONS, **_SAFE_CONSTANTS}
+    for match in _IDENTIFIER.finditer(expression):
+        name = match.group(0)
+        following = expression[match.end():].lstrip()
+        if name in _SAFE_FUNCTIONS:
+            if not following.startswith("("):
+                raise ValueError("math function must be called")
+            continue
+        if name in _SAFE_CONSTANTS:
+            if following.startswith("("):
+                raise ValueError("math constant cannot be called")
+            continue
+        if len(name) != 1:
+            raise ValueError("only single-letter variables are supported")
+        local_dict[name] = Symbol(name, real=True)
+
+    return parse_expr(
+        expression,
+        local_dict=local_dict,
+        global_dict=_SAFE_GLOBALS,
+        transformations=_SYMPY_TRANSFORMATIONS,
+    )
+
 def _sympy_equivalent(student_expr: str, canonical_expr: str) -> bool:
     """
     Check whether two math expressions are symbolically equivalent using SymPy.
@@ -126,18 +233,8 @@ def _sympy_equivalent(student_expr: str, canonical_expr: str) -> bool:
       "0.5"     == "1/2"       → True
     """
     try:
-        local_dict: dict = {}
-
-        expr_student = parse_expr(
-            _preprocess_for_sympy(student_expr),
-            local_dict=local_dict,
-            transformations=_SYMPY_TRANSFORMATIONS,
-        )
-        expr_correct = parse_expr(
-            _preprocess_for_sympy(canonical_expr),
-            local_dict=local_dict,
-            transformations=_SYMPY_TRANSFORMATIONS,
-        )
+        expr_student = _safe_parse_symbolic_expression(student_expr)
+        expr_correct = _safe_parse_symbolic_expression(canonical_expr)
 
         diff = simplify(expr_student - expr_correct)
         return diff == 0

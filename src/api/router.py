@@ -180,7 +180,13 @@ async def get_report(
             invite_code,
             student_id=str(session.student_id),
             grade_level=session.grade_level,
-            allowed_statuses={"in_progress", "completed"},
+            # Completion is durable in diagnostic-service before the async
+            # auth-service projection has necessarily moved the invite from
+            # ``confirmed`` to ``in_progress``/``completed``.  The session
+            # lookup above already binds this exact code to this exact
+            # completed attempt, so allowing that narrow lag cannot expose a
+            # different student's report or revive an invite for a new run.
+            allowed_statuses={"confirmed", "in_progress", "completed"},
             enforce_expiry=False,
         )
         return service.get_report_data(session_id)
