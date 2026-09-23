@@ -39,6 +39,14 @@ def answer_value_key(value: object) -> str:
 
 _LEFT_RIGHT_RE = re.compile(r"\\(?:left|right)(?![A-Za-z])")
 _DIGIT_GAP_RE = re.compile(r"(?<=\d)\s+(?=\d)")
+_DECIMAL_COMMA_RE = re.compile(r"(?<=\d)(?:\{,\}|,)(?=\d)")
+# `\sin{\alpha}` renders exactly like `\sin \alpha`: braces around a single
+# argument of a function (after an optional index or power) are invisible.
+_FUNC_ARG_BRACES_RE = re.compile(
+    r"(\\(?:arcsin|arccos|arctan|arctg|arcctg|sin|cos|tan|tg|cot|ctg|sec|csc|ln|lg|log|exp)"
+    r"(?:[_^](?:\{[^{}]*\}|[0-9A-Za-z]))*)\s*\{(\\?[A-Za-z]+|\d+)\}"
+)
+_TRAILING_PUNCT_RE = re.compile(r"[\s.;]+$")
 _THIN_SPACE_RE = re.compile(r"\\[,;!]|\\q?quad(?![A-Za-z])")
 _MIXED_LATEX_RE = re.compile(r"(-?)\s*(\d+)?\s*\\frac\{\s*(-?\d+)\s*\}\{\s*(\d+)\s*\}")
 _MIXED_PLAIN_RE = re.compile(r"(-?)(\d+)\s+(\d+)\s*/\s*(\d+)")
@@ -51,11 +59,17 @@ def _notation_key(value: object) -> str:
     """answer_value_key after removing every math delimiter, not only outer ones.
 
     `$[-4$; $2]$` and `$[-4; 2]$` are the same value split differently into
-    formulas. A space between two digits is kept as a marker so the mixed
-    number `3 4/9` never collapses into the different fraction `34/9`.
+    formulas, and `0{,}78` and `0.78` are one decimal written with a Russian
+    and an English separator. Invisible braces (`\\sin{\\alpha}`) and a
+    closing period or semicolon do not change an answer either. A space
+    between two digits is kept as a marker so the mixed number `3 4/9` never
+    collapses into the different fraction `34/9`.
     """
     text = str(value or "").replace("$", "").replace("−", "-")
     text = _LEFT_RIGHT_RE.sub("", text)
+    text = _FUNC_ARG_BRACES_RE.sub(r"\1 \2", text)
+    text = _DECIMAL_COMMA_RE.sub(".", text)
+    text = _TRAILING_PUNCT_RE.sub("", text)
     text = _DIGIT_GAP_RE.sub("␣", text)
     return answer_value_key(text)
 

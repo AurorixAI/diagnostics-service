@@ -138,6 +138,50 @@ def test_stored_option_displayed_exactly_like_the_key_counts_as_the_key():
     assert _graded(task, options) == [True, False, False]
 
 
+def test_decimal_comma_and_dot_options_are_one_answer():
+    key = r"$A(-5{,}8), B(9{,}8); |-5{,}8| = 5{,}8, |9{,}8| = 9{,}8$"
+    task = _task(answer_type="text", correct_answer=key, correct_answer_latex=key,
+                 answer_options=["$A(-5.8)$, $B(9.8)$; $|-5.8| = 5.8$, $|9.8| = 9.8$",
+                                 "$A(5.8)$, $B(-9.8)$; $|5.8| = 5.8$, $|-9.8| = 9.8$"])
+
+    options, _ = build_diag_answer_options(task)
+
+    assert len(options) == 2
+    assert _graded(task, options).count(True) == 1
+
+
+def test_key_repeated_without_its_closing_period_is_one_answer():
+    key = "Если $a < -4$, то $x \\in (4; -a]$; если $a > -4$, то $x \\in [-a; 4)$."
+    task = _task(answer_type="text", correct_answer=key, correct_answer_latex=key,
+                 distractor_meta=[{"value": "Если $a < -4$, то $x \\in [-a; 4)$; если $a > -4$, то $x \\in (4; -a]$"},
+                                  {"value": "Если $a < -4$, то $x \\in (4; -a]$; если $a > -4$, то $x \\in [-a; 4)$"},
+                                  {"value": "Если $a < -4$, то $x \\in \\varnothing$"}])
+
+    options, _ = build_diag_answer_options(task)
+
+    assert len(options) == 3
+    assert _graded(task, options).count(True) == 1
+
+
+def test_stored_options_whose_display_copies_the_key_become_open_input():
+    # Historical row: every option's LaTeX was overwritten with the key's.
+    key = r"$x^{6} + 6x^{5}a + a^{6}$"
+    task = _task(answer_type="expression", correct_answer=key, correct_answer_latex=key,
+                 answer_options=[r"$x^{6} + 6x^{5a} + a^{6}$", r"$x^{6} + 6x^{5a} + a^{5}$",
+                                 r"$x^{6} + 6x^{5a} + 6a^{6}$"],
+                 answer_options_latex=[key, key, key])
+
+    assert build_diag_answer_options(task, seed="s:task-1") == (None, None)
+
+
+def test_empty_stored_options_are_never_served():
+    task = _task(correct_answer="4", answer_options=["4", "", "5", "  "])
+
+    options, _ = build_diag_answer_options(task)
+
+    assert options == ["4", "5"]
+
+
 def test_options_that_look_different_are_never_merged():
     task = _task(correct_answer="4", distractor_meta=[{"value": "3", "value_latex": "$3$"},
                                                       {"value": "5", "value_latex": "$5$"},

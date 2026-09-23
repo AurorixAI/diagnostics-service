@@ -186,6 +186,8 @@ def build_diag_answer_options(
                 # Keep the author's notation on screen: showing the key's own
                 # notation (0,22 among fractions 1/4, 1/5) would give it away.
                 pairs.append((correct, latex or value))
+            elif not answer_value_key(value):
+                continue
             elif key_index is not None and _same_on_screen(value, latex, correct, key_latex):
                 continue
             elif any(_same_on_screen(value, latex, served, shown) for served, shown in pairs):
@@ -194,7 +196,11 @@ def build_diag_answer_options(
                 pairs.append((value, latex))
         if correct and key_index is None:
             pairs.append((correct, key_latex or correct))
-        return _ordered(pairs, seed)
+        # Options whose display is a copy of the key collapse into it; a
+        # single remaining button would just show the answer.
+        if len(pairs) >= 2:
+            return _ordered(pairs, seed)
+        return None, None
 
     if correct and (len(distractors) >= 2 or (distractors and _is_binary_answer(correct))):
         pairs = [(correct, key_latex)] if answer_value_key(correct) else []

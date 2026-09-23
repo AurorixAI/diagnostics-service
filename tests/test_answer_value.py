@@ -20,6 +20,13 @@ from src.domain.answer_value import answer_value_key, answers_equivalent, exact_
     (r"-\dfrac{1}{2}", "-0,5"),
     (r"\dfrac{-1}{2}", "-1/2"),
     ("да", " Да "),
+    ("$0{,}78^{-0{,}7}$", "$0.78^{-0.7}$"),
+    (r"$\log_{0{,}2} 0{,}7$", r"$\log_{0.2} 0.7$"),
+    (r"$\sin{\alpha}$", r"$\sin \alpha$"),
+    (r"$\dfrac{1}{\cos^{2}{\alpha}}$", r"$\dfrac{1}{\cos^{2} \alpha}$"),
+    (r"$\log_{2}{x}$", r"$\log_{2} x$"),
+    ("Если $a = -4$, то $x \\in [-a; 4)$.", "Если $a = -4$, то $x \\in [-a; 4)$"),
+    ("$25, 9, -39, -52;$", "$25, 9, -39, -52$"),
 ])
 def test_answers_equivalent_recognises_one_value_in_two_notations(first, second):
     assert answers_equivalent(first, second)
@@ -40,6 +47,12 @@ def test_answers_equivalent_recognises_one_value_in_two_notations(first, second)
     (r"\sqrt{2}", "2"),
     ("да", "нет"),
     (r"$\dfrac{\sqrt{2}}{2}$", r"$\sqrt{\dfrac{2}{2}}$"),
+    ("1, 2", "1.2"),
+    (r"$\log_{0.2} 0.7$", r"$\log_{0.7} 0.2$"),
+    (r"$\sin \alpha$", r"$\sin 2\alpha$"),
+    (r"$\sin{x}$", r"$\sin{y}$"),
+    ("1.", "1.5"),
+    (r"$x \in (4; -a]$", r"$x \in (4; -a)$"),
 ])
 def test_answers_equivalent_never_merges_different_answers(first, second):
     assert not answers_equivalent(first, second)
