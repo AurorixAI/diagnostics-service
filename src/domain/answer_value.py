@@ -9,6 +9,8 @@ from __future__ import annotations
 
 
 import re
+from fractions import Fraction
+from typing import Optional
 
 def answer_value_key(value: object) -> str:
     text = str(value or "").strip()
@@ -33,3 +35,78 @@ def answer_value_key(value: object) -> str:
     # remove whitespace
     text = re.sub(r"\s+", "", text)
     return text.casefold()
+
+
+_LEFT_RIGHT_RE = re.compile(r"\\(?:left|right)(?![A-Za-z])")
+_DIGIT_GAP_RE = re.compile(r"(?<=\d)\s+(?=\d)")
+_THIN_SPACE_RE = re.compile(r"\\[,;!]|\\q?quad(?![A-Za-z])")
+_MIXED_LATEX_RE = re.compile(r"(-?)\s*(\d+)?\s*\\frac\{\s*(-?\d+)\s*\}\{\s*(\d+)\s*\}")
+_MIXED_PLAIN_RE = re.compile(r"(-?)(\d+)\s+(\d+)\s*/\s*(\d+)")
+_FRACTION_RE = re.compile(r"(-?\d+)\s*/\s*(\d+)")
+_THOUSANDS_RE = re.compile(r"-?\d{1,3}(?: \d{3})+")
+_DECIMAL_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+
+
+def _notation_key(value: object) -> str:
+    """answer_value_key after removing every math delimiter, not only outer ones.
+
+    `$[-4$; $2]$` and `$[-4; 2]$` are the same value split differently into
+    formulas. A space between two digits is kept as a marker so the mixed
+    number `3 4/9` never collapses into the different fraction `34/9`.
+    """
+    text = str(value or "").replace("$", "").replace("−", "-")
+    text = _LEFT_RIGHT_RE.sub("", text)
+    text = _DIGIT_GAP_RE.sub("␣", text)
+    return answer_value_key(text)
+
+
+def exact_number(value: object) -> Optional[Fraction]:
+    """Exact rational value of a plain number, fraction or mixed number.
+
+    Recognises only unambiguous numeric forms; anything else (expressions,
+    intervals, lists, percentages) returns None so it can never be matched
+    by value. There is deliberately no floating-point tolerance: 1/3 and
+    0,33 are different answers.
+    """
+    text = str(value or "").replace("$", "").replace("{,}", ",").replace("−", "-")
+    text = text.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac")
+    text = _THIN_SPACE_RE.sub(" ", text).strip()
+    m = _MIXED_LATEX_RE.fullmatch(text)
+    if m:
+        sign, whole, num, den = m.groups()
+        if int(den) == 0 or (whole and num.startswith("-")):
+            return None
+        result = Fraction(int(num), int(den)) + (int(whole) if whole else 0)
+        return -result if sign else result
+    m = _MIXED_PLAIN_RE.fullmatch(text)
+    if m:
+        sign, whole, num, den = m.groups()
+        if int(den) == 0:
+            return None
+        result = int(whole) + Fraction(int(num), int(den))
+        return -result if sign else result
+    m = _FRACTION_RE.fullmatch(text)
+    if m:
+        return Fraction(int(m.group(1)), int(m.group(2))) if int(m.group(2)) else None
+    if _THOUSANDS_RE.fullmatch(text):
+        return Fraction(text.replace(" ", ""))
+    if _DECIMAL_RE.fullmatch(text):
+        return Fraction(text.replace(",", "."))
+    return None
+
+
+def answers_equivalent(first: object, second: object) -> bool:
+    """True only when two stored answers are provably the same value.
+
+    Used to recognise one answer written in two notations (`0,22` and
+    `\\dfrac{11}{50}`, `$[-4$; $2]$` and `$[-4; 2]$`) among a task's options.
+    It is intentionally strict: a false positive would let a wrong option be
+    shown as correct, so anything not provably equal counts as different.
+    """
+    a, b = _notation_key(first), _notation_key(second)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    na, nb = exact_number(first), exact_number(second)
+    return na is not None and nb is not None and na == nb

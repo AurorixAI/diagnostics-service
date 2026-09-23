@@ -5,12 +5,55 @@ import random
 from typing import Any, Optional
 
 from .proof_answer import extract_proof_expression, format_proof_answer, is_proof_placeholder
-from .answer_value import answer_value_key
+from .answer_value import answer_value_key, answers_equivalent
 
 # Types that never get auto-built MCQ (no meaningful button choices).
 _DIAG_ALWAYS_OPEN_TYPES = frozenset({
     "open_text",
 })
+
+# A yes/no question is a natural two-button choice; it needs only the one
+# opposite distractor instead of the usual two.
+_BINARY_ANSWERS = frozenset({"да", "нет", "верно", "неверно", "yes", "no"})
+
+_LETTER_OPTION_KEYS = frozenset({"a", "b", "c", "d", "а", "б", "в", "г"})
+
+
+def _is_binary_answer(value: str) -> bool:
+    return answer_value_key(value).strip(".!") in _BINARY_ANSWERS
+
+
+def _is_letter_only(values: list[str]) -> bool:
+    """Options that are bare letters point at choices printed in the question.
+
+    The UI labels buttons A, B, C, D by position, so reordering such options
+    would put the letter "C" under the button labelled "A".
+    """
+    return all(answer_value_key(v).strip(".)") in _LETTER_OPTION_KEYS for v in values)
+
+
+def _same_on_screen(value: str, latex: str, other_value: str, other_latex: str) -> bool:
+    """Two options a student cannot tell apart: same value or same display.
+
+    Grading follows what the student sees. Historical rows sometimes pair a
+    display string with a differently written (or even different) raw value;
+    if an option is displayed exactly like the key it must count as the key,
+    and two options displayed identically must not both be offered.
+    """
+    return answers_equivalent(value, other_value) or answers_equivalent(latex or value, other_latex or other_value)
+
+
+def _ordered(pairs: list[tuple[str, str]], seed: Optional[str]) -> tuple[list[str], list[str]]:
+    """Return (values, latex), shuffled deterministically when a seed is given.
+
+    The seed is the session and task, so every student gets an independent
+    order that never changes within their attempt (e.g. after a page reload).
+    Without a seed the canonical order is kept.
+    """
+    pairs = list(pairs)
+    if seed is not None and not _is_letter_only([value for value, _ in pairs]):
+        random.Random(seed).shuffle(pairs)
+    return [value for value, _ in pairs], [latex for _, latex in pairs]
 
 
 def _distractor_values(task: Any) -> list[str]:
@@ -45,7 +88,11 @@ def should_show_diag_mcq(task: Any) -> bool:
     # independently authored list.
     if _has_stored_options(task):
         return True
-    return len(_distractor_values(task)) >= 2
+    distractors = _distractor_values(task)
+    if len(distractors) >= 2:
+        return True
+    correct = str(getattr(task, "correct_answer", "") or "").strip()
+    return bool(distractors) and _is_binary_answer(correct)
 
 
 def _latex_for_value(task: Any, value: str) -> str:
@@ -98,41 +145,66 @@ def _clean_correct_answer(task: Any) -> str:
     return ca
 
 
-def build_diag_answer_options(task: Any) -> tuple[Optional[list[str]], Optional[list[str]]]:
+def build_diag_answer_options(
+    task: Any, seed: Optional[str] = None,
+) -> tuple[Optional[list[str]], Optional[list[str]]]:
     """
-    Build shuffled MCQ options (+ parallel LaTeX) for diagnostic presentation.
+    Build MCQ options (+ parallel LaTeX) for diagnostic presentation.
     Returns (None, None) when task should use open input.
+
+    The grader compares the submitted option value with the key, so the one
+    option that equals the key — in whatever notation it was stored — is
+    served with the key itself as its value while keeping its own display.
+    Options that are the same value in another notation are merged, so a
+    student never sees two versions of one answer with only one counted.
+
+    ``seed`` (session + task) enables a stable per-attempt shuffle.
     """
     correct = _clean_correct_answer(task)
+    key_latex = _latex_for_value(task, correct)
     distractors = _distractor_values(task)
     existing = getattr(task, "answer_options", None)
     if _has_stored_options(task) and isinstance(existing, list):
-        opts = [_extract_option_text(x) for x in existing]
         stored_latex = getattr(task, "answer_options_latex", None)
-        latex = [
-            (str(stored_latex[index]).strip() if isinstance(stored_latex, list) and index < len(stored_latex) and stored_latex[index] else "")
-            or _extract_option_latex(option)
-            or _latex_for_value(task, value)
-            for index, (option, value) in enumerate(zip(existing, opts))
-        ]
-        correct_key = answer_value_key(correct)
-        if correct and correct_key and not any(answer_value_key(option) == correct_key for option in opts):
-            opts.append(correct)
-            latex.append(_latex_for_value(task, correct) or correct)
-        return opts, latex
-
-    if correct and len(distractors) >= 2:
-        seen: set[str] = set()
-        opts: list[str] = []
-        for value in [correct, *distractors]:
-            key = answer_value_key(value)
-            if not key or key in seen:
+        stored = []
+        for index, option in enumerate(existing):
+            value = _extract_option_text(option)
+            latex = (
+                (str(stored_latex[index]).strip() if isinstance(stored_latex, list) and index < len(stored_latex) and stored_latex[index] else "")
+                or _extract_option_latex(option)
+                or _latex_for_value(task, value)
+            )
+            stored.append((value, latex))
+        key_index = next(
+            (i for i, (value, latex) in enumerate(stored)
+             if correct and _same_on_screen(value, latex, correct, key_latex)),
+            None,
+        )
+        pairs: list[tuple[str, str]] = []
+        for index, (value, latex) in enumerate(stored):
+            if index == key_index:
+                # Keep the author's notation on screen: showing the key's own
+                # notation (0,22 among fractions 1/4, 1/5) would give it away.
+                pairs.append((correct, latex or value))
+            elif key_index is not None and _same_on_screen(value, latex, correct, key_latex):
                 continue
-            seen.add(key)
-            opts.append(value)
-        shuffled = list(opts)
-        random.shuffle(shuffled)
-        return shuffled, [_latex_for_value(task, value) for value in shuffled]
+            elif any(_same_on_screen(value, latex, served, shown) for served, shown in pairs):
+                continue
+            else:
+                pairs.append((value, latex))
+        if correct and key_index is None:
+            pairs.append((correct, key_latex or correct))
+        return _ordered(pairs, seed)
+
+    if correct and (len(distractors) >= 2 or (distractors and _is_binary_answer(correct))):
+        pairs = [(correct, key_latex)] if answer_value_key(correct) else []
+        for value in distractors:
+            latex = _latex_for_value(task, value)
+            if not answer_value_key(value) or any(_same_on_screen(value, latex, served, shown) for served, shown in pairs):
+                continue
+            pairs.append((value, latex))
+        if len(pairs) >= 2:
+            return _ordered(pairs, seed)
 
     return None, None
 

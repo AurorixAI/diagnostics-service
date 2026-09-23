@@ -1223,7 +1223,7 @@ class SessionService:
     # ── Utilities ──────────────────────────────────────────────────────────
 
     def _task_to_out(self, task: TaskMaster, state: SessionState) -> TaskOut:
-        options, options_latex = build_diag_answer_options(task)
+        options, options_latex = build_diag_answer_options(task, seed=f"{state.session_id}:{task.id}")
         img_url = (
             getattr(task, "question_image_url", None)
             or getattr(task, "image_url", None)
