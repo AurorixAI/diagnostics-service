@@ -14,6 +14,34 @@ from src.core.config import get_settings
 _STAFF_ROLES = {"owner", "admin", "teacher"}
 
 
+def invite_error(http_status: int, code: str, message: str, action: str) -> HTTPException:
+    return HTTPException(http_status, {"code": code, "message": message, "action": action})
+
+
+def validate_invite_state(
+    invite: dict,
+    *,
+    allowed_statuses: Optional[AbstractSet[str]] = None,
+    enforce_expiry: bool = True,
+) -> None:
+    """Check a fetched projection without making a second auth-service request."""
+    invite_status = str(invite.get("status") or "")
+    if allowed_statuses is not None and invite_status not in allowed_statuses:
+        if invite_status == "expired":
+            raise invite_error(410, "INVITE_EXPIRED", "Срок действия приглашения истёк.", "contact_center")
+        raise invite_error(409, "INVITE_NOT_AVAILABLE", "Приглашение не принимает новые ответы.", "check_session")
+    expires_raw = invite.get("expires_at")
+    if enforce_expiry and expires_raw and invite_status != "completed":
+        try:
+            expires_at = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            raise invite_error(503, "INVALID_INVITE_EXPIRY", "Не удалось проверить срок действия приглашения.", "retry")
+        if expires_at <= datetime.now(timezone.utc):
+            raise invite_error(410, "INVITE_EXPIRED", "Срок действия приглашения истёк.", "contact_center")
+
+
 @dataclass(frozen=True)
 class DiagnosticActor:
     user_id: str
@@ -88,39 +116,26 @@ async def validate_invite_capability(
     session through a direct API call.
     """
     if not invite_code:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Требуется код приглашения на диагностику")
+        raise invite_error(403, "INVITE_REQUIRED", "Требуется код приглашения на диагностику.", "contact_center")
     base = get_settings().auth_service_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(f"{base}/api/v1/auth/diagnostic/{invite_code}")
     except httpx.HTTPError as exc:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Не удалось проверить приглашение") from exc
+        raise invite_error(503, "INVITE_CHECK_UNAVAILABLE", "Не удалось проверить приглашение.", "retry") from exc
     if response.status_code == 404:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Недействительное приглашение на диагностику")
+        raise invite_error(403, "INVITE_INVALID", "Недействительное приглашение на диагностику.", "contact_center")
     if response.status_code != 200:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Не удалось проверить приглашение")
-    invite = response.json()
-    invite_status = str(invite.get("status") or "")
-    if allowed_statuses is not None and invite_status not in allowed_statuses:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "Приглашение недоступно в текущем статусе",
-        )
-    expires_raw = invite.get("expires_at")
-    if enforce_expiry and expires_raw and invite_status != "completed":
-        try:
-            expires_at = datetime.fromisoformat(str(expires_raw).replace("Z", "+00:00"))
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=timezone.utc)
-        except ValueError:
-            raise HTTPException(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "Некорректная дата действия приглашения",
-            )
-        if expires_at < datetime.now(timezone.utc):
-            raise HTTPException(status.HTTP_410_GONE, "Срок действия приглашения истёк")
+        raise invite_error(503, "INVITE_CHECK_UNAVAILABLE", "Не удалось проверить приглашение.", "retry")
+    try:
+        invite = response.json()
+        if not isinstance(invite, dict):
+            raise ValueError("Invalid invite projection")
+    except ValueError as exc:
+        raise invite_error(503, "INVITE_CHECK_UNAVAILABLE", "Не удалось проверить приглашение.", "retry") from exc
     if student_id and str(invite.get("student_id") or "") != str(student_id):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Приглашение не принадлежит этому ученику")
+        raise invite_error(403, "INVITE_STUDENT_MISMATCH", "Нет доступа к этой диагностике.", "contact_center")
     if grade_level is not None and invite.get("class_level") != grade_level:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Класс не соответствует приглашению")
+        raise invite_error(403, "INVITE_GRADE_MISMATCH", "Класс не соответствует приглашению.", "contact_center")
+    validate_invite_state(invite, allowed_statuses=allowed_statuses, enforce_expiry=enforce_expiry)
     return invite

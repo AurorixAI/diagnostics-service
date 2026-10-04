@@ -38,7 +38,7 @@ class _Service:
         return {"session_id": str(session_id), "report_generation": {"status": "pending"}}
 
 
-@pytest.mark.parametrize("invite_status", ["confirmed", "in_progress", "completed"])
+@pytest.mark.parametrize("invite_status", ["confirmed", "in_progress", "completed", "expired"])
 def test_completed_session_report_is_available_during_auth_projection_lag(monkeypatch, invite_status):
     """A completed local session must not fail while callback status catches up."""
     session_id = uuid.uuid4()
@@ -72,5 +72,5 @@ def test_completed_session_report_is_available_during_auth_projection_lag(monkey
     assert observed["code"] == invite_code
     assert observed["student_id"] == str(db_session.student_id)
     assert observed["grade_level"] == 9
-    assert observed["allowed_statuses"] == {"confirmed", "in_progress", "completed"}
+    assert observed["allowed_statuses"] == {"confirmed", "in_progress", "completed", "expired"}
     assert observed["enforce_expiry"] is False

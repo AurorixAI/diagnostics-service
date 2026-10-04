@@ -7,8 +7,11 @@ Diagnostic Service — Shared middleware.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import uuid
+
+import httpx
 
 import structlog
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -19,6 +22,30 @@ from starlette.responses import Response
 # ---------------------------------------------------------------------------
 # Request-ID middleware
 # ---------------------------------------------------------------------------
+
+class DiagnosticCapabilityLogFilter(logging.Filter):
+    """Keep route/status evidence while removing public invite capabilities."""
+    _path = re.compile(r'(/(?:api/v1/)?(?:auth/|internal/)?diagnostic/)(?!sessions(?:/|\b))[^/?\s\"\x27]+')
+    _query = re.compile(r'([?&]invite_code=)[^&\s\"\x27]+')
+
+    @classmethod
+    def _redact(cls, value):
+        if not isinstance(value, (str, httpx.URL)):
+            return value
+        return cls._query.sub(r'\1[redacted]', cls._path.sub(r'\1[redacted]', str(value)))
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            # Uvicorn AccessFormatter unpacks the five original arguments.
+            # Preserve them; redact paths and HTTPX URL objects in place.
+            if not record.args:
+                record.msg = self._redact(record.msg)
+            if isinstance(record.args, tuple):
+                record.args = tuple(self._redact(value) for value in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {key: self._redact(value) for key, value in record.args.items()}
+        return True
+
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
     """Propagate or generate X-Request-ID and bind it to structlog context."""
@@ -70,9 +97,12 @@ def configure_logging(is_development: bool = False) -> None:
     )
 
     handler = logging.StreamHandler(sys.stdout)
+    handler.addFilter(DiagnosticCapabilityLogFilter())
     handler.setFormatter(formatter)
 
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(logging.INFO)
+    for name in ("uvicorn.access", "gunicorn.access"):
+        logging.getLogger(name).addFilter(DiagnosticCapabilityLogFilter())

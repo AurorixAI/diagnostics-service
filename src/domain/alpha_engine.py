@@ -116,8 +116,11 @@ def fisher_information(theta: float, params: IRTParams) -> float:
     q = 1.0 - p
     if p <= params.c or p >= 1.0 or q <= 0:
         return 0.0
-    num = (params.a ** 2) * ((p - params.c) ** 2)
-    den = ((1.0 - params.c) ** 2) * p * q
+    # P'(theta) = a * (P-c) * (1-P) / (1-c).
+    # Information is P'^2 / (P * (1-P)); one factor (1-P) remains
+    # in the numerator. Without it, easy items are wrongly favoured.
+    num = (params.a ** 2) * ((p - params.c) ** 2) * q
+    den = ((1.0 - params.c) ** 2) * p
     return num / den if den > 0 else 0.0
 
 
@@ -128,6 +131,34 @@ def theta_to_level(theta: float) -> str:
     if theta >= -0.5:
         return "at_grade"
     return "below_grade"
+
+
+def level_confidence(state: ThetaState) -> float:
+    """Posterior mass in the estimated level, with fractional boundary cells.
+
+    The production posterior has 61 quadrature points. Splitting cells at
+    -0.5 and 1.0 avoids assigning a whole grid cell to one side of a cutoff.
+    This is confidence conditional on the current IRT model, not an empirical
+    accuracy percentage. Invalid/legacy posterior shapes cannot stop early.
+    """
+    posterior = np.asarray(state.posterior, dtype=float)
+    if posterior.shape != _THETA_GRID.shape or not np.all(np.isfinite(posterior)):
+        return 0.0
+    if np.any(posterior < 0) or posterior.sum() <= 0:
+        return 0.0
+    level = theta_to_level(state.theta)
+    lower, upper = {
+        "below_grade": (-4.0, -0.5),
+        "at_grade": (-0.5, 1.0),
+        "above_grade": (1.0, 4.0),
+    }[level]
+    half_step = float(_THETA_GRID[1] - _THETA_GRID[0]) / 2
+    left = np.maximum(-4.0, _THETA_GRID - half_step)
+    right = np.minimum(4.0, _THETA_GRID + half_step)
+    overlap = np.maximum(0.0, np.minimum(right, upper) - np.maximum(left, lower))
+    fraction = overlap / (right - left)
+    probability = float(np.dot(posterior, fraction) / posterior.sum())
+    return min(1.0, max(0.0, probability))
 
 
 # ── Per-topic mastery tracker ─────────────────────────────────────────────

@@ -29,6 +29,7 @@ from src.core.access import (
 )
 from src.models.diag_models import DiagAnswer, DiagReport, DiagSession
 from src.repositories.knowledge_repo import KnowledgeRepository
+from src.domain.report_generator import REPORT_SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
 
@@ -387,6 +388,7 @@ async def student_report(
 
     return {
         # ── Structured JSON report (v2) ─────────────────────────────────────
+        "session_id": str(session.id) if session else (str(report.session_id) if report else None),
         "report_json":    out_report_json,
         # Observable lifecycle for staff UI. This endpoint never starts work:
         # a report is queued only when a new diagnostic is completed or when a
@@ -398,7 +400,7 @@ async def student_report(
             "is_current_schema": bool(
                 report
                 and report.report_json
-                and report.report_schema_version >= 2
+                and report.report_schema_version >= REPORT_SCHEMA_VERSION
                 and report.generation_status == "ready"
             ),
         },

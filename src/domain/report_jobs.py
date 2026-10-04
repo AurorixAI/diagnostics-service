@@ -30,7 +30,7 @@ def _snapshot_value(session: DiagSession, key: str, default):
     return snapshot.get(key, default)
 
 
-def enqueue_report_generation(db: Session, session_id: uuid.UUID) -> DiagReport:
+def enqueue_report_generation(db: Session, session_id: uuid.UUID, *, commit: bool = True) -> DiagReport:
     """Create or refresh a durable pending job for a completed diagnostic."""
     session = db.query(DiagSession).filter(DiagSession.id == session_id).first()
     if session is None or session.phase != "completed":
@@ -63,8 +63,11 @@ def enqueue_report_generation(db: Session, session_id: uuid.UUID) -> DiagReport:
         report.generation_attempts = 0
         report.generation_requested_at = datetime.now(timezone.utc)
 
-    db.commit()
-    db.refresh(report)
+    if commit:
+        db.commit()
+        db.refresh(report)
+    else:
+        db.flush()
     return report
 
 
@@ -203,6 +206,12 @@ def process_next_report_job() -> bool:
         report, session = claimed
         report_id = report.id
         settings = get_settings()
+        from src.domain.alpha_engine import ThetaState, level_confidence
+        snapshot_theta = _snapshot_value(session, "theta", {})
+        classification_confidence = (
+            level_confidence(ThetaState(**snapshot_theta))
+            if snapshot_theta and snapshot_theta.get("posterior") else None
+        )
         generated = generate_and_save_report(
             db,
             session_id=session.id,
@@ -218,6 +227,7 @@ def process_next_report_job() -> bool:
             items_max=settings.max_items,
             covered_section_ids=_snapshot_value(session, "covered_section_ids", []),
             deep_scan_incomplete=bool(_snapshot_value(session, "deep_scan_incomplete", False)),
+            classification_confidence=classification_confidence,
             force=True,
         )
         if generated and generated.generation_status == "ready":

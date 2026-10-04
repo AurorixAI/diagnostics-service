@@ -32,9 +32,13 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
             min_items=12,
             max_items=42,
             se_threshold=0.30,
+            classification_min_items=20,
+            classification_se_threshold=0.40,
+            classification_confidence_threshold=0.90,
             min_section_coverage=5,
             deep_scan_max_items=4,
             deep_scan_importance_threshold=8,
+            mastery_threshold=0.6,
         )
         self.settings_patch = patch.object(
             session_service_module, "settings", adaptive_settings
@@ -66,6 +70,20 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
         self.assertTrue(service._should_stop(state))
         self.assertEqual(state.stop_reason, "max_items_reached")
         self.assertTrue(state.deep_scan_incomplete)
+
+    def test_twenty_five_answers_do_not_impose_a_limit(self) -> None:
+        service = object.__new__(SessionService)
+        state = make_state(items_answered=25, covered_section_ids=["l1-a", "l1-b", "l1-c"])
+        state.theta = ThetaState(se=0.45)
+        self.assertFalse(service._should_stop(state))
+        self.assertIsNone(state.stop_reason)
+
+    def test_other_grade_sections_do_not_replace_baseline_coverage(self) -> None:
+        service = object.__new__(SessionService)
+        state = make_state(items_answered=20, covered_section_ids=["l1-a", "other-grade-b", "other-grade-c"])
+        state.theta = ThetaState(se=0.20)
+        self.assertFalse(service._should_stop(state))
+        self.assertIsNone(state.stop_reason)
 
     def test_warmup_spans_available_sections(self) -> None:
         state = make_state(section_ids=["l1-a", "l1-b", "l1-c"])
@@ -220,12 +238,40 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
             section_ids=["sec-1", "sec-2"],
             current_section_idx=1,
             items_answered=20,
+            covered_section_ids=["sec-1", "sec-2"],
         )
         state.theta = ThetaState(theta=0.5, se=0.25)
 
         next_task = service._next_section_or_done(state)
         self.assertIsNone(next_task)
         self.assertEqual(state.stop_reason, "precision_reached")
+
+    def test_section_exhaustion_cannot_bypass_minimum_answers(self) -> None:
+        service = object.__new__(SessionService)
+        service._pick_precision_targeting_task = lambda state: "next-evidence-task"
+        state = make_state(section_ids=["sec-1", "sec-2"], current_section_idx=1,
+                           items_answered=11, covered_section_ids=["sec-1", "sec-2"])
+        state.theta = ThetaState(se=0.20)
+        self.assertEqual(service._next_section_or_done(state), "next-evidence-task")
+        self.assertEqual(state.phase, "precision_targeting")
+        self.assertIsNone(state.stop_reason)
+
+    def test_section_exhaustion_cannot_bypass_minimum_coverage(self) -> None:
+        service = object.__new__(SessionService)
+        service._pick_precision_targeting_task = lambda state: "next-evidence-task"
+        state = make_state(section_ids=["sec-1", "sec-2"], current_section_idx=1,
+                           items_answered=20, covered_section_ids=["sec-1"])
+        state.theta = ThetaState(se=0.20)
+        self.assertEqual(service._next_section_or_done(state), "next-evidence-task")
+        self.assertIsNone(state.stop_reason)
+
+    def test_section_exhaustion_preserves_limit_reason_when_se_is_small(self) -> None:
+        service = object.__new__(SessionService)
+        state = make_state(section_ids=["sec-1", "sec-2"], current_section_idx=1,
+                           items_answered=42, covered_section_ids=["sec-1", "sec-2"])
+        state.theta = ThetaState(se=0.20)
+        self.assertIsNone(service._next_section_or_done(state))
+        self.assertEqual(state.stop_reason, "max_items_reached")
 
     def test_deep_scan_context_snapshot_and_restoration(self) -> None:
         service = object.__new__(SessionService)

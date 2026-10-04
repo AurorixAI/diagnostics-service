@@ -17,15 +17,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db
-from src.core.access import validate_invite_capability
+from src.core.access import invite_error, validate_invite_capability, validate_invite_state
 from src.models.diag_models import DiagSession
 from src.core.exceptions import (
-    AnswerInProgressError,
     DiagnosticError,
     GradeNotConfiguredError,
     SessionAlreadyStartedError,
-    SessionExpiredError,
-    TaskOutOfSequenceError,
 )
 from src.domain.session_service import SessionService
 from src.schemas.diag_schemas import (
@@ -33,6 +30,7 @@ from src.schemas.diag_schemas import (
     AnswerResult,
     CreateSessionRequest,
     CreateSessionResponse,
+    ResolvedSessionResponse,
     SubmitAnswerRequest,
 )
 
@@ -44,6 +42,20 @@ router = APIRouter(prefix="/diagnostic", tags=["Diagnostic"])
 
 def _service(db: Session = Depends(get_db)) -> SessionService:
     return SessionService(db)
+
+
+def _answer_error(exc: DiagnosticError) -> HTTPException:
+    messages = {
+        "ANSWER_IN_PROGRESS": (409, "Ответ ещё обрабатывается. Проверяем состояние попытки.", "check_session"),
+        "TASK_OUT_OF_SEQUENCE": (409, "Состояние попытки изменилось. Восстановите текущий вопрос или результат.", "check_session"),
+        "SESSION_EXPIRED": (410, "Состояние диагностики больше недоступно. Обратитесь к учебному центру.", "contact_center"),
+        "SESSION_NOT_FOUND": (404, "Сессия диагностики не найдена.", "contact_center"),
+        "SESSION_ALREADY_STARTED": (409, "Попытка по этому приглашению уже начата. Восстановите её состояние.", "check_session"),
+        "GRADE_NOT_CONFIGURED": (422, "Для этого класса пока не настроена диагностика. Обратитесь к учебному центру.", "contact_center"),
+        "NO_TASKS": (503, "Не удалось получить задание. Проверьте состояние попытки.", "check_session"),
+    }
+    http_status, message, action = messages.get(exc.code, (400, exc.message, "retry"))
+    return invite_error(http_status, exc.code, message, action)
 
 
 @router.post("/sessions", response_model=CreateSessionResponse, status_code=201)
@@ -69,11 +81,11 @@ async def create_session(
         )
         return CreateSessionResponse(session_id=session_id, first_task=first_task)
     except GradeNotConfiguredError as exc:
-        raise HTTPException(status_code=422, detail={"code": exc.code, "message": exc.message})
+        raise _answer_error(exc)
     except SessionAlreadyStartedError as exc:
-        raise HTTPException(status_code=409, detail={"code": exc.code, "message": exc.message})
+        raise _answer_error(exc)
     except DiagnosticError as exc:
-        raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message})
+        raise _answer_error(exc)
     except HTTPException:
         # A deliberate 4xx (missing invite capability, wrong student, a
         # session already started) must reach the client as itself. The
@@ -81,8 +93,8 @@ async def create_session(
         # report a server failure instead of what the user has to do.
         raise
     except Exception as exc:
-        log.error("create_session error: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error creating session")
+        log.error("diagnostic_start_failed error_type=%s", type(exc).__name__)
+        raise invite_error(500, "SESSION_START_FAILED", "Не удалось начать диагностику. Повторите проверку состояния.", "check_session")
 
 
 @router.get("/sessions/active", response_model=ActiveSessionResponse)
@@ -105,7 +117,7 @@ async def get_active_session(
         )
         result = service.get_active_session(invite_code)
         if result is None:
-            raise HTTPException(status_code=404, detail="No active session")
+            raise invite_error(404, "SESSION_NOT_FOUND", "Активная попытка не найдена.", "check_session")
         session_id, items_answered, current_task, total_time_ms = result
         return ActiveSessionResponse(
             session_id=session_id,
@@ -116,8 +128,8 @@ async def get_active_session(
     except HTTPException:
         raise
     except Exception as exc:
-        log.error("get_active_session error: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error checking active session")
+        log.error("diagnostic_restore_failed error_type=%s", type(exc).__name__)
+        raise invite_error(500, "SESSION_RESTORE_FAILED", "Не удалось проверить состояние попытки.", "retry")
 
 
 @router.post("/sessions/{session_id}/answer", response_model=AnswerResult)
@@ -132,27 +144,30 @@ async def submit_answer(
     try:
         session = db.query(DiagSession).filter(DiagSession.id == session_id).first()
         if not session or not session.invite_code:
-            raise HTTPException(status_code=404, detail="Сессия не найдена")
+            raise invite_error(404, "SESSION_NOT_FOUND", "Сессия диагностики не найдена.", "contact_center")
         if invite_code != session.invite_code:
-            raise HTTPException(status_code=403, detail="Нет доступа к этой диагностике")
-        await validate_invite_capability(
+            raise invite_error(403, "INVITE_SESSION_MISMATCH", "Нет доступа к этой диагностике.", "contact_center")
+        invite = await validate_invite_capability(
             invite_code,
             student_id=str(session.student_id),
             grade_level=session.grade_level,
-            allowed_statuses={"confirmed", "in_progress"},
+            # Terminal projections can serve the already committed final
+            # answer, but can never admit a new answer or a second attempt.
+            allowed_statuses={"confirmed", "in_progress", "completed", "expired"},
+            enforce_expiry=False,
         )
+        replay = service.get_completed_answer_result(session_id, body.task_id, body.student_answer)
+        if replay is not None:
+            return replay
+        validate_invite_state(invite, allowed_statuses={"confirmed", "in_progress"})
         return service.submit_answer(
             session_id=session_id,
             task_id=body.task_id,
             student_answer=body.student_answer,
             time_ms=body.time_ms,
         )
-    except (AnswerInProgressError, TaskOutOfSequenceError) as exc:
-        raise HTTPException(status_code=409, detail={"code": exc.code, "message": exc.message})
-    except SessionExpiredError as exc:
-        raise HTTPException(status_code=410, detail={"code": exc.code, "message": exc.message})
     except DiagnosticError as exc:
-        raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message})
+        raise _answer_error(exc)
     except HTTPException:
         # A deliberate 4xx (missing invite capability, wrong student, a
         # session already started) must reach the client as itself. The
@@ -160,8 +175,57 @@ async def submit_answer(
         # report a server failure instead of what the user has to do.
         raise
     except Exception as exc:
-        log.error("submit_answer error: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error processing answer")
+        log.error("diagnostic_answer_failed session_id=%s error_type=%s", session_id, type(exc).__name__)
+        raise invite_error(500, "ANSWER_FAILED", "Не удалось подтвердить отправку ответа. Проверьте состояние попытки.", "check_session")
+
+
+@router.get("/sessions/by-invite", response_model=ResolvedSessionResponse)
+async def resolve_session(
+    invite_code: str = Query(..., min_length=1),
+    service: SessionService = Depends(_service),
+):
+    """Restore the exact owned attempt, including a durably completed one."""
+    try:
+        session = service.session_repo.get_by_invite_code(invite_code)
+        invite = await validate_invite_capability(
+            invite_code,
+            student_id=str(session.student_id) if session else None,
+            grade_level=session.grade_level if session else None,
+            allowed_statuses={"confirmed", "in_progress", "completed", "expired"},
+            enforce_expiry=False,
+        )
+        if session:
+            session = service.session_repo.get_fresh(session.id)
+        if session and session.phase == "completed":
+            return ResolvedSessionResponse(
+                session_id=session.id, status="completed", items_answered=session.items_answered,
+                total_time_ms=service.answer_repo.get_total_time_ms(session.id),
+            )
+        validate_invite_state(invite, allowed_statuses={"confirmed", "in_progress"})
+        if session is None:
+            raise invite_error(404, "SESSION_NOT_FOUND", "Попытка по этому приглашению ещё не начата.", "start")
+        active = service.get_active_session(invite_code)
+        if active is None:
+            # Completion may commit while the Redis-backed resume check runs.
+            session = service.session_repo.get_fresh(session.id)
+            if session and session.phase == "completed":
+                return ResolvedSessionResponse(
+                    session_id=session.id, status="completed", items_answered=session.items_answered,
+                    total_time_ms=service.answer_repo.get_total_time_ms(session.id),
+                )
+            raise invite_error(410, "SESSION_EXPIRED", "Состояние попытки больше недоступно. Обратитесь к учебному центру.", "contact_center")
+        session_id, items_answered, current_task, total_time_ms = active
+        return ResolvedSessionResponse(
+            session_id=session_id, status="active", items_answered=items_answered,
+            current_task=current_task, total_time_ms=total_time_ms,
+        )
+    except DiagnosticError as exc:
+        raise _answer_error(exc)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error("diagnostic_restore_failed error_type=%s", type(exc).__name__)
+        raise invite_error(500, "SESSION_RESTORE_FAILED", "Не удалось проверить состояние попытки. Повторите проверку.", "retry")
 
 
 @router.get("/sessions/{session_id}/report")
@@ -175,7 +239,7 @@ async def get_report(
     try:
         session = db.query(DiagSession).filter(DiagSession.id == session_id).first()
         if not session or session.invite_code != invite_code:
-            raise HTTPException(status_code=404, detail="Отчёт не найден")
+            raise invite_error(404, "REPORT_NOT_FOUND", "Отчёт не найден.", "contact_center")
         await validate_invite_capability(
             invite_code,
             student_id=str(session.student_id),
@@ -186,12 +250,14 @@ async def get_report(
             # lookup above already binds this exact code to this exact
             # completed attempt, so allowing that narrow lag cannot expose a
             # different student's report or revive an invite for a new run.
-            allowed_statuses={"confirmed", "in_progress", "completed"},
+            allowed_statuses={"confirmed", "in_progress", "completed", "expired"},
             enforce_expiry=False,
         )
+        if session.phase != "completed":
+            raise invite_error(409, "SESSION_NOT_COMPLETED", "Диагностика ещё не завершена.", "check_session")
         return service.get_report_data(session_id)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise invite_error(404, "REPORT_NOT_FOUND", "Отчёт не найден.", "contact_center")
     except HTTPException:
         # A deliberate 4xx (missing invite capability, wrong student, a
         # session already started) must reach the client as itself. The
@@ -199,5 +265,5 @@ async def get_report(
         # report a server failure instead of what the user has to do.
         raise
     except Exception as exc:
-        log.error("get_report error: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error fetching report")
+        log.error("diagnostic_report_failed session_id=%s error_type=%s", session_id, type(exc).__name__)
+        raise invite_error(500, "REPORT_FETCH_FAILED", "Ответы сохранены. Не удалось загрузить отчёт.", "retry")

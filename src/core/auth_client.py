@@ -42,14 +42,14 @@ def notify_start(invite_code: str, session_id: str) -> bool:
             )
             if resp.status_code not in (200, 204):
                 log.warning(
-                    "notify_start: auth-service returned %s for code=%s",
+                    "diagnostic_auth_start_failed session_id=%s status=%s",
+                    session_id,
                     resp.status_code,
-                    invite_code,
                 )
                 return False
             return True
     except Exception as exc:
-        log.warning("notify_start failed (fire-and-forget): %s", exc)
+        log.warning("diagnostic_auth_start_failed session_id=%s error_type=%s", session_id, type(exc).__name__)
         return False
 
 
@@ -74,12 +74,12 @@ def notify_complete(
             resp = client.post(url, json=payload, headers=_internal_headers())
             if resp.status_code not in (200, 204):
                 log.warning(
-                    "notify_complete: auth-service returned %s for code=%s",
+                    "diagnostic_auth_completion_failed session_id=%s status=%s",
+                    session_id,
                     resp.status_code,
-                    invite_code,
                 )
                 return False
             return True
     except Exception as exc:
-        log.warning("notify_complete failed (fire-and-forget): %s", exc)
+        log.warning("diagnostic_auth_completion_failed session_id=%s error_type=%s", session_id, type(exc).__name__)
         return False

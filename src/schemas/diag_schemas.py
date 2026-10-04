@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -65,6 +65,15 @@ class ActiveSessionResponse(BaseModel):
     session_id: uuid.UUID
     items_answered: int
     current_task: TaskOut
+    total_time_ms: int = 0
+
+
+class ResolvedSessionResponse(BaseModel):
+    """Resolve the owned attempt, independently of the auth callback's timing."""
+    session_id: uuid.UUID
+    status: Literal["active", "completed"]
+    items_answered: int
+    current_task: Optional[TaskOut] = None
     total_time_ms: int = 0
 
 

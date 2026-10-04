@@ -91,10 +91,13 @@ class TaskRepository:
         difficulty: Optional[str] = None,
         exclude_ids: Optional[List[str]] = None,
         limit: int = 10,
+        target_b: Optional[float] = None,
     ) -> List[types.SimpleNamespace]:
         params: dict = {"skill_id": skill_id, "limit": limit}
         if difficulty:
             params["difficulty"] = difficulty
+        if target_b is not None:
+            params["target_b"] = target_b
         if exclude_ids:
             params["exclude_ids"] = exclude_ids
         resp = content_client.get(f"{BASE}/tasks", params=params)
@@ -108,7 +111,7 @@ class TaskRepository:
         *,
         exclude_ids: Optional[List[str]] = None,
     ) -> Optional[types.SimpleNamespace]:
-        """Fetch up to 20 IRT-sorted candidates and randomly pick one from those
+        """Fetch up to 20 candidates nearest target_b and randomly pick one from those
         closest to target_b (within _IRT_TOLERANCE band).
 
         Using random.choice instead of min() ensures that students with the same
@@ -116,7 +119,7 @@ class TaskRepository:
         when many tasks share the same irt_difficulty value.
         """
         candidates = self.get_tasks_for_skill(
-            skill_id, exclude_ids=exclude_ids, limit=20
+            skill_id, exclude_ids=exclude_ids, limit=20, target_b=target_b
         )
         if not candidates:
             return None
@@ -142,4 +145,3 @@ class TaskRepository:
         )
         resp.raise_for_status()
         return resp.json()
-

@@ -67,7 +67,7 @@ ERROR_PATTERNS_VERSION = 4
 # A report is a derived view of append-only answers.  This independent version
 # lets us upgrade its structure without pretending that an old error journal is
 # fully current just because its journal version still matches.
-REPORT_SCHEMA_VERSION = 2
+REPORT_SCHEMA_VERSION = 3
 
 
 def _distractor_value(distractor: Any) -> str:
@@ -773,6 +773,7 @@ def _build_skill_blocks(
     topic_breakdown: Dict[str, Any],
     weak_skill_ids: List[str],
     skill_map: Dict[str, Dict[str, str]],
+    answers: Optional[List[Any]] = None,
 ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Return (strong_skills, weak_skills, critical_gaps) computed from IRT data.
@@ -814,6 +815,10 @@ def _build_skill_blocks(
     strong.sort(key=lambda x: -x["mastery_percent"])
     weak.sort(key=lambda x: x["mastery_percent"])
 
+    # Alpha starts at zero and rises gradually. A short, error-free trajectory
+    # can still have a low alpha; that is not evidence of a learning deficit.
+    if answers and all(float(a.outcome or 0) >= 1.0 for a in answers):
+        weak, critical = [], []
     return strong, weak, critical
 
 
@@ -889,16 +894,18 @@ def _build_deterministic_summary(
     root = chains[0].get("root_gap_skill_name") if chains else None
     observed = ", ".join(boundary.get("breakpoint_skills") or [])
     anchors = ", ".join(item.get("skill_name_ru", "") for item in strong_skills[:2] if item.get("skill_name_ru"))
-    evidence_sentence = (
-        f"Deep Scan подтвердил первопричину: «{root}»."
-        if root else
-        f"Зафиксированы ключевые затруднения: {observed or 'требующие коррекции навыки'}; причинная цепочка не заявляется без Deep Scan."
-    )
+    if root:
+        evidence_sentence = f"Deep Scan подтвердил первопричину: «{root}»."
+    elif observed:
+        evidence_sentence = f"Зафиксированы ключевые затруднения: {observed}; причинная цепочка не заявляется без Deep Scan."
+    else:
+        evidence_sentence = "В выполненных заданиях затруднения не зафиксированы."
     anchors_sentence = f"Опорные навыки: {anchors}." if anchors else "Устойчивые опорные навыки требуют дальнейшего наблюдения."
     return (
         f"Результат — {score_pct}%; фактический уровень соответствует {class_equivalent} при заявленном {grade_level} классе. "
         f"{evidence_sentence} {anchors_sentence} "
-        "Коррекцию следует начать с первого пункта индивидуального плана и подтвердить перенос навыка на новой задаче."
+        + ("Коррекцию следует начать с первого пункта индивидуального плана и подтвердить перенос навыка на новой задаче."
+           if root or observed else "Рекомендуется развивать опорные навыки на задачах с новым контекстом.")
     )
 
 
@@ -1010,6 +1017,7 @@ def generate_and_save_report(
     items_max: Optional[int] = None,
     covered_section_ids: Optional[List[str]] = None,
     deep_scan_incomplete: bool = False,
+    classification_confidence: Optional[float] = None,
     student_name: str = "Ученик",
     test_code: str = "",
     force: bool = False,
@@ -1067,7 +1075,7 @@ def generate_and_save_report(
         # ── Deterministic blocks (no AI) ──────────────────────────────────────
         error_patterns = _build_error_patterns(answers_orm, skill_map)
         strong_skills, weak_skills_block, critical_gaps = _build_skill_blocks(
-            topic_breakdown, weak_skills, skill_map
+            topic_breakdown, weak_skills, skill_map, answers_orm
         )
 
         # ── Score stats ───────────────────────────────────────────────────────
@@ -1263,6 +1271,10 @@ def generate_and_save_report(
                 "score_percent":    score_pct,
                 "stop_reason": stop_reason or "unknown",
                 "precision_reached": stop_reason == "precision_reached",
+                "level_classification_reached": stop_reason == "classification_confident",
+                "classification_confidence": classification_confidence,
+                "measurement_questions": sum(not a.is_deep_scan for a in answers_orm),
+                "prerequisite_questions": sum(bool(a.is_deep_scan) for a in answers_orm),
                 "items_max": items_max,
                 "covered_section_ids": covered_section_ids or [],
                 "deep_scan_incomplete": deep_scan_incomplete,

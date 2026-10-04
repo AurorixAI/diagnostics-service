@@ -20,6 +20,13 @@ from src.repositories.base import BaseRepository
 class DiagSessionRepository(BaseRepository[DiagSession]):
     model = DiagSession
 
+    def get_fresh(self, session_id: uuid.UUID, *, for_update: bool = False) -> Optional[DiagSession]:
+        # The router may have loaded this row before another request completed.
+        statement = select(DiagSession).where(DiagSession.id == session_id).execution_options(populate_existing=True)
+        if for_update:
+            statement = statement.with_for_update()
+        return self.session.scalar(statement)
+
     def get_active(self, session_id: uuid.UUID) -> Optional[DiagSession]:
         return self.session.scalar(
             select(DiagSession).where(
@@ -82,6 +89,14 @@ class DiagSessionRepository(BaseRepository[DiagSession]):
 
 class DiagAnswerRepository(BaseRepository[DiagAnswer]):
     model = DiagAnswer
+
+    def get_last_answer(self, session_id: uuid.UUID) -> Optional[DiagAnswer]:
+        return self.session.scalar(
+            select(DiagAnswer)
+            .where(DiagAnswer.session_id == session_id)
+            .order_by(DiagAnswer.answered_at.desc(), DiagAnswer.id.desc())
+            .limit(1)
+        )
 
     def get_session_answers(self, session_id: uuid.UUID) -> List[DiagAnswer]:
         return list(

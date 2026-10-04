@@ -4,16 +4,20 @@ Diagnostic Service — SessionService (Main Orchestrator)
 Implements the T-Shape adaptive diagnostic algorithm:
 
   Phase 0  INIT        Build topic grid from knowledge_hierarchy (L2 nodes)
-  Phase 1  WARMUP      3 tasks centered around prior_theta (IRT-matched)
+  Phase 1  WARMUP      Cross-section tasks around prior_theta (IRT-matched)
   Phase 2  NAVIGATION  Binary search L2 (topic) → L3 (subtopic) → L4 (skill)
   Phase 3  DEEP_SCAN   Prerequisite traversal on fail for high-importance topics
   Phase 4  COMPLETED   Persist, build breakdown, delete from Redis
 
-Stopping criteria (outside deep scan):
-  SE ≤ 0.30  OR  items_answered ≥ 25  OR  all L1 sections exhausted
+Stopping criteria:
+  Hard limit: configured max_items (42), including deep scan.
+  Earlier: SE ≤ 0.30, minimum answers and minimum L1 coverage, outside deep scan.
+  Section traversal alone enters precision targeting; bank exhaustion records
+  insufficient precision rather than claiming the target has been reached.
 """
 from __future__ import annotations
 
+import copy
 import logging
 import random
 import uuid
@@ -27,16 +31,19 @@ from src.core.exceptions import (
     GradeNotConfiguredError,
     NoTasksAvailableError,
     SessionExpiredError,
+    SessionNotFoundError,
     SessionAlreadyStartedError,
     TaskOutOfSequenceError,
 )
 from src.domain.auth_sync_jobs import enqueue_auth_completion_sync, process_next_auth_completion_sync
 from src.domain.report_jobs import enqueue_report_generation, process_next_report_job
+from src.domain.report_generator import REPORT_SCHEMA_VERSION
 from src.domain.alpha_engine import (
     AlphaTracker,
     IRTParams,
     ThetaState,
     theta_to_level,
+    level_confidence,
     update_theta,
 )
 from src.domain.navigators.skill_navigator import DeepScanState, SkillEntry, SkillNavigator
@@ -236,6 +243,11 @@ class SessionService:
     ) -> AnswerResult:
         """Process one answer. Returns result + next task (or completed flag)."""
 
+        # Completed attempts are durable, even after Redis eviction/outage.
+        replay = self.get_completed_answer_result(session_id, task_id, student_answer)
+        if replay is not None:
+            return replay
+
         # Redis state is read-modify-written.  A lock makes a double click,
         # retry, or concurrent browser request harmless instead of counting the
         # same item twice.
@@ -247,6 +259,33 @@ class SessionService:
                 time_ms=time_ms,
             )
 
+    def get_completed_answer_result(
+        self, session_id: uuid.UUID, task_id: str, student_answer: str
+    ) -> Optional[AnswerResult]:
+        """Replay only the exact final answer; never evaluate or enqueue again."""
+        session = self.session_repo.get_fresh(session_id)
+        if session is None:
+            raise SessionNotFoundError(str(session_id))
+        if session.phase != "completed":
+            return None
+        last = self.answer_repo.get_last_answer(session_id)
+        if last is None or last.task_id != task_id or last.student_answer != student_answer:
+            raise TaskOutOfSequenceError(str(session_id))
+        snapshot = session.state_snapshot or {}
+        theta = snapshot.get("theta") or {}
+        result = AnswerResult(
+            is_correct=float(last.outcome) >= 0.5,
+            outcome=float(last.outcome),
+            eval_category=last.eval_category,
+            theta=float(theta.get("theta", session.theta if session.theta is not None else 0)),
+            se=float(theta.get("se", session.theta_se if session.theta_se is not None else 1)),
+            next_task=None,
+            session_completed=True,
+            stop_reason=session.stop_reason,
+        )
+        log.info("diagnostic_answer_replayed session_id=%s phase=completed", session_id)
+        return result
+
     def _submit_answer_locked(
         self,
         *,
@@ -256,6 +295,15 @@ class SessionService:
         time_ms: Optional[int],
     ) -> AnswerResult:
         """Process one answer while holding the per-session Redis lock."""
+
+        # PostgreSQL remains the final serialization barrier if a Redis lease
+        # expires during slow evaluation. The final answer and completion
+        # commit together below, so a second worker observes the durable result.
+        self.session_repo.get_fresh(session_id, for_update=True)
+        # A request admitted before completion can acquire the lock afterwards.
+        replay = self.get_completed_answer_result(session_id, task_id, student_answer)
+        if replay is not None:
+            return replay
 
         # 1. Load state
         state = self.redis.load(str(session_id))
@@ -320,10 +368,11 @@ class SessionService:
             phase=state.phase,
             is_deep_scan=state.is_in_deep_scan,
         )
-        self.db.commit()
-
-        # 8. Stopping criteria (skip if inside deep scan)
-        if self._should_stop(state):
+        # Inspect the navigation consequence before accepting an early stop.
+        # Otherwise the final failed skill can end the test before the critical
+        # prerequisite scan it is supposed to trigger.
+        pending_probe = self._has_pending_critical_probe(state, correct)
+        if self._should_stop(state, pending_critical_probe=pending_probe):
             return self._complete_session(state, outcome, category)
 
         # 9. Advance navigation → pick next task
@@ -342,6 +391,7 @@ class SessionService:
             return self._complete_session(state, outcome, category)
 
         # 10. Save updated state
+        self.db.commit()
         self.redis.save(state)
 
         return AnswerResult(
@@ -381,7 +431,7 @@ class SessionService:
             "is_current_schema": bool(
                 report
                 and report.report_json
-                and report.report_schema_version >= 2
+                and report.report_schema_version >= REPORT_SCHEMA_VERSION
                 and report.generation_status == "ready"
             ),
         }
@@ -399,6 +449,7 @@ class SessionService:
                 db_session.weak_skills[0] if db_session.weak_skills else None
             ),
             "items_total": len(answers),
+            "total_time_ms": sum(answer.time_ms or 0 for answer in answers),
             "stop_reason": db_session.stop_reason,
             # Unified journal: error_patterns + full report_json
             "error_patterns": error_patterns,
@@ -463,7 +514,8 @@ class SessionService:
     @staticmethod
     def _has_minimum_section_coverage(state: SessionState) -> bool:
         required = min(len(state.section_ids), settings.min_section_coverage)
-        return len(set(state.covered_section_ids)) >= required
+        covered = set(state.covered_section_ids) & set(state.section_ids)
+        return len(covered) >= required
 
     def _pick_warmup_task(self, state: SessionState) -> TaskOut:
         """
@@ -559,13 +611,31 @@ class SessionService:
 
     # ── Stopping criteria ─────────────────────────────────────────────────
 
-    def _should_stop(self, state: SessionState) -> bool:
+    def _has_pending_critical_probe(self, state: SessionState, correct: bool) -> bool:
+        """Preview the current L4 answer without mutating persisted navigation."""
+        if state.phase != "navigation" or not state.current_skill_nav or not state.current_subtopic_nav:
+            return False
+        skills = SkillNavigator.from_dict(copy.deepcopy(state.current_skill_nav))
+        subtopics = SubtopicNavigator.from_dict(state.current_subtopic_nav)
+        current = subtopics.peek_current()
+        if current is None or current.importance < settings.deep_scan_importance_threshold:
+            return False
+        next_skill = skills.move(correct)
+        if not skills.get_failing_skill():
+            return False
+        if next_skill is not None:
+            # Finish measuring this important failed subtopic before deciding
+            # whether its prerequisites need a causal probe.
+            return True
+        return skills.subtopic_score() < settings.mastery_threshold
+
+    def _should_stop(self, state: SessionState, *, pending_critical_probe: bool = False) -> bool:
         if state.items_answered >= settings.max_items:
             state.stop_reason = "max_items_reached"
-            if state.is_in_deep_scan:
+            if state.is_in_deep_scan or pending_critical_probe:
                 state.deep_scan_incomplete = True
             return True
-        if state.is_in_deep_scan:
+        if state.is_in_deep_scan or pending_critical_probe:
             return False
         if state.items_answered < settings.min_items:
             return False
@@ -573,6 +643,13 @@ class SessionService:
             return False
         if state.theta.se <= settings.se_threshold:
             state.stop_reason = "precision_reached"
+            return True
+        if (
+            state.items_answered >= settings.classification_min_items
+            and state.theta.se <= settings.classification_se_threshold
+            and level_confidence(state.theta) >= settings.classification_confidence_threshold
+        ):
+            state.stop_reason = "classification_confident"
             return True
         return False
 
@@ -781,20 +858,19 @@ class SessionService:
         return self._init_subtopic_nav(state, next_topic)
 
     def _next_section_or_done(self, state: SessionState) -> Optional[TaskOut]:
-        """Advance to next L1 section; if all sections done, enter precision_targeting if SE > threshold."""
+        """Advance sections, then keep measuring until a stopping rule is met."""
         state.current_section_idx += 1
         if state.current_section_idx >= len(state.section_ids):
             # All L1 sections traversed.
-            if state.theta.se <= settings.se_threshold:
-                state.stop_reason = "precision_reached"
-                return None
-            if state.items_answered >= settings.max_items:
-                state.stop_reason = "max_items_reached"
+            # Use the same policy as answer submission.  A small SE alone
+            # must not bypass the minimum answers or cross-section coverage.
+            if self._should_stop(state):
                 return None
 
-            # Precision target not yet reached -> switch to precision_targeting CAT phase
+            # Precision or baseline coverage is incomplete: keep collecting
+            # evidence even if the section navigators have been exhausted.
             log.info(
-                "Sections covered, but SE=%.2f > %.2f threshold. Entering precision_targeting phase (items=%d/%d)",
+                "Sections traversed; stopping policy not met (SE=%.2f, strict_threshold=%.2f, items=%d/%d). Entering precision_targeting",
                 state.theta.se,
                 settings.se_threshold,
                 state.items_answered,
@@ -1161,53 +1237,47 @@ class SessionService:
         overall_level = theta_to_level(state.theta.theta)
 
         db_session = self.session_repo.get_by_id(uuid.UUID(state.session_id))
-        if db_session:
-            self.session_repo.mark_completed(
-                db_session,
-                theta=state.theta.theta,
-                theta_se=state.theta.se,
-                level=overall_level,
-                weak_skills=state.confirmed_gaps,
-                topic_breakdown=topic_breakdown,
-                state_snapshot=state.to_dict(),
-                items_answered=state.items_answered,    # ← Fix: was 0, now correct
-                stop_reason=state.stop_reason,
-            )
-            self.db.commit()
+        if db_session is None:
+            raise SessionNotFoundError(state.session_id)
+        self.session_repo.mark_completed(
+            db_session,
+            theta=state.theta.theta,
+            theta_se=state.theta.se,
+            level=overall_level,
+            weak_skills=state.confirmed_gaps,
+            topic_breakdown=topic_breakdown,
+            state_snapshot=state.to_dict(),
+            items_answered=state.items_answered,
+            stop_reason=state.stop_reason,
+        )
+        # The final answer, completed snapshot and BOTH durable jobs are one
+        # transaction. A crash cannot leave an accepted result without the
+        # work needed to produce its report and update the admin projection.
+        enqueue_report_generation(self.db, db_session.id, commit=False)
+        enqueue_auth_completion_sync(self.db, db_session, commit=False)
+        self.db.commit()
 
         self.redis.delete(state.session_id)
         log.info(
-            "Session %s completed: theta=%.3f se=%.3f level=%s gaps=%d",
+            "Session %s completed: theta=%.3f se=%.3f level=%s gaps=%d stop_reason=%s classification_confidence=%.3f",
             state.session_id,
             state.theta.theta,
             state.theta.se,
             overall_level,
             len(state.confirmed_gaps),
+            state.stop_reason,
+            level_confidence(state.theta),
         )
-
-        # Persist a report job before starting background work.  A daemon thread
-        # only accelerates the first attempt; the database-backed worker resumes
-        # pending work after a restart instead of silently losing a report.
-        if db_session:
-            try:
-                enqueue_report_generation(self.db, db_session.id)
-            except Exception as exc:
-                # The completed session is already durable.  A later service
-                # start will materialise its report if this enqueue attempt is
-                # interrupted, so never roll the student result back.
-                log.warning("Could not enqueue report for session %s: %s", db_session.id, exc)
 
         # Both derived report generation and the auth-service projection are
         # durable queues.  The threads only reduce first-response latency;
         # the lifespan worker resumes either job after a restart.
-        if db_session:
-            try:
-                enqueue_auth_completion_sync(self.db, db_session)
-                import threading
-                threading.Thread(target=process_next_report_job, daemon=True).start()
-                threading.Thread(target=process_next_auth_completion_sync, daemon=True).start()
-            except Exception as exc:
-                log.warning("Could not enqueue completion callbacks for session %s: %s", db_session.id, exc)
+        try:
+            import threading
+            threading.Thread(target=process_next_report_job, daemon=True).start()
+            threading.Thread(target=process_next_auth_completion_sync, daemon=True).start()
+        except Exception as exc:
+            log.warning("diagnostic_worker_acceleration_failed session_id=%s error_type=%s", db_session.id, type(exc).__name__)
 
         return AnswerResult(
             is_correct=outcome >= 0.5,

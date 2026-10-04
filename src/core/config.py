@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     min_items: int = 12
     max_items: int = 42
     se_threshold: float = 0.30
+    classification_min_items: int = Field(default=20, ge=1)
+    classification_se_threshold: float = Field(default=0.40, gt=0)
+    classification_confidence_threshold: float = Field(default=0.90, gt=0, le=1)
     min_section_coverage: int = 5
     deep_scan_importance_threshold: int = 8
     deep_scan_max_items: int = 6
