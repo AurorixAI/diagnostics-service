@@ -386,7 +386,7 @@ def _build_error_patterns(
 
         try:
             from src.clients import content_client
-            resp = content_client.get(f"/api/v1/content/tasks/{a.task_id}")
+            resp = content_client.get_task(a.task_id)
             if resp.status_code == 200:
                 task_data = resp.json()
                 raw_qt = (task_data.get("question_text") or "").strip()
@@ -598,7 +598,7 @@ def _reconstruct_root_cause_chains(
         if not ep and a.task_id:
             try:
                 from src.clients import content_client
-                resp = content_client.get(f"/api/v1/content/tasks/{a.task_id}")
+                resp = content_client.get_task(a.task_id)
                 if resp.status_code == 200:
                     t_data = resp.json()
                     step_data["question_text"] = t_data.get("question_text")
@@ -1374,7 +1374,7 @@ def refresh_error_patterns_live(patterns: List[Dict[str, Any]]) -> List[Dict[str
             task_id = ep.get("task_id")
             if not task_id:
                 continue
-            resp = content_client.get(f"/api/v1/content/tasks/{task_id}")
+            resp = content_client.get_task(task_id)
             if resp.status_code == 200:
                 task_data = resp.json()
                 raw_qt = (task_data.get("question_text") or "").strip()

@@ -78,7 +78,7 @@ class TaskRepository:
     """Read tasks_master via content-service API."""
 
     def get_by_id(self, task_id: str) -> Optional[types.SimpleNamespace]:
-        resp = content_client.get(f"{BASE}/tasks/{task_id}")
+        resp = content_client.get_task(task_id)
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
