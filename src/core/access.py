@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import AbstractSet, Mapping, Optional
 
+from urllib.parse import quote
+
 import httpx
 from fastapi import HTTPException, Request, status
 
@@ -120,7 +122,7 @@ async def validate_invite_capability(
     base = get_settings().auth_service_url.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{base}/api/v1/auth/diagnostic/{invite_code}")
+            response = await client.get(f"{base}/api/v1/auth/diagnostic/{quote(invite_code, safe='')}")
     except httpx.HTTPError as exc:
         raise invite_error(503, "INVITE_CHECK_UNAVAILABLE", "Не удалось проверить приглашение.", "retry") from exc
     if response.status_code == 404:

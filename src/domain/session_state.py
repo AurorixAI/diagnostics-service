@@ -48,6 +48,7 @@ class SessionState:
 
     # Current task context
     current_task_id: Optional[str] = None
+    current_task_snapshot: Optional[dict] = None
     current_skill_id: Optional[str] = None
     current_topic_id: Optional[str] = None
     current_subtopic_id: Optional[str] = None
@@ -87,6 +88,7 @@ class SessionState:
             "current_skill_nav": self.current_skill_nav,
             "deep_scan": self.deep_scan,
             "current_task_id": self.current_task_id,
+            "current_task_snapshot": self.current_task_snapshot,
             "current_skill_id": self.current_skill_id,
             "current_topic_id": self.current_topic_id,
             "current_subtopic_id": self.current_subtopic_id,
@@ -125,6 +127,7 @@ class SessionState:
             current_skill_nav=data.get("current_skill_nav"),
             deep_scan=data.get("deep_scan"),
             current_task_id=data.get("current_task_id"),
+            current_task_snapshot=data.get("current_task_snapshot"),
             current_skill_id=data.get("current_skill_id"),
             current_topic_id=data.get("current_topic_id"),
             current_subtopic_id=data.get("current_subtopic_id"),

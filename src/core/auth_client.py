@@ -7,6 +7,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+from urllib.parse import quote
+
 import httpx
 
 from src.core.config import get_settings
@@ -32,7 +34,7 @@ def notify_start(invite_code: str, session_id: str) -> bool:
     """
     if not invite_code:
         return True
-    url = f"{_base_url()}/api/v1/internal/diagnostic/{invite_code}/start"
+    url = f"{_base_url()}/api/v1/internal/diagnostic/{quote(invite_code, safe='')}/start"
     try:
         with httpx.Client(timeout=5.0) as client:
             resp = client.post(
@@ -67,7 +69,7 @@ def notify_complete(
     # Repair a transient start-callback failure before completing the exact
     # same session.  start is idempotent only for this session_id.
     notify_start(invite_code, session_id)
-    url = f"{_base_url()}/api/v1/internal/diagnostic/{invite_code}/complete"
+    url = f"{_base_url()}/api/v1/internal/diagnostic/{quote(invite_code, safe='')}/complete"
     payload = {"session_id": session_id, **result_data}
     try:
         with httpx.Client(timeout=5.0) as client:

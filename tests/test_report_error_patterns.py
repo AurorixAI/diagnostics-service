@@ -4,6 +4,13 @@ from types import SimpleNamespace
 from src.domain import report_generator
 
 
+def snapshot_answer(answer, payload):
+    from src.domain.task_evidence import capture_task
+    pairs = report_generator._task_option_pairs(payload, payload.get('correct_answer'), payload.get('correct_answer_latex'))
+    answer.task_snapshot = capture_task(SimpleNamespace(id=answer.task_id, **payload),
+                                       [p[0] for p in pairs], [p[1] for p in pairs], payload['answer_type'])
+
+
 def test_error_pattern_keeps_canonical_values_and_display_latex(monkeypatch):
     task_payload = {
         "question_text": "Решите x/2 = 1",
@@ -37,6 +44,7 @@ def test_error_pattern_keeps_canonical_values_and_display_latex(monkeypatch):
         task_id="task-1", skill_id="skill-1", student_answer="1",
         outcome=0.0, eval_category="distractor", answered_at=None, id=1,
     )
+    snapshot_answer(answer, task_payload)
     pattern = report_generator._build_error_patterns([answer], {"skill-1": {"name_ru": "Навык"}})[0]
 
     assert pattern["task_id"] == "task-1"
@@ -81,6 +89,7 @@ def test_error_pattern_reads_legacy_text_distractor_without_mutating_it(monkeypa
         outcome=0.0, eval_category="distractor", answered_at=None, id=1,
     )
 
+    snapshot_answer(answer, task_payload)
     pattern = report_generator._build_error_patterns([answer], {"skill-1": {"name_ru": "Навык"}})[0]
 
     assert pattern["answer_options"] == ["2", "1/2"]
@@ -116,6 +125,7 @@ def test_error_pattern_preserves_independent_answer_options_and_student_display(
         outcome=0.0, eval_category="wrong", answered_at=None, id=1,
     )
 
+    snapshot_answer(answer, task_payload)
     pattern = report_generator._build_error_patterns([answer], {"skill-1": {"name_ru": "Навык"}})[0]
 
     assert pattern["answer_options"] == ["2", "1"]
@@ -152,6 +162,7 @@ def test_error_pattern_enriches_exact_legacy_distractor_even_if_history_says_wro
         outcome=0.0, eval_category="wrong", answered_at=None, id=1,
     )
 
+    snapshot_answer(answer, task_payload)
     pattern = report_generator._build_error_patterns([answer], {"skill-1": {"name_ru": "Навык"}})[0]
 
     assert pattern["eval_category"] == "wrong"  # append-only history is not rewritten

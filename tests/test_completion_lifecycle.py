@@ -369,3 +369,53 @@ def test_expiry_projection_change_during_accepted_submit_keeps_completion(scenar
     assert response.json()["session_completed"] is True
     assert submit(client, session_id).json() == response.json()
     assert_single_completion(factory)
+
+
+def test_issued_key_and_irt_are_used_after_bank_edit_with_durable_snapshot(scenario, monkeypatch):
+    client, session_id, _projection, factory, redis = scenario
+    from src.domain.task_evidence import capture_task
+    from src.domain.alpha_engine import IRTParams, update_theta
+    state = redis.load(str(session_id))
+    original = TaskMaster(id=PAYLOAD['task_id'],skill_id='A2_SKILL',question_text='Original',
+                          question_latex='$x=4$',answer_type='numeric',correct_answer='4',
+                          irt_discrimination=1.,irt_difficulty=-.5,irt_guessing=0.)
+    state.current_task_snapshot = capture_task(original,None,None,'numeric')
+    expected = update_theta(state.theta, IRTParams(a=1.,b=-.5,c=0.),1.)
+    redis.save(state)
+    monkeypatch.setattr(sessions.TaskRepository,'get_by_id',lambda *_:pytest.fail('live bank must not re-grade issued content'))
+    response = submit(client,session_id)
+    assert response.status_code==200 and response.json()['is_correct'] is True
+    with factory() as db:
+        saved=db.query(DiagAnswer).one()
+        assert saved.task_snapshot['task']['correct_answer']=='4'
+        assert saved.task_snapshot['provenance']=='issued'
+        assert saved.task_snapshot['task']['question_latex']=='$x=4$'
+        assert float(saved.theta_after)==pytest.approx(expected.theta,abs=.0001)
+    assert submit(client,session_id).json()==response.json()
+    assert_single_completion(factory)
+
+
+def test_legacy_answer_records_lookup_provenance_without_issued_claim(scenario):
+    client,session_id,_projection,factory,_redis=scenario
+    assert submit(client,session_id).status_code==200
+    with factory() as db:
+        snapshot=db.query(DiagAnswer).one().task_snapshot
+        assert snapshot['provenance']=='legacy_answer_lookup'
+        assert snapshot['task']['correct_answer']=='4'
+
+
+def test_next_issued_snapshot_does_not_overwrite_saved_previous_answer(scenario, monkeypatch):
+    client,session_id,_projection,factory,redis=scenario
+    monkeypatch.setattr(sessions.SessionService,'_should_stop',lambda *_,**__:False)
+    next_task=TaskMaster(id='A2_NEXT',skill_id='A2_SKILL',question_text='Next',
+                         question_latex='$x=99$',answer_type='numeric',correct_answer='99')
+    def advance(service,state,correct):
+        state.current_task_id=next_task.id
+        return service._task_to_out(next_task,state)
+    monkeypatch.setattr(sessions.SessionService,'_advance',advance)
+    response=submit(client,session_id)
+    assert response.status_code==200 and response.json()['next_task']['task_id']=='A2_NEXT'
+    with factory() as db:
+        snapshot=db.query(DiagAnswer).one().task_snapshot
+        assert snapshot['task']['id']==PAYLOAD['task_id'] and snapshot['task']['correct_answer']=='4'
+    assert redis.load(str(session_id)).current_task_snapshot['task']['correct_answer']=='99'

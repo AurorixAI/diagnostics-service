@@ -145,6 +145,7 @@ class DiagAnswerRepository(BaseRepository[DiagAnswer]):
         se_after: float,
         phase: str,
         is_deep_scan: bool,
+        task_snapshot: Optional[dict] = None,
     ) -> DiagAnswer:
         answer = DiagAnswer(
             session_id=session_id,
@@ -162,6 +163,7 @@ class DiagAnswerRepository(BaseRepository[DiagAnswer]):
             se_after=se_after,
             phase=phase,
             is_deep_scan=is_deep_scan,
+            task_snapshot=task_snapshot,
         )
         return self.add(answer)
 

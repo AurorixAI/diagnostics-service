@@ -61,11 +61,13 @@ def test_report_consumers_load_the_same_task(task_api, consumer):
     answer = SimpleNamespace(id=1, task_id=task_id, skill_id="G7_SKILL", outcome=0.,
                              student_answer="1", eval_category="distractor",
                              phase="deep_scan", is_deep_scan=True)
+    from src.domain.task_evidence import capture_task
+    answer.task_snapshot = capture_task(SimpleNamespace(**payload), payload['answer_options'], payload['answer_options_latex'], 'mcq')
     if consumer == "errors":
         result = report_generator._build_error_patterns([answer], {})[0]
     elif consumer == "live_enrichment":
         result = report_generator.refresh_error_patterns_live(
-            [{"task_id": task_id, "student_answer": "1"}],
+            [{"task_id": task_id, "student_answer": "1", "question_latex": payload["question_latex"], "correct_answer": payload["correct_answer"]}],
         )[0]
     else:
         trigger = SimpleNamespace(task_id=None, skill_id="G8_SKILL", outcome=0.,
@@ -78,7 +80,7 @@ def test_report_consumers_load_the_same_task(task_api, consumer):
     assert result["task_id"] == task_id
     assert result["question_latex"] == payload["question_latex"]
     assert result["correct_answer"] == payload["correct_answer"]
-    assert len(requests) == 1
+    assert len(requests) == 0  # historical consumers never fetch revised live content
 
 
 def test_missing_task_remains_missing(monkeypatch):

@@ -123,6 +123,12 @@ class DiagAnswer(Base):
     phase = Column(String(20))
     is_deep_scan = Column(Boolean, default=False)
 
+    # New answers retain the exact evaluated/displayed task (provenance
+    # "issued"). Legacy rows are NULL until scripts/backfill_task_snapshots.py
+    # stores a best-effort copy of today's bank (provenance
+    # "legacy_bank_backfill"), which is never presented as exactly issued content.
+    task_snapshot = Column(JSONB, nullable=True)
+
     answered_at = Column(DateTime, server_default=func.now())
 
     __table_args__ = (

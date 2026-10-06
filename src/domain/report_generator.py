@@ -340,17 +340,50 @@ def _validate_ai_output(
 
 # ── Deterministic data builders ───────────────────────────────────────────────
 
+def _load_task_context(answer) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Return (task_data, source) for one answer.
+
+    source is "snapshot" when the exact issued task was recorded with the answer;
+    "live_bank" when there is no snapshot (answer predates snapshots and was not
+    backfilled) and the task is read from content-service; "unavailable" when
+    neither source can supply it.  Snapshot errors propagate to the caller.
+    """
+    from src.domain.task_evidence import read_task
+    snapshot = getattr(answer, 'task_snapshot', None)
+    task_data = read_task(snapshot, answer.task_id)
+    if task_data is not None:
+        pairs = list(zip(task_data.get('display_options') or [],
+                         list(task_data.get('display_options_latex') or []) + [''] * len(task_data.get('display_options') or [])))
+        task_data['_option_pairs'] = pairs
+        task_data['_answer_type'] = task_data.get('display_answer_type') or 'text'
+        return task_data, 'snapshot'
+    try:
+        from src.clients import content_client
+        resp = content_client.get_task(answer.task_id)
+        if resp.status_code == 200:
+            task_data = resp.json()
+            task_data['_option_pairs'] = _task_option_pairs(
+                task_data, task_data.get('correct_answer'), task_data.get('correct_answer_latex'),
+            )
+            task_data['_answer_type'] = task_data.get('answer_type') or 'text'
+            return task_data, 'live_bank'
+    except Exception as exc:
+        log.warning("Could not read task %s from content-service: %s", answer.task_id, exc)
+    return None, 'unavailable'
+
+
 def _build_error_patterns(
     answers_orm: list,
     skill_map: Dict[str, Dict[str, str]],
+    previous_patterns: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Build error_patterns from DiagAnswer records — no AI needed.
     Produces one entry for every wrong DiagAnswer, preserving chronological
     order. A diagnostic has a bounded number of questions, so hiding errors
     through skill de-duplication would make the error journal incomplete.
-    Enriches each entry with question_text, correct_answer, and real distractor_explanation
-    fetched from content-service.
+    Uses evaluated task evidence. A legacy report may retain its recorded
+    context, but today's live bank is never presented as historical evidence.
     """
     wrong = [a for a in answers_orm if float(a.outcome or 0) < 1.0]
 
@@ -384,11 +417,10 @@ def _build_error_patterns(
         answer_options_latex: List[str] = []
         answer_type = "text"
 
+        context_source = "unavailable"
         try:
-            from src.clients import content_client
-            resp = content_client.get_task(a.task_id)
-            if resp.status_code == 200:
-                task_data = resp.json()
+            task_data, context_source = _load_task_context(a)
+            if task_data is not None:
                 raw_qt = (task_data.get("question_text") or "").strip()
                 raw_ql = (task_data.get("question_latex") or "").strip()
                 # Keep source and presentation data distinct.  The client must
@@ -397,9 +429,7 @@ def _build_error_patterns(
                 question_latex = raw_ql or None
                 correct_answer = task_data.get("correct_answer") or None
                 correct_answer_latex = task_data.get("correct_answer_latex") or None
-                option_pairs = _task_option_pairs(
-                    task_data, correct_answer, correct_answer_latex,
-                )
+                option_pairs = task_data["_option_pairs"]
                 if len(option_pairs) >= 2:
                     answer_options = [value for value, _ in option_pairs]
                     answer_options_latex = [latex for _, latex in option_pairs]
@@ -416,14 +446,18 @@ def _build_error_patterns(
                     distractor_explanation = _distractor_explanation(matched)
                     distractor_explanation_latex = _distractor_explanation_latex(matched)
 
-                answer_type = task_data.get("answer_type") or "text"
+                answer_type = task_data["_answer_type"]
                 student_answer_latex = _student_answer_latex(raw_answer, option_pairs)
 
         except Exception as exc:
-            log.warning("Could not enrich task %s from content-service: %s", a.task_id, exc)
+            log.warning("Could not read task context for %s: %s", a.task_id, exc)
             answer_type = "text"
+            context_source = "unavailable"
 
         patterns.append({
+            "answer_id":               str(a.id),
+            "content_provenance":      (getattr(a, 'task_snapshot', None) or {}).get('provenance', 'unavailable'),
+            "context_source":          context_source,
             "task_id":                 a.task_id,
             "skill_id":                a.skill_id,
             "skill_name_ru":           skill_name_ru,
@@ -440,6 +474,24 @@ def _build_error_patterns(
             "distractor_explanation":  distractor_explanation,
             "distractor_explanation_latex": distractor_explanation_latex,
         })
+        if context_source == 'unavailable' and getattr(a, 'task_snapshot', None) is None and previous_patterns:
+            # Older reports have no answer UUID. Match them only if task/answer
+            # is unique; never attribute another answer's context to this row.
+            matches = [p for p in previous_patterns if (
+                p.get('answer_id') == str(a.id) if p.get('answer_id') else
+                p.get('task_id') == a.task_id and p.get('student_answer') == raw_answer
+            )]
+            if len(matches) == 1:
+                from copy import deepcopy
+                cached = deepcopy(matches[0])
+                for field in ('question_text', 'question_latex', 'answer_type', 'answer_options',
+                              'answer_options_latex', 'correct_answer', 'correct_answer_latex',
+                              'student_answer_latex', 'distractor_explanation',
+                              'distractor_explanation_latex'):
+                    if field in cached:
+                        patterns[-1][field] = cached[field]
+                patterns[-1]['content_provenance'] = 'legacy_report_context'
+                patterns[-1]['context_source'] = 'previous_report'
     return patterns
 
 
@@ -597,10 +649,8 @@ def _reconstruct_root_cause_chains(
 
         if not ep and a.task_id:
             try:
-                from src.clients import content_client
-                resp = content_client.get_task(a.task_id)
-                if resp.status_code == 200:
-                    t_data = resp.json()
+                t_data, _src = _load_task_context(a)
+                if t_data is not None:
                     step_data["question_text"] = t_data.get("question_text")
                     step_data["question_latex"] = t_data.get("question_latex")
                     step_data["correct_answer"] = t_data.get("correct_answer")
@@ -1073,7 +1123,8 @@ def generate_and_save_report(
         skill_map: Dict[str, Dict[str, str]] = {sid: _resolve_skill(sid, repo) for sid in all_ids}
 
         # ── Deterministic blocks (no AI) ──────────────────────────────────────
-        error_patterns = _build_error_patterns(answers_orm, skill_map)
+        previous_patterns = (existing.report_json or {}).get('error_patterns', []) if existing else []
+        error_patterns = _build_error_patterns(answers_orm, skill_map, previous_patterns)
         strong_skills, weak_skills_block, critical_gaps = _build_skill_blocks(
             topic_breakdown, weak_skills, skill_map, answers_orm
         )
@@ -1360,55 +1411,10 @@ def generate_and_save_report(
 
 
 def refresh_error_patterns_live(patterns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Compatibility entry point: preserve recorded context without bank GETs.
+
+    Legacy cached context is not promoted to an issued-content snapshot. A
+    deep copy also prevents a read endpoint from mutating persistent report JSON.
     """
-    Architectural Live Task Enrichment:
-    Dynamically re-fetch latest task details from content-service for each item
-    in error_patterns so reports always reflect current Content DB task text & LaTeX.
-    """
-    if not patterns:
-        return patterns
-
-    try:
-        from src.clients import content_client
-        for ep in patterns:
-            task_id = ep.get("task_id")
-            if not task_id:
-                continue
-            resp = content_client.get_task(task_id)
-            if resp.status_code == 200:
-                task_data = resp.json()
-                raw_qt = (task_data.get("question_text") or "").strip()
-                raw_ql = (task_data.get("question_latex") or "").strip()
-                if raw_qt or raw_ql:
-                    ep["question_text"] = raw_qt or None
-                    ep["question_latex"] = raw_ql or None
-
-                ca = task_data.get("correct_answer")
-                ca_l = task_data.get("correct_answer_latex")
-                if ca or ca_l:
-                    ep["correct_answer"] = ca or None
-                    ep["correct_answer_latex"] = ca_l or None
-
-                matched = _find_matching_distractor(
-                    task_data.get("distractor_meta") or [], ep.get("student_answer"),
-                )
-                if matched:
-                    ep["distractor_explanation"] = _distractor_explanation(matched)
-                    ep["distractor_explanation_latex"] = _distractor_explanation_latex(matched)
-
-                option_pairs = _task_option_pairs(
-                    task_data, ep.get("correct_answer"), ep.get("correct_answer_latex"),
-                )
-                if len(option_pairs) >= 2:
-                    ep["answer_options"] = [value for value, _ in option_pairs]
-                    ep["answer_options_latex"] = [latex for _, latex in option_pairs]
-                else:
-                    ep["answer_options"] = []
-                    ep["answer_options_latex"] = []
-                ep["student_answer_latex"] = _student_answer_latex(
-                    ep.get("student_answer"), option_pairs,
-                )
-    except Exception as exc:
-        log.warning("Could not live-enrich error patterns: %s", exc)
-
-    return patterns
+    from copy import deepcopy
+    return deepcopy(patterns)

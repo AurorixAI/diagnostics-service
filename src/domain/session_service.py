@@ -54,6 +54,7 @@ from src.domain.task_display import (
     diag_answer_type_for_display,
 )
 from src.domain.answer_evaluator import AnswerEvaluator
+from src.domain.task_evidence import capture_task, read_task, task_object
 from src.domain.session_state import SessionState
 from src.models.diag_models import DiagSession
 from src.models.knowledge import TaskMaster
@@ -224,11 +225,13 @@ class SessionService:
             raise ValueError("No current skill/task in state")
 
         # Load the task object by ID
-        task = self.task_repo.get_by_id(task_id)
+        task = task_object(state.current_task_snapshot, task_id)
+        if task is None:
+            task = self.task_repo.get_by_id(task_id)
         if task is None:
             raise ValueError(f"Task {task_id} not found")
 
-        return self._task_to_out(task, state)
+        return self._task_to_out(task, state, capture=False)
 
     # ══════════════════════════════════════════════════════════════════════
     # PUBLIC — Submit answer
@@ -318,8 +321,18 @@ class SessionService:
         # The requested task must be exactly the task the server issued.
         self._ensure_current_task(state, task_id)
 
-        # 2. Fetch task from DB
-        task = self.task_repo.get_by_id(task_id)
+        # 2. Evaluate the issued content even if the live bank changed meanwhile.
+        # Legacy active sessions had no snapshot; bank repair preflight protects
+        # their current/used IDs. Record their evaluation lookup as such.
+        task = task_object(state.current_task_snapshot, task_id)
+        if task is None:
+            task = self.task_repo.get_by_id(task_id)
+            if task is not None:
+                opts, latex = build_diag_answer_options(task, seed=f"{state.session_id}:{task.id}")
+                state.current_task_snapshot = capture_task(
+                    task, opts, latex, diag_answer_type_for_display(task, opts),
+                    provenance='legacy_answer_lookup',
+                )
         if task is None:
             raise NoTasksAvailableError(task_id)
 
@@ -367,6 +380,7 @@ class SessionService:
             se_after=state.theta.se,
             phase=state.phase,
             is_deep_scan=state.is_in_deep_scan,
+            task_snapshot=copy.deepcopy(state.current_task_snapshot),
         )
         # Inspect the navigation consequence before accepting an early stop.
         # Otherwise the final failed skill can end the test before the critical
@@ -1292,8 +1306,19 @@ class SessionService:
 
     # ── Utilities ──────────────────────────────────────────────────────────
 
-    def _task_to_out(self, task: TaskMaster, state: SessionState) -> TaskOut:
-        options, options_latex = build_diag_answer_options(task, seed=f"{state.session_id}:{task.id}")
+    def _task_to_out(self, task: TaskMaster, state: SessionState, *, capture: bool = True) -> TaskOut:
+        snapshot = state.current_task_snapshot
+        if snapshot is not None and snapshot.get('task', {}).get('id') == task.id:
+            payload = read_task(snapshot, task.id)
+            task = task_object(snapshot, task.id)
+            options = payload['display_options']
+            options_latex = payload['display_options_latex']
+            answer_type = payload['display_answer_type']
+        else:
+            options, options_latex = build_diag_answer_options(task, seed=f"{state.session_id}:{task.id}")
+            answer_type = diag_answer_type_for_display(task, options)
+            if capture:
+                state.current_task_snapshot = capture_task(task, options, options_latex, answer_type)
         img_url = (
             getattr(task, "question_image_url", None)
             or getattr(task, "image_url", None)
@@ -1306,7 +1331,7 @@ class SessionService:
             question_text=task.question_text,
             question_latex=task.question_latex,
             question_image_url=img_url,
-            answer_type=diag_answer_type_for_display(task, options),
+            answer_type=answer_type,
             answer_options=options,
             answer_options_latex=options_latex,
             phase=state.phase,
