@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, desc, func
+from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db
@@ -30,6 +30,12 @@ from src.core.access import (
 from src.models.diag_models import DiagAnswer, DiagReport, DiagSession
 from src.repositories.knowledge_repo import KnowledgeRepository
 from src.domain.report_generator import REPORT_SCHEMA_VERSION
+from src.domain.level_policy import (
+    CATEGORY_LABEL_RU,
+    classify,
+    count_solved,
+    is_correct,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,16 +44,34 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def _theta_to_status(theta: Optional[float]) -> str:
+# Legacy four-value mastery vocabulary of the group overview, now derived from
+# the single level policy (previously its own theta cut-offs 1.5 / 0 / -1).
+_LEVEL_STATUS_TO_MASTERY = {
+    "above": "mastered",
+    "on_level": "learning",
+    "partial_gap": "struggling",
+    "below": "gap",
+    "critical": "gap",
+}
+
+
+def _theta_to_status(theta: Optional[float], se: Optional[float] = None, grade: int = 0) -> str:
     if theta is None:
         return "no_data"
-    if theta >= 1.5:
-        return "mastered"
-    if theta >= 0.0:
-        return "learning"
-    if theta >= -1.0:
-        return "struggling"
-    return "gap"
+    return _LEVEL_STATUS_TO_MASTERY[classify(theta, se, grade)["status"]]
+
+
+def _level_fields(session) -> dict:
+    """Level fields of a completed session, from the one policy."""
+    theta = float(session.theta) if session is not None and session.theta is not None else None
+    se = float(session.theta_se) if session is not None and session.theta_se is not None else None
+    level = classify(theta, se, session.grade_level if session is not None else 0)
+    return {
+        "category": level["category"] or (session.overall_level if session is not None else None),
+        "level_status": level["status"],
+        "class_equivalent": level["class_equivalent"],
+        "level_provisional": level["provisional"],
+    }
 
 
 def _alpha_to_status(alpha: float) -> str:
@@ -113,7 +137,7 @@ async def student_skill_map(
             skill_stats[a.skill_id] = {"total": 0, "correct": 0, "outcomes": []}
         skill_stats[a.skill_id]["total"] += 1
         skill_stats[a.skill_id]["outcomes"].append(float(a.outcome))
-        if a.outcome >= 1.0:
+        if is_correct(a.outcome):
             skill_stats[a.skill_id]["correct"] += 1
 
     knowledge_repo = KnowledgeRepository()
@@ -166,7 +190,8 @@ async def student_skill_map(
 
     return {
         "grade_level": session.grade_level,
-        "overall_level": _LEVEL_RU_MAP.get(session.overall_level or "", session.overall_level),
+        "overall_level": CATEGORY_LABEL_RU.get(session.overall_level or "", session.overall_level),
+        **{k: v for k, v in _level_fields(session).items() if k != "category"},
         "diagnosed_at": session.completed_at.isoformat() if session.completed_at else None,
         "total_topics": len(skills),
         **counts,
@@ -204,6 +229,7 @@ async def student_timeline(
             "se": float(s.theta_se) if s.theta_se else None,
             "items_answered": s.items_answered,
             "overall_level": s.overall_level,
+            **({k: v for k, v in _level_fields(s).items() if k != "category"} if s.theta is not None else {}),
             "grade_level": s.grade_level,
             "weak_skills_count": len(s.weak_skills or []),
         })
@@ -317,15 +343,8 @@ async def student_report(
         weak_names.append(name)
         skill_names[sid] = name
 
-    _LEVEL_RU_MAP = {
-        "mastered":    "Отличное владение",
-        "learning":    "Хорошее понимание",
-        "struggling":  "Есть затруднения",
-        "gap":         "Пробел в знаниях",
-        "below_grade": "Ниже уровня класса",
-        "at_grade":    "Соответствует программе",
-        "above_grade": "Выше уровня класса",
-    }
+    # Category labels come from the single level policy (no local dictionary).
+    _LEVEL_RU_MAP = CATEGORY_LABEL_RU
 
     # Build confidence interval from theta_se if available
     theta_val = float(session.theta) if session and session.theta is not None else None
@@ -336,23 +355,18 @@ async def student_report(
         else None
     )
 
-    # Calculate accuracy and correct count from diag_answers
+    # "Solved N of M": adaptive-test answers only, with the one is_correct rule
+    # (same numbers as report_json.level and the auth completion payload).
     accuracy_val = None
     correct_count = 0
+    measured_total = 0
     if session:
-        ans_stats = (
-            db.query(
-                func.count(DiagAnswer.id).label("total"),
-                func.sum(
-                    case((DiagAnswer.outcome >= 1.0, 1), else_=0)
-                ).label("correct"),
-            )
-            .filter(DiagAnswer.session_id == session.id)
-            .first()
+        counts = count_solved(
+            db.query(DiagAnswer).filter(DiagAnswer.session_id == session.id).all()
         )
-        if ans_stats and ans_stats.total and ans_stats.total > 0:
-            correct_count = int(ans_stats.correct or 0)
-            accuracy_val = round(float(correct_count) / float(ans_stats.total), 4)
+        correct_count, measured_total = counts["solved"], counts["total"]
+        if measured_total:
+            accuracy_val = round(float(correct_count) / float(measured_total), 4)
 
     overall_level_key = (report.overall_level if report else None) or (session.overall_level if session else None)
 
@@ -415,6 +429,9 @@ async def student_report(
         "confidence_interval": confidence_interval,
         "items_total":    session.items_answered if session else None,
         "correct_answers": correct_count,
+        "solved": correct_count,
+        "total": measured_total,
+        "level": _level_fields(session) if session else None,
         # ── Topic breakdown ─────────────────────────────────────────────────
         "topic_breakdown": enriched_breakdown,
         "hierarchical_tree": hierarchical_tree,
@@ -574,7 +591,7 @@ def _build_diagnostic_trajectory(session: Optional[DiagSession], db: Session, kn
             "topic_name": t_name,
             "grade_level": sk_grade,
             "outcome": float(a.outcome),
-            "is_correct": a.outcome >= 1.0,
+            "is_correct": is_correct(a.outcome),
             "theta_after": round(float(a.theta_after), 2) if a.theta_after is not None else 0.0,
             "is_deep_scan": a.is_deep_scan,
         })
@@ -613,7 +630,7 @@ async def group_overview(
         )
 
         theta = float(session.theta) if session and session.theta else None
-        status = _theta_to_status(theta)
+        status = _theta_to_status(theta, float(session.theta_se) if session and session.theta_se is not None else None, session.grade_level if session else 0)
 
         if theta is not None:
             thetas.append(theta)
@@ -626,6 +643,7 @@ async def group_overview(
             "theta": theta,
             "overall_level": session.overall_level if session else None,
             "status": status,
+            **(_level_fields(session) if session and theta is not None else {}),
             "grade_level": session.grade_level if session else None,
             "diagnosed_at": session.completed_at.isoformat() if session and session.completed_at else None,
             "weak_skills_count": len(session.weak_skills or []) if session else 0,

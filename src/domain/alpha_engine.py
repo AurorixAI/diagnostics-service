@@ -125,12 +125,9 @@ def fisher_information(theta: float, params: IRTParams) -> float:
 
 
 def theta_to_level(theta: float) -> str:
-    """Map theta to pedagogical level label."""
-    if theta >= 1.0:
-        return "above_grade"
-    if theta >= -0.5:
-        return "at_grade"
-    return "below_grade"
+    """Map theta to pedagogical level label (cut-offs live in level_policy)."""
+    from src.domain.level_policy import theta_category
+    return theta_category(theta)
 
 
 def level_confidence(state: ThetaState) -> float:
@@ -190,6 +187,10 @@ class AlphaTracker:
 
     def get_alpha(self, topic_id: str) -> float:
         return self._alphas.get(topic_id, 0.0)
+
+    def get_count(self, topic_id: str) -> int:
+        """Number of observations (answers) that updated this topic."""
+        return int(self._counts.get(topic_id, 0))
 
     def get_all(self) -> Dict[str, float]:
         return dict(self._alphas)

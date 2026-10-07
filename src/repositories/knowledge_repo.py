@@ -41,7 +41,12 @@ class KnowledgeRepository:
     def get_children(self, parent_id: str) -> List[types.SimpleNamespace]:
         resp = content_client.get(f"{BASE}/skills/{parent_id}/children")
         resp.raise_for_status()
-        return [_ns(r) for r in resp.json()]
+        # The API orders by sequence_order only; equal values come back in an
+        # unspecified order, which made "which child" depend on the database.
+        return sorted(
+            (_ns(r) for r in resp.json()),
+            key=lambda n: (int(getattr(n, "sequence_order", 0) or 0), str(n.id)),
+        )
 
     def get_by_level_and_grade(self, level: str, grade: int) -> List[types.SimpleNamespace]:
         resp = content_client.get(
@@ -71,7 +76,16 @@ class SkillPrerequisiteRepository:
             params={"hard_only": hard_only},
         )
         resp.raise_for_status()
-        return [_ns(r) for r in resp.json()]
+        # Stable order for the Deep Scan: most critical edge first, then the
+        # heavier one, then id (the API only sorts by weight, ties unspecified).
+        return sorted(
+            (_ns(r) for r in resp.json()),
+            key=lambda p: (
+                -int(getattr(p, "criticality", 5) or 5),
+                -float(getattr(p, "weight", 1.0) or 1.0),
+                str(p.prerequisite_id),
+            ),
+        )
 
 
 class TaskRepository:

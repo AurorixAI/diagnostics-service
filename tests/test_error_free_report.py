@@ -9,7 +9,8 @@ def test_low_alpha_without_wrong_answers_never_creates_a_correction_plan():
 
 def test_an_observed_wrong_answer_preserves_the_gap_block():
     _, weak, _ = _build_skill_blocks({'G10_T05': {'alpha': .4}}, [],
-        {'G10_T05': {'name_ru': 'Показательные функции'}}, [NS(outcome=1), NS(outcome=0)])
+        {'G10_T05': {'name_ru': 'Показательные функции'}},
+        [NS(outcome=1, topic_id='G10_T05'), NS(outcome=0, topic_id='G10_T05')])
     assert weak[0]['skill_id'] == 'G10_T05'
 
 def test_error_free_summary_describes_strengths_without_inventing_remediation():

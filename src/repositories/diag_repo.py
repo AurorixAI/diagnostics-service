@@ -146,6 +146,8 @@ class DiagAnswerRepository(BaseRepository[DiagAnswer]):
         phase: str,
         is_deep_scan: bool,
         task_snapshot: Optional[dict] = None,
+        deep_scan_origin_skill_id: Optional[str] = None,
+        deep_scan_step: Optional[int] = None,
     ) -> DiagAnswer:
         answer = DiagAnswer(
             session_id=session_id,
@@ -164,6 +166,8 @@ class DiagAnswerRepository(BaseRepository[DiagAnswer]):
             phase=phase,
             is_deep_scan=is_deep_scan,
             task_snapshot=task_snapshot,
+            deep_scan_origin_skill_id=deep_scan_origin_skill_id,
+            deep_scan_step=deep_scan_step,
         )
         return self.add(answer)
 

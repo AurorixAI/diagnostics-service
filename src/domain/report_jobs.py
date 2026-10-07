@@ -71,8 +71,46 @@ def enqueue_report_generation(db: Session, session_id: uuid.UUID, *, commit: boo
     return report
 
 
-def enqueue_stale_report_generations() -> int:
-    """Materialise missing reports and queue only stale derived documents."""
+# Per-job switch read by the worker: a queued report whose report_json carries
+# ``{"_regeneration": {"narrative": "deterministic"}}`` is rebuilt without any
+# call to the (paid) narrative model.  The marker lives in the row being
+# regenerated, so it survives retries and stale-claim recovery, and disappears
+# automatically when the new report_json replaces it.  New completions are never
+# marked and keep their normal narrative.
+REGENERATION_KEY = "_regeneration"
+
+
+def is_deterministic_job(report: DiagReport) -> bool:
+    marker = (report.report_json or {}).get(REGENERATION_KEY) if isinstance(report.report_json, dict) else None
+    return isinstance(marker, dict) and marker.get("narrative") == "deterministic"
+
+
+def _is_current(report: Optional[DiagReport]) -> bool:
+    return bool(
+        report
+        and report.report_json
+        and report.report_schema_version >= REPORT_SCHEMA_VERSION
+        and not (isinstance(report.report_json, dict) and report.report_json.get("report_meta", {}).get("degraded"))
+    )
+
+
+def list_stale_report_sessions(db: Session) -> list[tuple[uuid.UUID, int, str]]:
+    """(session_id, current schema version, status) of every report that is not current."""
+    out = []
+    for session in db.query(DiagSession).filter(DiagSession.phase == "completed").order_by(DiagSession.completed_at, DiagSession.id).all():
+        report = db.query(DiagReport).filter(DiagReport.session_id == session.id).first()
+        if not _is_current(report):
+            out.append((session.id, int(report.report_schema_version or 0) if report else -1,
+                        report.generation_status if report else "missing"))
+    return out
+
+
+def enqueue_stale_report_generations(*, deterministic: bool = False) -> int:
+    """Materialise missing reports and queue only stale derived documents.
+
+    ``deterministic=True`` marks each queued job so that the worker skips the
+    narrative model (see ``REGENERATION_KEY``).
+    """
     db = SessionLocal()
     try:
         completed = db.query(DiagSession).filter(DiagSession.phase == "completed").all()
@@ -84,12 +122,7 @@ def enqueue_stale_report_generations() -> int:
             # report solely because an old worker wrote an operational status
             # incorrectly. In particular, startup must never create a new
             # external-model request for it.
-            is_current = bool(
-                report
-                and report.report_json
-                and report.report_schema_version >= REPORT_SCHEMA_VERSION
-            )
-            if is_current:
+            if _is_current(report):
                 continue
             if report is None:
                 report = DiagReport(
@@ -105,6 +138,10 @@ def enqueue_stale_report_generations() -> int:
                 )
                 db.add(report)
             report.report_schema_version = 0
+            if deterministic:
+                report.report_json = {**(report.report_json or {}), REGENERATION_KEY: {"narrative": "deterministic"}}
+            elif isinstance(report.report_json, dict) and REGENERATION_KEY in report.report_json:
+                report.report_json = {k: v for k, v in report.report_json.items() if k != REGENERATION_KEY}
             report.generation_status = "pending"
             report.generation_stage = "queued"
             report.generation_error = None
@@ -229,6 +266,7 @@ def process_next_report_job() -> bool:
             deep_scan_incomplete=bool(_snapshot_value(session, "deep_scan_incomplete", False)),
             classification_confidence=classification_confidence,
             force=True,
+            skip_narrative=is_deterministic_job(report),
         )
         if generated and generated.generation_status == "ready":
             return True

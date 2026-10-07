@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from src.core import auth_client
 from src.core.database import SessionLocal
+from src.domain.level_policy import classify, count_solved
 from src.models.diag_models import DiagAnswer, DiagSession
 
 log = logging.getLogger(__name__)
@@ -64,17 +65,28 @@ def _claim_next_sync(db: Session) -> Optional[DiagSession]:
 
 def _completion_payload(db: Session, session: DiagSession) -> dict:
     answers = db.query(DiagAnswer).filter(DiagAnswer.session_id == session.id).all()
-    correct_answers = sum(1 for answer in answers if float(answer.outcome or 0) >= 1.0)
-    total_answers = len(answers)
+    # Same "solved N of M" as the report: adaptive-test items only; Deep Scan
+    # probes are prerequisite checks and are not part of the measured set.
+    counts = count_solved(answers)
+    correct_answers, total_answers = counts["solved"], counts["total"]
+    theta = float(session.theta) if session.theta is not None else None
+    se = float(session.theta_se) if session.theta_se is not None else None
+    level = classify(theta, se, session.grade_level)
     return {
         "session_started_at": session.created_at.isoformat() if session.created_at else None,
-        "final_theta": float(session.theta) if session.theta is not None else None,
-        "se": float(session.theta_se) if session.theta_se is not None else None,
+        "final_theta": theta,
+        "se": se,
         "total_items": total_answers,
         "correct_answers": correct_answers,
         "accuracy": round(correct_answers / total_answers, 4) if total_answers else None,
         "identified_gaps": list(session.weak_skills or []),
         "topic_breakdown": session.topic_breakdown or {},
+        # Ready-made level (diagnostic-service is the only place that computes it).
+        # (the stored session value is the fallback when theta is missing).
+        "overall_level": level["category"] or session.overall_level,
+        "level_status": level["status"],
+        "class_equivalent": level["class_equivalent"],
+        "level_provisional": level["provisional"],
     }
 
 

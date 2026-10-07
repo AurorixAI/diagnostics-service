@@ -122,6 +122,12 @@ class DiagAnswer(Base):
     # Navigation context
     phase = Column(String(20))
     is_deep_scan = Column(Boolean, default=False)
+    # Deep Scan link (NULL for measurement items and for answers recorded before
+    # migration 010): the navigation skill whose failure started the scan and
+    # this answer's 1-based step inside it.  The report builds chains from this
+    # link instead of guessing from neighbouring answers.
+    deep_scan_origin_skill_id = Column(String(30), nullable=True)
+    deep_scan_step = Column(Integer, nullable=True)
 
     # New answers retain the exact evaluated/displayed task (provenance
     # "issued"). Legacy rows are NULL until scripts/backfill_task_snapshots.py

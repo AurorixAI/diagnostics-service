@@ -38,6 +38,7 @@ from src.core.exceptions import (
 from src.domain.auth_sync_jobs import enqueue_auth_completion_sync, process_next_auth_completion_sync
 from src.domain.report_jobs import enqueue_report_generation, process_next_report_job
 from src.domain.report_generator import REPORT_SCHEMA_VERSION
+from src.domain.level_policy import classify, count_solved, is_correct
 from src.domain.alpha_engine import (
     AlphaTracker,
     IRTParams,
@@ -277,7 +278,7 @@ class SessionService:
         snapshot = session.state_snapshot or {}
         theta = snapshot.get("theta") or {}
         result = AnswerResult(
-            is_correct=float(last.outcome) >= 0.5,
+            is_correct=is_correct(last.outcome),
             outcome=float(last.outcome),
             eval_category=last.eval_category,
             theta=float(theta.get("theta", session.theta if session.theta is not None else 0)),
@@ -338,7 +339,7 @@ class SessionService:
 
         # 3. Evaluate answer
         outcome, category = self.evaluator.evaluate(task, student_answer)
-        correct = outcome >= 0.5
+        correct = is_correct(outcome)
 
         # 4. Update global IRT theta only with measurement items.  Deep-scan
         # tasks are causal probes for prerequisites; mixing their often easier
@@ -363,7 +364,14 @@ class SessionService:
             if state.current_section_id not in state.covered_section_ids:
                 state.covered_section_ids.append(state.current_section_id)
 
-        # 7. Log answer to DB
+        # 7. Log answer to DB.  A Deep Scan answer records the navigation skill
+        # that started the scan and its 1-based step, so the report can build
+        # the chain from a stored fact instead of guessing from neighbours.
+        scan_origin: Optional[str] = None
+        scan_step: Optional[int] = None
+        if state.is_in_deep_scan and state.deep_scan:
+            scan_origin = state.deep_scan.get("origin_skill_id")
+            scan_step = int(state.deep_scan.get("items_used", 0)) + 1
         self.answer_repo.log_answer(
             session_id=session_id,
             task_id=task_id,
@@ -381,6 +389,8 @@ class SessionService:
             phase=state.phase,
             is_deep_scan=state.is_in_deep_scan,
             task_snapshot=copy.deepcopy(state.current_task_snapshot),
+            deep_scan_origin_skill_id=scan_origin,
+            deep_scan_step=scan_step,
         )
         # Inspect the navigation consequence before accepting an early stop.
         # Otherwise the final failed skill can end the test before the critical
@@ -456,6 +466,12 @@ class SessionService:
             "grade_level": db_session.grade_level,
             "overall_theta": theta,
             "overall_level": db_session.overall_level or "at_grade",
+            # Same level object as report_json.level (computed by level_policy).
+            "level": report_json.get("level") or {
+                **classify(theta, se, db_session.grade_level),
+                "theta": theta, "se": se,
+                **count_solved(answers),
+            },
             "confidence_interval": [theta - 2 * se, theta + 2 * se],
             "topic_breakdown": db_session.topic_breakdown or {},
             "weak_skills": db_session.weak_skills or [],
@@ -625,6 +641,11 @@ class SessionService:
 
     # ── Stopping criteria ─────────────────────────────────────────────────
 
+    @staticmethod
+    def _deep_scan_budget_spent(state: SessionState) -> bool:
+        """True once the session's Deep Scan items reached DEEP_SCAN_SESSION_BUDGET."""
+        return state.deep_scan_items_total >= settings.deep_scan_session_budget
+
     def _has_pending_critical_probe(self, state: SessionState, correct: bool) -> bool:
         """Preview the current L4 answer without mutating persisted navigation."""
         if state.phase != "navigation" or not state.current_skill_nav or not state.current_subtopic_nav:
@@ -634,6 +655,8 @@ class SessionService:
         current = subtopics.peek_current()
         if current is None or current.importance < settings.deep_scan_importance_threshold:
             return False
+        if self._deep_scan_budget_spent(state):
+            return False   # no scan can start, so there is nothing pending
         next_skill = skills.move(correct)
         if not skills.get_failing_skill():
             return False
@@ -736,6 +759,7 @@ class SessionService:
                 # needs_deep_scan() reads the FAILED L3 subtopic's own importance (8–10).
                 if (
                     not subtopic_pass
+                    and not self._deep_scan_budget_spent(state)
                     and sub_nav.needs_deep_scan(settings.deep_scan_importance_threshold)
                     and skill_nav.get_failing_skill()
                 ):
@@ -1033,6 +1057,26 @@ class SessionService:
         state.current_topic_id = topic.id
         state.current_section_id = getattr(topic, "parent_id", None)
 
+    @staticmethod
+    def _most_important_l4(children: list) -> Optional[str]:
+        """Pick the L4 skill to probe for an L3 prerequisite.
+
+        Importance is the knowledge-node ``importance`` field (1–10, default 5).
+        The highest importance wins; among equally important children the
+        middle one by ``sequence_order`` is taken (the former behaviour, a
+        representative difficulty), with the id as the final tie-break so the
+        choice never depends on database row order.
+        """
+        if not children:
+            return None
+        ordered = sorted(
+            children,
+            key=lambda c: (int(getattr(c, "sequence_order", 0) or 0), str(c.id)),
+        )
+        top = max(int(getattr(c, "importance", 5) or 5) for c in ordered)
+        best = [c for c in ordered if int(getattr(c, "importance", 5) or 5) == top]
+        return best[len(best) // 2].id
+
     def _prereq_l4_ids(self, skill_or_para_id: str) -> List[str]:
         """
         Resolve a failing L4 skill to a list of testable prerequisite L4 skill IDs.
@@ -1041,7 +1085,8 @@ class SessionService:
         Algorithm:
           1. If input is L4 → map to its parent L3 paragraph via parent_id.
           2. Look up hard prerequisites for that L3 paragraph.
-          3. For each prerequisite L3 paragraph → resolve to its middle L4 child skill.
+          3. For each prerequisite L3 paragraph → resolve to its most important L4 child
+             (see ``_most_important_l4``); order is criticality, weight, id.
         This keeps the deep-scan engine purely L4-native (tasks live at L4).
         """
         node = self.knowledge_repo.get_by_id(skill_or_para_id)
@@ -1062,26 +1107,25 @@ class SessionService:
         )
 
         result: List[str] = []
+        # ``prereqs`` arrive in a stable order: criticality desc, weight desc, id.
         for p in prereqs:
             prereq_id = p.prerequisite_id
-            # prerequisite_id is typically an L3 paragraph → resolve to its middle L4 child
+            # prerequisite_id is typically an L3 paragraph → resolve to its most
+            # important L4 child
             prereq_node = self.knowledge_repo.get_by_id(prereq_id)
             if prereq_node is None:
                 log.warning("_prereq_l4_ids: prereq node not found for %s", prereq_id)
                 continue
             if prereq_node.level == "L3":
                 children = self.knowledge_repo.get_skills_for_subtopic(prereq_id)
-                if children:
-                    # Pick middle child for representative difficulty
-                    mid_child = children[len(children) // 2]
-                    result.append(mid_child.id)
-                    log.debug(
-                        "_prereq_l4_ids: L3 %s → L4 child %s",
-                        prereq_id, mid_child.id,
-                    )
+                chosen = self._most_important_l4(children)
+                if chosen is not None and chosen not in result:
+                    result.append(chosen)
+                    log.debug("_prereq_l4_ids: L3 %s → L4 child %s", prereq_id, chosen)
             elif prereq_node.level == "L4":
                 # Already L4 — future-proof for direct L4 prerequisite links
-                result.append(prereq_id)
+                if prereq_id not in result:
+                    result.append(prereq_id)
             else:
                 log.warning(
                     "_prereq_l4_ids: unexpected level %s for prereq %s",
@@ -1095,7 +1139,10 @@ class SessionService:
         self, state: SessionState, failing_skill_id: str
     ) -> Optional[TaskOut]:
         """Build a DeepScanState from the prerequisite graph of the failing skill."""
-        prereq_ids = self._prereq_l4_ids(failing_skill_id)
+        prereq_ids = [
+            pid for pid in self._prereq_l4_ids(failing_skill_id)
+            if pid not in state.deep_scan_tested and pid != failing_skill_id
+        ]
 
         scan = DeepScanState(
             origin_skill_id=failing_skill_id,
@@ -1121,12 +1168,7 @@ class SessionService:
             "skill_id": state.current_skill_id,
         }
 
-        next_skill_id = scan.queue.pop(0)
-        scan.current_skill_id = next_skill_id
-        state.deep_scan = scan.to_dict()
-        self._set_context_for_skill(state, next_skill_id)
-
-        return self._pick_task_for_skill(state, next_skill_id)
+        return self._next_deep_scan_task(state, scan)
 
     def _advance_deep_scan(
         self, state: SessionState, correct: bool
@@ -1147,50 +1189,80 @@ class SessionService:
 
         scan = DeepScanState.from_dict(state.deep_scan)
         scan.items_used += 1
+        state.deep_scan_items_total += 1
 
         if scan.current_skill_id:
             scan.tested.append(scan.current_skill_id)
 
-        budget_exceeded = scan.items_used >= scan.max_items
+        budget_exceeded = (
+            scan.items_used >= scan.max_items or self._deep_scan_budget_spent(state)
+        )
         queue_empty = len(scan.queue) == 0
 
         if correct:
-            # Student can do this prerequisite → root cause found, stop scan
-            self._finish_deep_scan(state, scan)
-            return self._advance_topic(state, False)
+            # The student can do this prerequisite: this BRANCH is closed (its own
+            # prerequisites are not descended into).  Other branches still waiting
+            # in the queue are probed — the scan is bounded by max_items and by the
+            # queue, not ended by the first correct answer.
+            if budget_exceeded or queue_empty:
+                self._finish_deep_scan(state, scan)
+                return self._advance_topic(state, False)
+            return self._next_deep_scan_task(state, scan)
 
         # Incorrect: this skill is a gap
         if scan.current_skill_id:
             scan.gaps.append(scan.current_skill_id)
 
-        if budget_exceeded or queue_empty:
+        if budget_exceeded:
             self._finish_deep_scan(state, scan)
             return self._advance_topic(state, False)
 
-        # Go deeper: prepend this skill's prerequisites (resolved via L3 map)
+        # Go deeper, whatever is left in the queue: a failed probe makes ITS OWN
+        # prerequisites the next thing to test (depth first, ahead of the other
+        # branches).  Skills already tested in this scan or in an earlier scan of
+        # the session, already queued, or the scan's trigger are never repeated.
+        # No prerequisites -> this skill is the root and the descent stops here
+        # (the helper finishes the scan when nothing else is queued).
         if scan.current_skill_id:
+            seen = set(scan.tested) | set(state.deep_scan_tested) | set(scan.queue) | {scan.origin_skill_id}
             new_prereqs = [
-                pid
-                for pid in self._prereq_l4_ids(scan.current_skill_id)
-                if pid not in scan.tested
-                and pid not in scan.queue
+                pid for pid in self._prereq_l4_ids(scan.current_skill_id) if pid not in seen
             ]
             scan.queue = new_prereqs + scan.queue
 
-        if not scan.queue:
-            self._finish_deep_scan(state, scan)
-            return self._advance_topic(state, False)
+        return self._next_deep_scan_task(state, scan)
 
-        next_skill_id = scan.queue.pop(0)
-        scan.current_skill_id = next_skill_id
-        state.deep_scan = scan.to_dict()
-        self._set_context_for_skill(state, next_skill_id)
+    def _next_deep_scan_task(
+        self, state: SessionState, scan: DeepScanState
+    ) -> Optional[TaskOut]:
+        """Issue the next probe from the queue, skipping skills with no unused task.
 
-        return self._pick_task_for_skill(state, next_skill_id)
+        A prerequisite without tasks is not evidence of anything (neither gap nor
+        mastery): it is marked tested-without-answer and the next queued skill is
+        tried.  Returning ``None`` here would make the caller complete the whole
+        session as ``bank_exhausted``, so an exhausted queue instead finishes the
+        scan and resumes the main CAT flow.
+        """
+        while scan.queue:
+            next_skill_id = scan.queue.pop(0)
+            scan.current_skill_id = next_skill_id
+            self._set_context_for_skill(state, next_skill_id)
+            task = self._pick_task_for_skill(state, next_skill_id)
+            if task is not None:
+                state.deep_scan = scan.to_dict()
+                return task
+            log.warning("Deep scan: no unused task for %s, skipping to next branch", next_skill_id)
+            scan.tested.append(next_skill_id)
+        scan.current_skill_id = None
+        self._finish_deep_scan(state, scan)
+        return self._advance_topic(state, False)
 
     def _finish_deep_scan(self, state: SessionState, scan: DeepScanState) -> None:
         """Finalize deep scan: collect gaps, reset flags and restore navigation context."""
         state.confirmed_gaps.extend(scan.gaps)
+        for skill in scan.tested:
+            if skill not in state.deep_scan_tested:
+                state.deep_scan_tested.append(skill)
         if scan.origin_skill_id not in state.confirmed_gaps:
             state.confirmed_gaps.append(scan.origin_skill_id)
         state.deep_scan = None
@@ -1245,10 +1317,13 @@ class SessionService:
             topic_id: {
                 "alpha": alpha,
                 "level": theta_to_level(alpha),
+                # Observation count (AlphaTracker): lets the report require
+                # >= 2 observations before calling a topic weak.
+                "observations": state.alpha_tracker.get_count(topic_id),
             }
             for topic_id, alpha in state.alpha_tracker.get_all().items()
         }
-        overall_level = theta_to_level(state.theta.theta)
+        overall_level = classify(state.theta.theta, state.theta.se, state.grade_level)["category"]
 
         db_session = self.session_repo.get_by_id(uuid.UUID(state.session_id))
         if db_session is None:
@@ -1294,7 +1369,7 @@ class SessionService:
             log.warning("diagnostic_worker_acceleration_failed session_id=%s error_type=%s", db_session.id, type(exc).__name__)
 
         return AnswerResult(
-            is_correct=outcome >= 0.5,
+            is_correct=is_correct(outcome),
             outcome=outcome,
             eval_category=category,
             theta=state.theta.theta,

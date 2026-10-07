@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     min_section_coverage: int = 5
     deep_scan_importance_threshold: int = 8
     deep_scan_max_items: int = 6
+    # Per-SESSION cap on Deep Scan items (env DEEP_SCAN_SESSION_BUDGET). Deep-scan
+    # items do not update theta but use up max_items, so unbounded scanning costs
+    # accuracy.  A scan cannot start, and a running one stops, once the session's
+    # total reaches this value.  The per-scan cap (deep_scan_max_items) still applies.
+    deep_scan_session_budget: int = Field(default=6, ge=0)  # sweep 2026-10-07: largest value with accuracy within noise and +0.3 items
     mastery_threshold: float = 0.6   # min fraction correct to move UP a topic
 
     # CORS

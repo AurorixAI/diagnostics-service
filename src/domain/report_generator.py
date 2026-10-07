@@ -4,7 +4,7 @@ Diagnostic Service — Report Generator (v3)
 Architecture:
   ┌─ Python (deterministic) ─────────────────────────────────────────┐
   │  error_patterns  — built from DiagAnswer records                 │
-  │  weak_skills     — built from topic_breakdown (mastery 35–65%)   │
+  │  weak_skills     — topic_breakdown AND >=1 wrong attempt (N02)   │
   │  strong_skills   — built from topic_breakdown (mastery ≥ 70%)    │
   │  critical_gaps   — built from topic_breakdown (mastery < 35%)    │
   └───────────────────────────────────────────────────────────────────┘
@@ -22,7 +22,7 @@ import logging
 import re
 import uuid
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -31,6 +31,13 @@ from src.models.diag_models import DiagReport
 from src.repositories.diag_repo import DiagReportRepository
 from src.repositories.knowledge_repo import KnowledgeRepository
 from .answer_value import answer_value_key
+from .level_policy import (
+    LEGACY_STATUS,
+    STATUS_LABEL_RU,
+    build_level,
+    count_solved,
+    is_correct,
+)
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +74,9 @@ ERROR_PATTERNS_VERSION = 4
 # A report is a derived view of append-only answers.  This independent version
 # lets us upgrade its structure without pretending that an old error journal is
 # fully current just because its journal version still matches.
-REPORT_SCHEMA_VERSION = 3
+# 4 (N02): one level policy (``level`` object), evidence-gated weak topics on L2,
+# Deep Scan chains from the stored origin link.
+REPORT_SCHEMA_VERSION = 4
 
 
 def _distractor_value(distractor: Any) -> str:
@@ -199,59 +208,31 @@ def _student_answer_latex(student_answer: Optional[str], option_pairs: List[Tupl
     return None
 
 
-def _compute_overall_status(theta: float, score_pct: int) -> str:
+def _legacy_overall(level: Dict[str, Any]) -> Tuple[str, str, str]:
+    """(status code, label, class_equivalent) in the pre-N02 report field format.
+
+    The front end reads ``overall.status`` (above_level | on_level | partial_gap |
+    below_level | critical), ``overall.status_label_ru`` and
+    ``overall.class_equivalent``; they are filled from ``level_policy``.
     """
-    Compute overall status deterministically from IRT theta score AND empirical accuracy (score_pct).
-    Ensures logical consistency: low accuracy (<45%) can NEVER be labeled 'on_level' or 'above_level'.
-    """
-    if score_pct < 25 or theta < -1.4:
-        return "critical"
-    if score_pct < 45 or theta < -0.6:
-        return "below_level"
-    if score_pct < 65 or theta < 0.1:
-        return "partial_gap"
-
-    # For score_pct >= 65%:
-    if score_pct >= 80 and theta >= 1.2:
-        return "above_level"
-    elif theta >= 0.2:
-        return "on_level"
-    else:
-        return "partial_gap"
-
-
-_STATUS_LABEL_RU = {
-    "above_level": "Выше уровня класса",
-    "on_level":    "Соответствует уровню",
-    "partial_gap": "Частичные пробелы",
-    "below_level": "Ниже уровня класса",
-    "critical":    "Критическое отставание",
-}
-
-
-def _compute_class_equivalent(theta: float, score_pct: int, grade: int) -> str:
-    """
-    Return a human-readable class level equivalent combining IRT theta and empirical accuracy.
-    """
-    if score_pct < 25 or theta < -1.4:
-        prev_g = max(1, grade - 2)
-        return f"начало {prev_g} класса"
-    elif score_pct < 45 or theta < -0.6:
-        return f"середина {grade - 1} класса"
-    elif score_pct < 65 or theta < 0.1:
-        return f"конец {grade - 1} класса"
-    elif score_pct < 80 or theta < 0.7:
-        return f"начало {grade} класса"
-    elif theta < 1.5:
-        return f"середина {grade} класса"
-    else:
-        return f"начало {grade + 1} класса"
+    status = level.get("status") or "on_level"
+    return (
+        LEGACY_STATUS.get(status, "on_level"),
+        STATUS_LABEL_RU.get(status, STATUS_LABEL_RU["on_level"]),
+        level.get("class_equivalent") or "",
+    )
 
 
 # ── Name resolver ─────────────────────────────────────────────────────────────
 
-def _resolve_skill(sid: str, repo: KnowledgeRepository) -> Dict[str, str]:
-    """Return {name_ru, example_task, description} for a skill ID."""
+def _resolve_skill(
+    sid: str, repo: KnowledgeRepository, failures: Optional[List[str]] = None,
+) -> Dict[str, str]:
+    """Return {name_ru, example_task, description} for a skill ID.
+
+    A transport failure (not a 404) is recorded in ``failures`` so that the
+    caller can tell a degraded report (ids instead of names) from a complete one.
+    """
     try:
         node = repo.get_by_id(sid)
         if node:
@@ -261,7 +242,8 @@ def _resolve_skill(sid: str, repo: KnowledgeRepository) -> Dict[str, str]:
                                 getattr(node, "description", "") or ""),
             }
     except Exception:
-        pass
+        if failures is not None:
+            failures.append(sid)
     return {"name_ru": sid, "example": ""}
 
 
@@ -385,7 +367,7 @@ def _build_error_patterns(
     Uses evaluated task evidence. A legacy report may retain its recorded
     context, but today's live bank is never presented as historical evidence.
     """
-    wrong = [a for a in answers_orm if float(a.outcome or 0) < 1.0]
+    wrong = [a for a in answers_orm if not is_correct(a.outcome)]
 
     selected = sorted(
         wrong,
@@ -602,6 +584,54 @@ def _build_cognitive_error_types(error_patterns: List[Dict[str, Any]]) -> List[D
     return result
 
 
+def _ordered_answers(answers_orm: list) -> list:
+    """Chronological order (answered_at, id) when every row has a timestamp.
+
+    Rows without timestamps (unit tests, partial legacy rows) keep the order the
+    caller supplied.  Generation queries ORDER BY answered_at, id as well.
+    """
+    items = list(answers_orm)
+    if items and all(getattr(a, "answered_at", None) is not None for a in items):
+        return sorted(items, key=lambda a: (a.answered_at, str(getattr(a, "id", ""))))
+    return items
+
+
+def _chain_step(a, skill_map, ep_by_task, grade_level) -> Dict[str, Any]:
+    sid = a.skill_id or ""
+    g = _extract_grade_from_id(sid) or grade_level
+    name = skill_map.get(sid, {}).get("name_ru") or sid
+    ep = ep_by_task.get(a.task_id, {})
+    step_data = {
+        "task_id": a.task_id,
+        "skill_id": sid,
+        "skill_name_ru": name,
+        "grade": g,
+        "phase": a.phase,
+        "is_deep_scan": bool(a.is_deep_scan),
+        "deep_scan_step": getattr(a, "deep_scan_step", None),
+        "outcome": float(a.outcome or 0),
+        "eval_category": a.eval_category,
+        "question_text": ep.get("question_text"),
+        "question_latex": ep.get("question_latex"),
+        "student_answer": ep.get("student_answer") or (a.student_answer if a.student_answer not in ("x_wrong_x", "wrong") else "—"),
+        "student_answer_latex": ep.get("student_answer_latex"),
+        "correct_answer": ep.get("correct_answer"),
+        "correct_answer_latex": ep.get("correct_answer_latex"),
+        "distractor_explanation": ep.get("distractor_explanation"),
+    }
+    if not ep and a.task_id:
+        try:
+            t_data, _src = _load_task_context(a)
+            if t_data is not None:
+                step_data["question_text"] = t_data.get("question_text")
+                step_data["question_latex"] = t_data.get("question_latex")
+                step_data["correct_answer"] = t_data.get("correct_answer")
+                step_data["correct_answer_latex"] = t_data.get("correct_answer_latex")
+        except Exception:
+            pass
+    return step_data
+
+
 def _reconstruct_root_cause_chains(
     answers_orm: list,
     skill_map: Dict[str, Dict[str, str]],
@@ -612,91 +642,121 @@ def _reconstruct_root_cause_chains(
     Reconstruct Deep Scan prerequisite descent trajectories from session answers.
     Identifies:
       - Trigger topic in current grade
-      - Prerequisite steps in lower grades
-      - Breakpoint (where fundamental misconception happened)
+      - Prerequisite steps (any grade, including the same grade)
+      - Breakpoint (the deepest failed prerequisite)
       - Anchor (where student answered correctly on lower grade foundation)
+
+    Answers carrying ``deep_scan_origin_skill_id`` (recorded since migration 010)
+    are grouped by that stored link and ordered by ``deep_scan_step``; the result
+    does not depend on the order of the input rows.  Older deep-scan answers
+    without the link keep the previous inference (a run of consecutive deep-scan
+    answers is attached to the preceding wrong navigation answer).
     """
     ep_by_task = {ep.get("task_id"): ep for ep in error_patterns if ep.get("task_id")}
+    ordered = _ordered_answers(answers_orm)
+    has_timestamps = bool(ordered) and all(
+        getattr(a, "answered_at", None) is not None for a in ordered
+    )
+
+    def step(a) -> Dict[str, Any]:
+        return _chain_step(a, skill_map, ep_by_task, grade_level)
 
     chains: List[Dict[str, Any]] = []
+
+    # ── A. chains from the stored origin link ────────────────────────────────
+    linked = [
+        a for a in ordered
+        if a.is_deep_scan and getattr(a, "deep_scan_origin_skill_id", None)
+    ]
+    groups: Dict[str, List[list]] = {}
+    for a in linked:
+        origin = a.deep_scan_origin_skill_id
+        scans = groups.setdefault(origin, [])
+        a_step = getattr(a, "deep_scan_step", None)
+        last_step = getattr(scans[-1][-1], "deep_scan_step", None) if scans else None
+        # The same skill can start a second scan; steps then restart from 1.
+        restarted = (
+            has_timestamps and scans and a_step is not None and last_step is not None
+            and a_step <= last_step
+        )
+        if not scans or restarted:
+            scans.append([a])
+        else:
+            scans[-1].append(a)
+    for origin, scans in groups.items():
+        trigger_pool = [
+            x for x in ordered
+            if not x.is_deep_scan and (x.skill_id or "") == origin
+            and not is_correct(x.outcome)
+        ]
+        for scan_answers in scans:
+            scan_answers = sorted(
+                scan_answers,
+                key=lambda x: (getattr(x, "deep_scan_step", None) is None,
+                               getattr(x, "deep_scan_step", None) or 0),
+            )
+            if trigger_pool:
+                source = step(trigger_pool[-1])
+                source["is_scan_origin"] = True
+            else:
+                # The failing skill was aggregated by the navigator; there is no
+                # single wrong item to show.  Keep the fact, not an invented item.
+                grade = _extract_grade_from_id(origin) or grade_level
+                source = {
+                    "task_id": None, "skill_id": origin,
+                    "skill_name_ru": skill_map.get(origin, {}).get("name_ru") or origin,
+                    "grade": grade, "phase": "navigation", "is_deep_scan": False,
+                    "deep_scan_step": None, "outcome": 0.0, "eval_category": None,
+                    "question_text": None, "question_latex": None, "student_answer": "—",
+                    "student_answer_latex": None, "correct_answer": None,
+                    "correct_answer_latex": None, "distractor_explanation": None,
+                    "is_scan_origin": True,
+                }
+            chain = _finalize_chain([source] + [step(x) for x in scan_answers], grade_level)
+            chain["evidence_source"] = "stored_link"
+            chains.append(chain)
+
+    # ── B. legacy answers without a link: previous inference ─────────────────
     current_chain_steps: List[Dict[str, Any]] = []
     last_nav_wrong: Optional[Dict[str, Any]] = None
-
-    for a in answers_orm:
-        sid = a.skill_id or ""
-        g = _extract_grade_from_id(sid) or grade_level
-        is_correct = float(a.outcome or 0) >= 1.0
-        name = skill_map.get(sid, {}).get("name_ru") or sid
-        ep = ep_by_task.get(a.task_id, {})
-
-        step_data = {
-            "task_id": a.task_id,
-            "skill_id": sid,
-            "skill_name_ru": name,
-            "grade": g,
-            "phase": a.phase,
-            "is_deep_scan": bool(a.is_deep_scan),
-            "outcome": float(a.outcome or 0),
-            "eval_category": a.eval_category,
-            "question_text": ep.get("question_text"),
-            "question_latex": ep.get("question_latex"),
-            "student_answer": ep.get("student_answer") or (a.student_answer if a.student_answer not in ("x_wrong_x", "wrong") else "—"),
-            "student_answer_latex": ep.get("student_answer_latex"),
-            "correct_answer": ep.get("correct_answer"),
-            "correct_answer_latex": ep.get("correct_answer_latex"),
-            "distractor_explanation": ep.get("distractor_explanation"),
-        }
-
-        if not ep and a.task_id:
-            try:
-                t_data, _src = _load_task_context(a)
-                if t_data is not None:
-                    step_data["question_text"] = t_data.get("question_text")
-                    step_data["question_latex"] = t_data.get("question_latex")
-                    step_data["correct_answer"] = t_data.get("correct_answer")
-                    step_data["correct_answer_latex"] = t_data.get("correct_answer_latex")
-            except Exception:
-                pass
-
+    for a in ordered:
+        if a.is_deep_scan and getattr(a, "deep_scan_origin_skill_id", None):
+            continue  # already handled through its stored link
+        step_data = step(a)
         if not a.is_deep_scan:
             if current_chain_steps:
                 chains.append(_finalize_chain(current_chain_steps, grade_level))
+                chains[-1]["evidence_source"] = "inferred"
                 current_chain_steps = []
-            if not is_correct:
+            if not is_correct(a.outcome):
                 last_nav_wrong = step_data
         else:
             if not current_chain_steps and last_nav_wrong:
                 current_chain_steps.append(last_nav_wrong)
             current_chain_steps.append(step_data)
-
     if current_chain_steps:
         chains.append(_finalize_chain(current_chain_steps, grade_level))
+        chains[-1]["evidence_source"] = "inferred"
 
+    # Only genuine Deep Scan trajectories with a failed prerequisite are shown.
+    # A normal wrong answer establishes an observed gap, not a causal chain.
+    # A prerequisite of the SAME grade is a valid link (it used to be dropped).
     seen_keys = set()
     unique_chains = []
-
-    # Only genuine Deep Scan trajectories are allowed here.  A normal wrong
-    # answer establishes an observed gap, not a causal prerequisite chain.
-    # The previous fallback created a persuasive but methodically false
-    # "primary cause" even when no prerequisite had been tested.
-    # 1. Genuine prerequisite descent chains (Grade N -> Grade N-1 or N-2)
     for ch in chains:
+        if not ch.get("has_prerequisite_gap"):
+            continue
         key = (ch.get("source_skill_id"), ch.get("root_gap_skill_id"))
-        if key not in seen_keys and ch.get("root_gap_grade", grade_level) < ch.get("source_grade", grade_level):
-            seen_keys.add(key)
-            unique_chains.append(ch)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique_chains.append(ch)
 
-    # 2. Multi-step distinct chains across different skills
-    for ch in chains:
-        key = (ch.get("source_skill_id"), ch.get("root_gap_skill_id"))
-        if key not in seen_keys and len(ch.get("steps", [])) >= 2 and ch.get("source_skill_id") != ch.get("root_gap_skill_id"):
-            seen_keys.add(key)
-            unique_chains.append(ch)
-
-    # Sort critical first, then deepest grade descent
+    # Sort critical first, then deepest grade descent; ids make ties stable.
     unique_chains.sort(key=lambda c: (
         0 if c.get("severity") == "critical" else 1 if c.get("severity") == "warning" else 2,
-        c.get("root_gap_grade", 99)
+        c.get("root_gap_grade", 99),
+        str(c.get("source_skill_id")), str(c.get("root_gap_skill_id")),
     ))
 
     return unique_chains
@@ -714,13 +774,25 @@ def _clean_explanation_text(text: Optional[str]) -> Optional[str]:
 
 
 def _finalize_chain(steps: List[Dict[str, Any]], grade_level: int) -> Dict[str, Any]:
-    """Synthesize a single prerequisite chain into source, breakpoint, and anchor."""
-    source = steps[0] if steps else {}
-    passed_steps = [s for s in steps if s["outcome"] >= 1.0]
-    failed_steps = [s for s in steps if s["outcome"] < 1.0]
+    """Synthesize a single prerequisite chain into source, breakpoint, and anchor.
 
-    failed_steps_sorted = sorted(failed_steps, key=lambda s: s["grade"])
-    root_gap = failed_steps_sorted[0] if failed_steps_sorted else source
+    The breakpoint is the deepest FAILED Deep Scan step: the lowest grade, and on
+    equal grades the one reached last (furthest from the source).  A same-grade
+    prerequisite is therefore a legitimate breakpoint.  When no deep-scan step
+    failed, the chain has no prerequisite gap and is not reported as a cause.
+    """
+    source = steps[0] if steps else {}
+    passed_steps = [s for s in steps if is_correct(s["outcome"])]
+    deep_failed = [
+        (i, s) for i, s in enumerate(steps)
+        if s.get("is_deep_scan") and not is_correct(s["outcome"])
+        and s.get("skill_id") != source.get("skill_id")
+    ]
+    has_gap = bool(deep_failed)
+    if has_gap:
+        root_gap = min(deep_failed, key=lambda pair: (pair[1]["grade"], -pair[0]))[1]
+    else:
+        root_gap = source
 
     passed_steps_sorted = sorted(passed_steps, key=lambda s: s["grade"])
     anchor = passed_steps_sorted[0] if passed_steps_sorted else None
@@ -749,6 +821,7 @@ def _finalize_chain(steps: List[Dict[str, Any]], grade_level: int) -> Dict[str, 
         "anchor_skill_id": anchor.get("skill_id") if anchor else None,
         "anchor_skill_name": anchor.get("skill_name_ru") if anchor else None,
         "severity": severity,
+        "has_prerequisite_gap": has_gap,
         "steps_count": len(steps),
         "steps": steps,
     }
@@ -774,7 +847,7 @@ def _build_diagnostic_boundary(
         sid = a.skill_id or ""
         g = _extract_grade_from_id(sid) or grade_level
         name = skill_map.get(sid, {}).get("name_ru") or sid
-        if float(a.outcome or 0) >= 1.0:
+        if is_correct(a.outcome):
             correct_by_grade.setdefault(g, []).append(name)
         else:
             wrong_by_grade.setdefault(g, []).append(name)
@@ -819,56 +892,155 @@ def _build_diagnostic_boundary(
     }
 
 
+class _L2Resolver:
+    """``skill_id -> L2 topic id`` through the knowledge hierarchy.
+
+    An L4 skill (or L3 paragraph) resolves to its L2 ancestor, an L2 to itself;
+    anything that cannot be resolved (missing node) gives ``None`` so that no
+    unverified parent is ever invented.  Results are cached.
+
+    When content-service is unreachable the lookup is *degraded*: a skill id that
+    is itself a key of ``topic_breakdown`` is its own L2 (L2 ids are exactly those
+    keys); other ids stay unresolved.  ``degraded`` tells the report generator
+    that the result must not be stamped as a current report.
+    """
+
+    def __init__(self, repo: Any, own_topic_ids: Any = ()) -> None:
+        self._repo = repo
+        self._own = set(own_topic_ids or ())
+        self._cache: Dict[str, Optional[str]] = {}
+        self.degraded = False
+
+    def __call__(self, skill_id: str) -> Optional[str]:
+        sid = str(skill_id or "")
+        if not sid:
+            return None
+        if sid in self._cache:
+            return self._cache[sid]
+        result: Optional[str] = None
+        try:
+            node = self._repo.get_by_id(sid)
+            hops = 0
+            while node is not None and hops < 5:
+                if getattr(node, "level", None) == "L2":
+                    result = getattr(node, "id", sid)
+                    break
+                parent = getattr(node, "parent_id", None)
+                if not parent:
+                    break
+                node = self._repo.get_by_id(parent)
+                hops += 1
+        except Exception as exc:
+            log.warning("Could not resolve L2 parent of %s: %s", sid, exc)
+            self.degraded = True
+            result = sid if sid in self._own else None
+        self._cache[sid] = result
+        return result
+
+
+def _make_l2_resolver(repo: Any, own_topic_ids: Any = ()) -> _L2Resolver:
+    return _L2Resolver(repo, own_topic_ids)
+
+
+def _topic_evidence(topic_id: str, info: Dict[str, Any], answers: List[Any]) -> Tuple[int, int]:
+    """(observations, wrong_attempts) of an L2 topic from the answer journal.
+
+    ``observations`` prefers the AlphaTracker count stored with the topic
+    breakdown (every answer updates it); older sessions fall back to counting
+    the journal, which is the same quantity.
+    """
+    mine = [a for a in answers if getattr(a, "topic_id", None) == topic_id]
+    wrong = sum(1 for a in mine if not is_correct(getattr(a, "outcome", None)))
+    stored = info.get("observations")
+    observations = int(stored) if isinstance(stored, (int, float)) else len(mine)
+    return observations, wrong
+
+
 def _build_skill_blocks(
     topic_breakdown: Dict[str, Any],
     weak_skill_ids: List[str],
     skill_map: Dict[str, Dict[str, str]],
     answers: Optional[List[Any]] = None,
+    *,
+    l2_of: Optional[Callable[[str], Optional[str]]] = None,
 ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
-    Return (strong_skills, weak_skills, critical_gaps) computed from IRT data.
+    Return (strong_skills, weak_skills, critical_gaps) at the L2 topic level.
+
+    A topic is WEAK only with evidence:
+      * at least one incorrect attempt in the topic, AND
+      * (>= 2 observations with low mastery (< 65%)  OR  a gap confirmed by Deep Scan).
+    A topic with only correct answers is never weak, whatever its alpha is (alpha
+    starts at 0 and grows slowly: one correct answer is 55%).
+
+    ``weak_skill_ids`` are the Deep Scan confirmed gaps (L4 skill ids, sometimes
+    L2).  Each is mapped to its parent L2 topic through ``l2_of`` and shown as a
+    detail of that topic; a topic and its skills never appear as separate items.
     """
     strong, weak, critical = [], [], []
+    answers = list(answers or [])
+    resolve = l2_of or (lambda sid: sid if sid in topic_breakdown else None)
+
+    confirmed: Dict[str, List[str]] = {}
+    for skill_id in dict.fromkeys(weak_skill_ids or []):
+        topic = resolve(skill_id)
+        if topic:
+            details = confirmed.setdefault(topic, [])
+            if skill_id != topic and skill_id not in details:
+                details.append(skill_id)
 
     for tid, info in topic_breakdown.items():
         alpha = float(info.get("alpha", 0))
         pct = int(max(0, min(100, (0.5 + alpha / 4.0) * 100)))
         name = skill_map.get(tid, {}).get("name_ru", tid)
-        is_flagged_weak = tid in weak_skill_ids
+        observations, wrong_attempts = _topic_evidence(tid, info, answers)
+        is_confirmed = tid in confirmed
+        is_weak = wrong_attempts >= 1 and (
+            (observations >= 2 and pct < _THRESHOLD_WEAK_HI) or is_confirmed
+        )
 
-        if pct >= _THRESHOLD_STRONG and not is_flagged_weak:
-            strong.append({
-                "skill_id":      tid,
-                "skill_name_ru": name,
-                "mastery_percent": pct,
-            })
-        elif pct < _THRESHOLD_CRITICAL or (is_flagged_weak and pct < _THRESHOLD_CRITICAL):
+        if not is_weak:
+            if pct >= _THRESHOLD_STRONG:
+                strong.append({
+                    "skill_id":      tid,
+                    "skill_name_ru": name,
+                    "mastery_percent": pct,
+                })
+            continue
+
+        evidence = {
+            "observations": observations,
+            "wrong_attempts": wrong_attempts,
+            "confirmed_by_deep_scan": is_confirmed,
+            "detail_skills": [
+                {"skill_id": d, "skill_name_ru": skill_map.get(d, {}).get("name_ru", d)}
+                for d in confirmed.get(tid, [])
+            ],
+        }
+        if pct < _THRESHOLD_CRITICAL:
             critical.append({
                 "skill_id":        tid,
                 "skill_name_ru":   name,
                 "mastery_percent": pct,
                 "priority":        0,
+                **evidence,
             })
-        elif pct < _THRESHOLD_WEAK_HI or is_flagged_weak:
+        else:
             status = "gap" if pct < 40 else ("unstable" if pct < 55 else "developing")
             weak.append({
                 "skill_id":        tid,
                 "skill_name_ru":   name,
                 "mastery_percent": pct,
                 "status":          status,
+                **evidence,
             })
 
-    critical.sort(key=lambda x: x["mastery_percent"])
+    critical.sort(key=lambda x: (x["mastery_percent"], x["skill_id"]))
     for i, g in enumerate(critical, 1):
         g["priority"] = i
 
-    strong.sort(key=lambda x: -x["mastery_percent"])
-    weak.sort(key=lambda x: x["mastery_percent"])
-
-    # Alpha starts at zero and rises gradually. A short, error-free trajectory
-    # can still have a low alpha; that is not evidence of a learning deficit.
-    if answers and all(float(a.outcome or 0) >= 1.0 for a in answers):
-        weak, critical = [], []
+    strong.sort(key=lambda x: (-x["mastery_percent"], x["skill_id"]))
+    weak.sort(key=lambda x: (x["mastery_percent"], x["skill_id"]))
     return strong, weak, critical
 
 
@@ -877,29 +1049,59 @@ def _build_plan_candidates(
     critical_gaps: List[Dict[str, Any]],
     weak_skills: List[Dict[str, Any]],
     error_patterns: List[Dict[str, Any]],
-) -> List[Dict[str, str]]:
+    *,
+    l2_of: Optional[Callable[[str], Optional[str]]] = None,
+) -> List[Dict[str, Any]]:
     """Return up to five ordered, evidence-backed correction targets.
 
     The model may improve pedagogical wording but cannot add its own topics.
     This keeps the plan compact and anchored in either a confirmed prerequisite
     or an observed error / measured weak skill.
-    """
-    candidates: List[Dict[str, str]] = []
-    seen: set[str] = set()
 
-    def add(skill_id: Any, name: Any, evidence: str) -> None:
+    Parent/child pairs are not duplicated: an L4 skill whose L2 topic is already
+    a candidate becomes a ``details`` entry of that topic; an L2 topic arriving
+    after one of its (more specific) L4 candidates is only noted on that item.
+    """
+    candidates: List[Dict[str, Any]] = []
+    by_id: Dict[str, Dict[str, Any]] = {}
+    parent_of: Dict[str, Optional[str]] = {}
+
+    def parent(sid: str) -> Optional[str]:
+        if sid not in parent_of:
+            parent_of[sid] = l2_of(sid) if l2_of else None
+        return parent_of[sid]
+
+    def add(skill_id: Any, name: Any, evidence: str, details: Optional[List[Dict[str, str]]] = None) -> None:
         sid = str(skill_id or "").strip()
         title = str(name or "").strip()
-        if sid and title and sid not in seen and len(candidates) < 5:
-            seen.add(sid)
-            candidates.append({"skill_id": sid, "skill_name_ru": title, "evidence": evidence})
+        if not sid or not title or sid in by_id:
+            return
+        topic = parent(sid)
+        if topic and topic != sid and topic in by_id:
+            known = by_id[topic].setdefault("details", [])
+            if all(d.get("skill_id") != sid for d in known):
+                known.append({"skill_id": sid, "skill_name_ru": title})
+            return
+        if topic == sid:
+            child = next((c for c in candidates if parent(c["skill_id"]) == sid), None)
+            if child is not None:
+                child["parent_topic_id"] = sid
+                child["parent_topic_name_ru"] = title
+                return
+        if len(candidates) >= 5:
+            return
+        item: Dict[str, Any] = {"skill_id": sid, "skill_name_ru": title, "evidence": evidence}
+        if details:
+            item["details"] = [d for d in details if d.get("skill_id") != sid]
+        candidates.append(item)
+        by_id[sid] = item
 
     for chain in chains:
         add(chain.get("root_gap_skill_id"), chain.get("root_gap_skill_name"), "confirmed_prerequisite")
     for item in critical_gaps:
-        add(item.get("skill_id"), item.get("skill_name_ru"), "measured_critical_gap")
+        add(item.get("skill_id"), item.get("skill_name_ru"), "measured_critical_gap", item.get("detail_skills"))
     for item in weak_skills:
-        add(item.get("skill_id"), item.get("skill_name_ru"), "measured_weak_skill")
+        add(item.get("skill_id"), item.get("skill_name_ru"), "measured_weak_skill", item.get("detail_skills"))
     for item in error_patterns:
         add(item.get("skill_id"), item.get("skill_name_ru"), "observed_error")
     return candidates
@@ -939,6 +1141,10 @@ def _build_deterministic_summary(
     boundary: Dict[str, Any],
     chains: List[Dict[str, Any]],
     strong_skills: List[Dict[str, Any]],
+    deep_scan_run: bool = False,
+    solved: Optional[int] = None,
+    total: Optional[int] = None,
+    provisional: bool = False,
 ) -> str:
     """Safe fallback conclusion that never invents a causal explanation."""
     root = chains[0].get("root_gap_skill_name") if chains else None
@@ -946,13 +1152,25 @@ def _build_deterministic_summary(
     anchors = ", ".join(item.get("skill_name_ru", "") for item in strong_skills[:2] if item.get("skill_name_ru"))
     if root:
         evidence_sentence = f"Deep Scan подтвердил первопричину: «{root}»."
+    elif observed and deep_scan_run:
+        evidence_sentence = (
+            f"Зафиксированы ключевые затруднения: {observed}; "
+            "углублённая проверка не подтвердила единую первопричину."
+        )
     elif observed:
         evidence_sentence = f"Зафиксированы ключевые затруднения: {observed}; причинная цепочка не заявляется без Deep Scan."
     else:
         evidence_sentence = "В выполненных заданиях затруднения не зафиксированы."
     anchors_sentence = f"Опорные навыки: {anchors}." if anchors else "Устойчивые опорные навыки требуют дальнейшего наблюдения."
+    result = (
+        f"Решено {solved} из {total} заданий адаптивного теста"
+        if solved is not None and total is not None else f"Результат — {score_pct}%"
+    )
+    provisional_sentence = (
+        " Оценка предварительная: точность измерения пока ограничена." if provisional else ""
+    )
     return (
-        f"Результат — {score_pct}%; фактический уровень соответствует {class_equivalent} при заявленном {grade_level} классе. "
+        f"{result}; уровень по результатам измерения соответствует {class_equivalent} при заявленном {grade_level} классе.{provisional_sentence} "
         f"{evidence_sentence} {anchors_sentence} "
         + ("Коррекцию следует начать с первого пункта индивидуального плана и подтвердить перенос навыка на новой задаче."
            if root or observed else "Рекомендуется развивать опорные навыки на задачах с новым контекстом.")
@@ -1024,7 +1242,7 @@ def _build_prompt(
 
 ДАННЫЕ АДАПТИВНОЙ ДИАГНОСТИКИ:
 Ученик: {student_name} | Заявленный класс: {grade_level} | Код теста: {test_code}
-Результат: {score_pct}% ({correct} верных из {total} заданий)
+Решено: {correct} из {total} заданий адаптивного теста ({score_pct}%; это факт о выданном наборе, уровень определён по θ, а не по этому проценту)
 Реальный уровень (IRT): {class_equivalent} | Статус: {computed_status}
 
 АКАДЕМИЧЕСКАЯ ГРАНИЦА ЗНАНИЙ:
@@ -1071,6 +1289,7 @@ def generate_and_save_report(
     student_name: str = "Ученик",
     test_code: str = "",
     force: bool = False,
+    skip_narrative: bool = False,
 ) -> Optional[DiagReport]:
     """
     Creates DiagReport with hybrid JSON:
@@ -1112,41 +1331,53 @@ def generate_and_save_report(
         answers_orm = (
             db.query(DiagAnswer)
             .filter(DiagAnswer.session_id == session_id)
+            .order_by(DiagAnswer.answered_at, DiagAnswer.id)
             .all()
         )
 
         # ── Resolve skill names + examples ────────────────────────────────────
         repo = KnowledgeRepository()
         all_ids = list(dict.fromkeys(
-            list(topic_breakdown.keys()) + [a.skill_id for a in answers_orm if a.skill_id]
+            list(topic_breakdown.keys())
+            + [a.skill_id for a in answers_orm if a.skill_id]
+            + list(weak_skills or [])
         ))
-        skill_map: Dict[str, Dict[str, str]] = {sid: _resolve_skill(sid, repo) for sid in all_ids}
+        name_failures: List[str] = []
+        skill_map: Dict[str, Dict[str, str]] = {
+            sid: _resolve_skill(sid, repo, name_failures) for sid in all_ids
+        }
 
         # ── Deterministic blocks (no AI) ──────────────────────────────────────
         previous_patterns = (existing.report_json or {}).get('error_patterns', []) if existing else []
         error_patterns = _build_error_patterns(answers_orm, skill_map, previous_patterns)
+        l2_of = _make_l2_resolver(repo, topic_breakdown.keys())
         strong_skills, weak_skills_block, critical_gaps = _build_skill_blocks(
-            topic_breakdown, weak_skills, skill_map, answers_orm
+            topic_breakdown, weak_skills, skill_map, answers_orm, l2_of=l2_of,
         )
 
-        # ── Score stats ───────────────────────────────────────────────────────
-        correct = sum(1 for a in answers_orm if float(a.outcome or 0) >= 1.0)
+        # ── Score stats: "solved N of M" over adaptive-test items only ────────
+        # Deep Scan answers probe prerequisites; they are not part of the measured
+        # set and do not enter the level.  One rule (level_policy.is_correct).
         # The append-only answer journal is authoritative.  ``items_total`` is
         # retained only as a zero-answer fallback for an interrupted legacy run.
-        total = len(answers_orm) or max(int(items_total or 0), 1)
-        score_pct = int(round(correct / total * 100))
-        # ── Status — computed deterministically from theta AND score_pct (never from AI) ────────
-        computed_status    = _compute_overall_status(theta, score_pct)
-        computed_label_ru  = _STATUS_LABEL_RU[computed_status]
-        class_equivalent   = _compute_class_equivalent(theta, score_pct, grade_level)
-        log.info("Computed status=%s (score=%d%%, theta=%.2f, class_eq=%s)", computed_status, score_pct, theta, class_equivalent)
+        counts = count_solved(answers_orm)
+        correct = counts["solved"]
+        total = counts["total"] or (0 if answers_orm else max(int(items_total or 0), 1))
+        score_pct = int(round(correct / total * 100)) if total else 0
+        prerequisite_answers = [a for a in answers_orm if a.is_deep_scan]
+        deep_scan_run = bool(prerequisite_answers)
+        # ── Level — only from theta/se (never from %-correct, never from AI) ──
+        level = build_level(th, se, grade_level, solved=correct, total=total)
+        computed_status, computed_label_ru, class_equivalent = _legacy_overall(level)
+        log.info("Computed level=%s status=%s (solved=%d/%d, theta=%.2f, class_eq=%s, provisional=%s)",
+                 level["category"], computed_status, correct, total, th, class_equivalent, level["provisional"])
 
         # ── Advanced Diagnostic Data Blocks ───────────────────────────────────
         root_cause_chains = _reconstruct_root_cause_chains(answers_orm, skill_map, error_patterns, grade_level)
         diagnostic_boundary = _build_diagnostic_boundary(answers_orm, skill_map, grade_level, root_cause_chains)
         cognitive_error_types = _build_cognitive_error_types(error_patterns)
         plan_candidates = _build_plan_candidates(
-            root_cause_chains, critical_gaps, weak_skills_block, error_patterns,
+            root_cause_chains, critical_gaps, weak_skills_block, error_patterns, l2_of=l2_of,
         )
         allowed_plan_skills = {
             item["skill_id"]: item["skill_name_ru"] for item in plan_candidates
@@ -1166,7 +1397,7 @@ def generate_and_save_report(
 
         anchor_lines = [
             f"  • {s['skill_name_ru']} (Класс {s['grade']}): верный ответ"
-            for ch in root_cause_chains for s in ch.get("steps", []) if s.get("outcome", 0) >= 1.0
+            for ch in root_cause_chains for s in ch.get("steps", []) if is_correct(s.get("outcome"))
         ]
         if not anchor_lines:
             anchor_lines = [f"  • {name}" for name in diagnostic_boundary.get("anchor_skills", [])]
@@ -1182,7 +1413,10 @@ def generate_and_save_report(
                 f"-> Сбой в пререквизите ({ch['root_gap_grade']} кл): {ch['root_gap_skill_name']} "
                 f"(Суть ошибки: {expl}){anc}"
             )
-        chains_block = "\n".join(chain_lines) or "  (спуск не потребовался)"
+        chains_block = "\n".join(chain_lines) or (
+            "  (углублённая проверка не подтвердила единую первопричину)"
+            if deep_scan_run else "  (спуск не потребовался)"
+        )
 
         # ── Cognitive error patterns for prompt ───────────────────────────────
         cog_lines = []
@@ -1197,16 +1431,17 @@ def generate_and_save_report(
 
         # ── Topics block for prompt ───────────────────────────────────────────
         topic_lines = []
+        weak_ids = {item["skill_id"] for item in weak_skills_block + critical_gaps}
         for tid, info in topic_breakdown.items():
             alpha = float(info.get("alpha", 0))
             pct = int(max(0, min(100, (0.5 + alpha / 4.0) * 100)))
             name = skill_map.get(tid, {}).get("name_ru", tid)
-            flag = " ⚠️" if tid in weak_skills else ""
+            flag = " ⚠️" if tid in weak_ids else ""
             topic_lines.append(f"  {name}: {pct}%{flag}")
         topics_block = "\n".join(topic_lines) or "  (нет данных)"
 
         # ── Wrong answers block for prompt (max 8, unique skills) ────────────
-        wrong_answers = [a for a in answers_orm if float(a.outcome or 0) < 1.0]
+        wrong_answers = [a for a in answers_orm if not is_correct(a.outcome)]
         seen: set = set()
         selected_wrong = []
         for a in wrong_answers:
@@ -1229,7 +1464,8 @@ def generate_and_save_report(
             db.commit()
         last_errors: List[str] = []
 
-        for attempt in range(1, 3):
+        # ``skip_narrative``: deterministic backfills never call the paid model.
+        for attempt in range(1, 1 if skip_narrative else 3):
             prompt = _build_prompt(
                 grade_level=grade_level,
                 overall_level=overall_level,
@@ -1277,7 +1513,7 @@ def generate_and_save_report(
                 last_errors = errors
                 log.warning("Attempt %d: validation errors: %s", attempt, errors[:3])
 
-        if not ai_data:
+        if not ai_data and not skip_narrative:
             log.warning("AI generation unavailable for session %s; using deterministic report wording.", session_id)
 
         # ── Reliability Calculation (rho = 1 - SE^2) ──────────────────────────
@@ -1307,9 +1543,22 @@ def generate_and_save_report(
             boundary=diagnostic_boundary,
             chains=root_cause_chains,
             strong_skills=strong_skills,
+            deep_scan_run=deep_scan_run,
+            solved=correct,
+            total=total,
+            provisional=level["provisional"],
         )
+        # Content-service lookups that failed (transport, not "not found") make the
+        # parent-topic mapping / names incomplete.  Such a report is usable but is
+        # never stamped as current (see the persist step).
+        degraded_reasons: List[str] = []
+        if l2_of.degraded:
+            degraded_reasons.append("knowledge_hierarchy")
+        if name_failures:
+            degraded_reasons.append("skill_names")
         report_json: Dict[str, Any] = {
             "report_meta": {
+                "degraded": degraded_reasons,
                 "session_id":       str(session_id),
                 "student_name":     student_name,
                 "class_level":      grade_level,
@@ -1317,6 +1566,7 @@ def generate_and_save_report(
                 "error_patterns_version": ERROR_PATTERNS_VERSION,
                 "report_schema_version": REPORT_SCHEMA_VERSION,
                 "date":             date.today().isoformat(),
+                # "solved N of M": adaptive-test items only (same as level.*).
                 "total_questions":  total,
                 "questions_correct": correct,
                 "score_percent":    score_pct,
@@ -1324,8 +1574,9 @@ def generate_and_save_report(
                 "precision_reached": stop_reason == "precision_reached",
                 "level_classification_reached": stop_reason == "classification_confident",
                 "classification_confidence": classification_confidence,
-                "measurement_questions": sum(not a.is_deep_scan for a in answers_orm),
-                "prerequisite_questions": sum(bool(a.is_deep_scan) for a in answers_orm),
+                "measurement_questions": total,
+                "prerequisite_questions": len(prerequisite_answers),
+                "prerequisite_correct": sum(is_correct(a.outcome) for a in prerequisite_answers),
                 "items_max": items_max,
                 "covered_section_ids": covered_section_ids or [],
                 "deep_scan_incomplete": deep_scan_incomplete,
@@ -1333,12 +1584,17 @@ def generate_and_save_report(
             },
             "overall": {
                 "score_percent":    score_pct,     # always from data
-                "status":           computed_status,   # always from theta
-                "status_label_ru":  computed_label_ru, # always from theta
+                "status":           computed_status,   # legacy code, from level_policy
+                "status_label_ru":  computed_label_ru, # from level_policy
                 "student_summary":  overall_block.get("student_summary") or deterministic_summary,
-                "class_equivalent": class_equivalent,  # for reference
+                "class_equivalent": class_equivalent,  # from level_policy
+                "category":         level["category"],
+                "provisional":      level["provisional"],
                 "confidence_of_diagnosis": reliability,
             },
+            # The single level object (N02).  The legacy ``overall`` fields above
+            # are filled from it.
+            "level": level,
             # ── Diagnostic Anatomy & Root Cause (New) ──
             "diagnostic_boundary":   diagnostic_boundary,
             "root_cause_chains":     root_cause_chains,
@@ -1364,19 +1620,43 @@ def generate_and_save_report(
         report_json = None
 
     # ── Persist ───────────────────────────────────────────────────────────────
+    # A degraded report (content-service was unreachable) is not current.  While
+    # retries remain it is NOT written: the job is returned to the durable queue
+    # through the normal failure path (report_jobs re-queues failed jobs up to
+    # MAX_GENERATION_ATTEMPTS).  On the last attempt the degraded content is
+    # kept for display but stays schema 0 / failed, so it is picked up again by
+    # scripts/regenerate_reports.py once content-service is back.
+    degraded = bool(report_json and report_json["report_meta"].get("degraded"))
+    if degraded:
+        from src.domain.report_jobs import MAX_GENERATION_ATTEMPTS
+        retries_left = bool(existing) and int(existing.generation_attempts or 0) < MAX_GENERATION_ATTEMPTS
+        message = ("content-service unavailable (%s); report not marked current"
+                   % ", ".join(report_json["report_meta"]["degraded"]))
+        log.warning("Degraded report for session %s: %s", session_id, message)
+        if retries_left:
+            existing.generation_status = "failed"
+            existing.generation_stage = "failed"
+            existing.generation_error = message
+            existing.generation_completed_at = datetime.now(timezone.utc)
+            db.commit()
+            return existing
     try:
         if existing:
             existing.report_json = report_json
             existing.narrative_generated = bool(ai_data)
-            existing.report_schema_version = REPORT_SCHEMA_VERSION if report_json else 0
-            existing.generation_status = "ready" if report_json else "failed"
-            existing.generation_stage = "ready" if report_json else "failed"
-            existing.generation_error = None if report_json else "Report data could not be built"
+            current = bool(report_json) and not degraded
+            existing.report_schema_version = REPORT_SCHEMA_VERSION if current else 0
+            existing.generation_status = "ready" if current else "failed"
+            existing.generation_stage = "ready" if current else "failed"
+            existing.generation_error = (
+                None if current else (message if degraded else "Report data could not be built")
+            )
             existing.generation_completed_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(existing)
             return existing
 
+        current = bool(report_json) and not degraded
         report = DiagReport(
             session_id=session_id,
             student_id=student_id,
@@ -1391,10 +1671,10 @@ def generate_and_save_report(
             report_json=report_json,
             narrative_ru=None,
             narrative_generated=bool(ai_data),
-            report_schema_version=REPORT_SCHEMA_VERSION if report_json else 0,
-            generation_status="ready" if report_json else "failed",
-            generation_stage="ready" if report_json else "failed",
-            generation_error=None if report_json else "Report data could not be built",
+            report_schema_version=REPORT_SCHEMA_VERSION if current else 0,
+            generation_status="ready" if current else "failed",
+            generation_stage="ready" if current else "failed",
+            generation_error=None if current else (message if degraded else "Report data could not be built"),
             generation_started_at=datetime.now(timezone.utc),
             generation_completed_at=datetime.now(timezone.utc),
         )
