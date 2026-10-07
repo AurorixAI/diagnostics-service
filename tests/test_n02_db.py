@@ -154,7 +154,7 @@ def test_report_chain_uses_the_stored_origin_link(db):
     assert len(chains) == 1
     assert chains[0]["source_skill_id"] == "G8_T1_K1" and chains[0]["root_gap_skill_id"] == "G7_T9_K1"
     assert chains[0]["evidence_source"] == "stored_link"
-    assert "без Deep Scan" not in rj["overall"]["student_summary"]
+    assert "без углублённой проверки" not in rj["overall"]["student_summary"]
 
 
 def test_report_without_prerequisite_gap_but_with_deep_scan_says_not_confirmed(db):
@@ -163,7 +163,7 @@ def test_report_without_prerequisite_gap_but_with_deep_scan_says_not_confirmed(d
     db.commit()
     summary = build_report(db, session).report_json["overall"]["student_summary"]
     assert "углублённая проверка не подтвердила единую первопричину" in summary
-    assert "без Deep Scan" not in summary
+    assert "без углублённой проверки" not in summary
 
 
 # ── backfill script ───────────────────────────────────────────────────────────
@@ -303,3 +303,25 @@ def test_with_narrative_is_the_explicit_opt_in_and_other_jobs_keep_the_narrative
     assert not report_jobs.is_deterministic_job(db.query(R).one())
     assert report_jobs.process_next_report_job() is True
     assert calls                                          # narrative attempted only on opt-in
+
+
+def test_resync_force_requeues_sessions_already_synced_after_the_report(db):
+    from scripts import resync_auth_levels as script
+
+    session = make_session(db)
+    build_report(db, session)
+    db.refresh(session)
+    session.auth_sync_status = "synced"
+    session.auth_sync_completed_at = datetime.utcnow() + timedelta(minutes=5)   # synced AFTER the report
+    db.commit()
+    kw = dict(limit=None, session_ids=None, allow_stale_report=False, db=db)
+
+    assert script.run(execute=True, **kw)["selected"] == 0            # normal mode: nothing to do
+    dry = script.run(execute=False, force=True, **kw)
+    assert dry["selected"] == 1 and dry["queued"] == 0                 # --force is still a dry run by default
+    db.refresh(session)
+    assert session.auth_sync_status == "synced"
+    assert script.run(execute=True, force=True, **kw)["queued"] == 1
+    db.refresh(session)
+    assert session.auth_sync_status == "pending"
+    assert script.run(execute=True, force=True, **kw)["selected"] == 0   # already queued

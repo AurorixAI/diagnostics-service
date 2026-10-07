@@ -27,7 +27,11 @@ That makes the script idempotent: once the worker has delivered a session its
 Usage (inside the service container, WORKDIR /app):
     python -m scripts.resync_auth_levels                 # dry-run: lists counts/ids only
     python -m scripts.resync_auth_levels --execute       # queue the callbacks
-Options: --limit N (max sessions), --session-id UUID (repeatable), --allow-stale-report.
+    python -m scripts.resync_auth_levels --force --execute   # re-send ALL (one-off, e.g. auth now stores totals)
+Options: --limit N (max sessions), --session-id UUID (repeatable), --allow-stale-report,
+--force (ignore "already synced after the report"; still needs a ready current-schema
+report and skips sessions whose sync is already pending/syncing; running it twice before
+the worker delivers queues nothing new, but after delivery --force queues them again).
 """
 from __future__ import annotations
 
@@ -57,6 +61,7 @@ def select_sessions(
     limit: Optional[int] = None,
     session_ids: Optional[List[uuid.UUID]] = None,
     allow_stale_report: bool = False,
+    force: bool = False,
 ) -> List[DiagSession]:
     query = (
         db.query(DiagSession)
@@ -67,7 +72,15 @@ def select_sessions(
             DiagSession.auth_sync_status.notin_(("pending", "syncing")),
         )
     )
-    if not allow_stale_report:
+    if force:
+        # Every completed session with a current-schema report, regardless of
+        # when it was last synced (auth now also updates totals).
+        query = query.filter(
+            DiagReport.generation_status == "ready",
+            DiagReport.report_json.isnot(None),
+            DiagReport.report_schema_version >= REPORT_SCHEMA_VERSION,
+        )
+    elif not allow_stale_report:
         query = query.filter(
             DiagReport.generation_status == "ready",
             DiagReport.report_json.isnot(None),
@@ -96,12 +109,13 @@ def select_sessions(
 
 
 def run(*, execute: bool, limit: Optional[int], session_ids: Optional[List[uuid.UUID]],
-        allow_stale_report: bool, db: Optional[Session] = None) -> dict:
+        allow_stale_report: bool, force: bool = False, db: Optional[Session] = None) -> dict:
     own = db is None
     db = db or SessionLocal()
     try:
         sessions = select_sessions(
             db, limit=limit, session_ids=session_ids, allow_stale_report=allow_stale_report,
+            force=force,
         )
         if execute:
             for session in sessions:
@@ -128,11 +142,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--session-id", action="append", type=uuid.UUID, default=None)
     parser.add_argument("--allow-stale-report", action="store_true",
                         help="do not require reports to be regenerated on the current schema first")
+    parser.add_argument("--force", action="store_true",
+                        help="re-queue every completed session with a current-schema report, "
+                             "even if auth was already synced after the report")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     result = run(
         execute=args.execute, limit=args.limit, session_ids=args.session_id,
-        allow_stale_report=args.allow_stale_report,
+        allow_stale_report=args.allow_stale_report, force=args.force,
     )
     log.info("%s: selected=%d queued=%d", result["mode"], result["selected"], result["queued"])
     for sid in result["session_ids"][:50]:

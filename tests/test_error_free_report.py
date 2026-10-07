@@ -27,7 +27,7 @@ def test_summary_keeps_observed_errors_and_confirmed_prerequisites():
     observed = _build_deterministic_summary(**args,chains=[])
     assert 'Зафиксированы ключевые затруднения: Логарифмы' in observed and 'Коррекцию' in observed
     confirmed = _build_deterministic_summary(**args,chains=[{'root_gap_skill_name':'Дроби'}])
-    assert 'Deep Scan подтвердил первопричину: «Дроби»' in confirmed
+    assert 'Углублённая проверка подтвердила первопричину: «Дроби»' in confirmed
 
 import pytest
 from src.domain.session_service import SessionService

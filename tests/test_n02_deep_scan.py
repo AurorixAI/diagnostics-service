@@ -122,10 +122,21 @@ def test_summary_sentence_depends_on_whether_a_deep_scan_ran():
                 boundary={"breakpoint_skills": ["Дроби"]}, strong_skills=[], chains=[])
     without = rg._build_deterministic_summary(**args)
     ran = rg._build_deterministic_summary(**args, deep_scan_run=True)
-    assert "без Deep Scan" in without
-    assert "без Deep Scan" not in ran
+    assert "без углублённой проверки" in without
+    assert "без углублённой проверки" not in ran
     assert "углублённая проверка не подтвердила единую первопричину" in ran
+    assert "Deep Scan" not in without + ran
 
+
+@pytest.mark.parametrize("equivalent", ["начало 5 класса", "середина 8 класса", "конец 9 класса", "начало 11 класса"])
+def test_conclusion_is_grammatical_for_every_class_equivalent(equivalent):
+    text = rg._build_deterministic_summary(
+        class_equivalent=equivalent, grade_level=11, score_pct=40, solved=10, total=25,
+        boundary={"breakpoint_skills": ["Дроби"]}, strong_skills=[], chains=[{"root_gap_skill_name": "Дроби"}],
+    )
+    assert f"Уровень по результатам измерения — {equivalent} (заявлен 11 класс)." in text
+    assert "соответствует" not in text and "Deep Scan" not in text
+    assert "Углублённая проверка подтвердила первопричину: «Дроби»." in text
 
 # ── ordering / importance ─────────────────────────────────────────────────────
 
