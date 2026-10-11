@@ -64,6 +64,12 @@ class SessionState:
     # Deep Scan items answered so far in the whole session (session budget).
     deep_scan_items_total: int = 0
 
+    # Navigation context to restore after a one-off fallback task (see
+    # SessionService._fallback_task): the item came from a different L4/L3/L2
+    # than the navigator is pointing at, so its answer is attributed to the real
+    # skill but the cursor-side context must go back afterwards.
+    fallback_nav_context: Optional[dict] = None
+
     # Why the diagnostic ended.  This is persisted into the final session and
     # report so a max-length result is never presented as a precision result.
     stop_reason: Optional[str] = None
@@ -103,6 +109,7 @@ class SessionState:
             "saved_nav_context": self.saved_nav_context,
             "deep_scan_tested": self.deep_scan_tested,
             "deep_scan_items_total": self.deep_scan_items_total,
+            "fallback_nav_context": self.fallback_nav_context,
             "stop_reason": self.stop_reason,
         }
 
@@ -144,5 +151,6 @@ class SessionState:
             saved_nav_context=data.get("saved_nav_context"),
             deep_scan_tested=data.get("deep_scan_tested", []),
             deep_scan_items_total=data.get("deep_scan_items_total", 0),
+            fallback_nav_context=data.get("fallback_nav_context"),
             stop_reason=data.get("stop_reason"),
         )

@@ -693,6 +693,7 @@ class SessionService:
     # ── Navigation dispatcher ─────────────────────────────────────────────
 
     def _advance(self, state: SessionState, correct: bool) -> Optional[TaskOut]:
+        self._restore_fallback_context(state)
         if state.phase == "warmup":
             return self._advance_warmup(state, correct)
         if state.phase == "navigation":
@@ -784,7 +785,7 @@ class SessionService:
             state.current_skill_nav = skill_nav.to_dict()
             state.current_skill_id = next_skill.skill_id
             state.current_subtopic_id = next_skill.subtopic_id
-            return self._pick_task_for_skill(state, next_skill.skill_id)
+            return self._pick_task_for_navigation(state, next_skill.skill_id)
 
         # No skill navigator yet — move subtopic cursor (safety path)
         next_sub = sub_nav.move(correct)
@@ -879,7 +880,7 @@ class SessionService:
             return None
 
         state.current_skill_id = mid_skill.skill_id
-        return self._pick_task_for_skill(state, mid_skill.skill_id)
+        return self._pick_task_for_navigation(state, mid_skill.skill_id)
 
     def _advance_topic(self, state: SessionState, correct: bool) -> Optional[TaskOut]:
         """Move topic navigator to next topic in current section."""
@@ -1281,10 +1282,8 @@ class SessionService:
 
     # ── Task selection ─────────────────────────────────────────────────────
 
-    def _pick_task_for_skill(
-        self, state: SessionState, skill_id: str
-    ) -> Optional[TaskOut]:
-        """Select the IRT-optimal task for a skill at current theta."""
+    def _select_task_for_skill(self, state: SessionState, skill_id: str):
+        """IRT-nearest unused task for a skill, any unused task, or None."""
         task = self.task_repo.get_task_by_difficulty_target(
             skill_id, target_b=state.theta.theta, exclude_ids=state.used_task_ids
         )
@@ -1296,10 +1295,116 @@ class SessionService:
                 log.warning("No unused tasks for skill %s", skill_id)
                 return None
             task = tasks[0]
+        return task
 
+    def _pick_task_for_skill(
+        self, state: SessionState, skill_id: str
+    ) -> Optional[TaskOut]:
+        """Select the IRT-optimal task for a skill at current theta."""
+        task = self._select_task_for_skill(state, skill_id)
+        if task is None:
+            return None
         state.current_task_id = task.id
         state.current_skill_id = skill_id
         return self._task_to_out(task, state)
+
+    # ── Fallback when a navigation skill has no unanswered task ────────────
+
+    def _pick_task_for_navigation(
+        self, state: SessionState, skill_id: str
+    ) -> Optional[TaskOut]:
+        """Task for the L4 the navigator points at; never ends the session just
+        because that one skill is empty or already exhausted for this student."""
+        task = self._pick_task_for_skill(state, skill_id)
+        if task is not None:
+            return task
+        return self._fallback_task(state, skill_id)
+
+    def _fallback_skill_candidates(self, state: SessionState, skill_id: str):
+        """Yield L4 ids in fallback order: the other L4s of the same L3, the L4s
+        of the other L3s of the same L2, then the L4s of the other L2s of the
+        grade (same L1 section first).  Each group starts after the failed
+        element and wraps, so the order is deterministic and close in the tree."""
+
+        def rotated(items, current_id):
+            ids = [i.id for i in items]
+            if current_id in ids:
+                k = ids.index(current_id) + 1
+                return ids[k:] + ids[:k]
+            return ids
+
+        def l4_of(l3_id):
+            for sk in self.knowledge_repo.get_skills_for_subtopic(l3_id):
+                yield sk.id
+
+        l4 = self.knowledge_repo.get_by_id(skill_id)
+        l3 = self.knowledge_repo.get_by_id(l4.parent_id) if l4 is not None and l4.parent_id else None
+        l2 = self.knowledge_repo.get_by_id(l3.parent_id) if l3 is not None and l3.parent_id else None
+        l3_id = getattr(l3, "id", None)
+        l2_id = getattr(l2, "id", None)
+
+        if l3_id:   # 1) same L3
+            sibs = self.knowledge_repo.get_skills_for_subtopic(l3_id)
+            for sid in rotated(sibs, skill_id):
+                yield sid
+        if l2_id:   # 2) same L2
+            subs = self.knowledge_repo.get_subtopics_for_topic(l2_id)
+            for sub_id in rotated(subs, l3_id):
+                if sub_id != l3_id:
+                    yield from l4_of(sub_id)
+        # 3) other L2 topics of the grade; the current L1 section first
+        topics = self.knowledge_repo.get_by_level_and_grade("L2", state.grade_level)
+        section = getattr(l2, "parent_id", None)
+        ordered = rotated(topics, l2_id)
+        by_id = {t.id: t for t in topics}
+        ordered.sort(key=lambda tid: 0 if section and by_id[tid].parent_id == section else 1)  # stable
+        for topic_id in ordered:
+            if topic_id == l2_id:
+                continue
+            for sub in self.knowledge_repo.get_subtopics_for_topic(topic_id):
+                yield from l4_of(sub.id)
+
+    def _fallback_task(self, state: SessionState, empty_skill_id: str) -> Optional[TaskOut]:
+        """Serve an unanswered task from the nearest other L4; None only when the
+        whole grade pool has no unanswered task left."""
+        tried = {empty_skill_id}
+        try:
+            for sid in self._fallback_skill_candidates(state, empty_skill_id):
+                if sid in tried:
+                    continue
+                tried.add(sid)
+                task = self._select_task_for_skill(state, sid)
+                if task is None:
+                    continue
+                if state.fallback_nav_context is None:
+                    state.fallback_nav_context = {
+                        "section_id": state.current_section_id,
+                        "topic_id": state.current_topic_id,
+                        "subtopic_id": state.current_subtopic_id,
+                    }
+                self._set_context_for_skill(state, sid)   # attribute the answer to the real skill
+                state.current_task_id = task.id
+                log.info("Fallback task %s (skill %s) instead of exhausted skill %s",
+                         task.id, sid, empty_skill_id)
+                return self._task_to_out(task, state)
+        except Exception as exc:   # content outage: keep the old behaviour (end), but say why
+            log.warning("Fallback search failed for %s: %s", empty_skill_id, exc)
+            return None
+        log.warning("Grade %s pool exhausted (no unanswered task, last skill %s)",
+                    state.grade_level, empty_skill_id)
+        return None
+
+    @staticmethod
+    def _restore_fallback_context(state: SessionState) -> None:
+        """After a fallback item is answered, point the cursor-side context back
+        at the navigator's own section/topic/subtopic."""
+        ctx = state.fallback_nav_context
+        if ctx is None:
+            return
+        state.current_section_id = ctx.get("section_id")
+        state.current_topic_id = ctx.get("topic_id")
+        state.current_subtopic_id = ctx.get("subtopic_id")
+        state.fallback_nav_context = None
 
     # ── Session completion ─────────────────────────────────────────────────
 
