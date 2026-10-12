@@ -22,7 +22,7 @@ import logging
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
@@ -58,9 +58,18 @@ FORBIDDEN_PHRASES = [
 ]
 
 # N03a (O4): claims that have no verified basis and must never reach a report.
-# Both patterns are case-insensitive and are applied only to prose that states
-# the student's level (``overall`` summary / level label), never to the plan text:
-# «в конце 7 класса изучают …» is a legitimate curriculum reference there.
+#   * class equivalent («конец 7 класса») - checked only on the prose that states the
+#     student's level (``overall`` / ``level`` strings): «в конце 7 класса изучают …»
+#     is a legitimate curriculum reference in the plan text;
+#   * reliability / confidence of the diagnosis («надёжность диагноза 83%») - checked
+#     in EVERY string of the report, plan included; the math-curriculum wording
+#     («надёжность прибора равна 0,95», «надёжность системы») is told apart from it
+#     by the subject of the sentence, not by the field it stands in;
+#   * a statement about confirming / not confirming a single root cause
+#     («Единая первопричина не подтверждена») - checked in every string as well.
+# All patterns run on text normalised by ``_normalize_claim_text`` (lower case,
+# ё -> е, dash variants -> «-», invisible characters removed), so they are written
+# with plain «е» and a plain hyphen.
 _GRADE_WORDS = r"(?:пят|шест|седьм|восьм|девят|десят|одиннадцат)(?:ого|ой|ом|ый|ому|ым|ая|ое|ую)"
 _CLASS_EQUIVALENT_RE = re.compile(
     r"(?:начал\w+|середин\w+|кон(?:ец|ц\w+))\s+"      # начало / середина / конец
@@ -68,20 +77,75 @@ _CLASS_EQUIVALENT_RE = re.compile(
     r"[-\s]*(?:(?:го|й|м|ом|ого)[-\s]+)?класс",      # [-го] класс(а)
     re.IGNORECASE,
 )
-# «надёжность диагноза …», «надёжность 83%», «надёжность — 0,83», «83% надёжности».
-_RELIABILITY_CLAIM_RE = re.compile(
-    r"над[её]жност\w*\s+диагноз\w*"
-    r"|над[её]жност\w*[^.!?\n]{0,40}?(?:\d{1,3}(?:[.,]\d+)?[-\s]*(?:%|процент\w*)|\b[01][.,]\d+)"
-    r"|\d{1,3}(?:[.,]\d+)?[-\s]*(?:%|процент\w*)\s+(?:\w+\s+){0,2}над[её]жност",
-    re.IGNORECASE,
+
+# Reliability of the diagnosis itself, stated with or without a number:
+# «надёжность диагноза …», «надёжность метода 100%», «достоверность отчёта».
+_RELIABILITY_SUBJECT_RE = re.compile(
+    r"(?:надежност|достоверност)\w*\s+(?:[\w-]+\s+){0,2}?"
+    r"(?:диагноз|диагностик|диагностическ|отчет|оценк|оценоч|измерен|метод|тест|заключен)\w*"
+    r"|уверенност\w*\s+(?:в\s+)?диагноз\w*",
 )
+# A reliability figure without an explicit subject: «надёжность 83%», «надёжность — 0,83»,
+# «83% надёжности».  Not a claim about the diagnosis when the sentence is about a
+# technical object (probability tasks) and not about the diagnosis (see below).
+_RELIABILITY_FIGURE_RE = re.compile(
+    r"(?:надежност|достоверност)\w*[^.!?\n]{0,40}?(?:\d{1,3}(?:[.,]\d+)?[-\s]*(?:%|процент\w*)|\b[01][.,]\d+)"
+    r"|\d{1,3}(?:[.,]\d+)?[-\s]*(?:%|процент\w*)\s+(?:\w+\s+){0,2}(?:надежност|достоверност)",
+)
+_CURRICULUM_OBJECT_RE = re.compile(
+    r"прибор|систем|элемент|устройств|детал|ламп|механизм|узл|схем|цеп[иь]|станок|станк|автомат"
+    r"|компонент|оборудован|датчик|двигател|блок|агрегат|канал|издели|аппарат|реле"
+    r"|предохранител|процессор|батаре|аккумулятор|лифт|насос|самолет"
+)
+_DIAGNOSTIC_CONTEXT_RE = re.compile(r"диагноз|диагностик|отчет|ученик|ребенок|тестирован|оценк")
+
+# «единая первопричина не подтверждена / не установлена», «не подтвердила единую
+# первопричину», «единой первопричины нет» - in either word order.
+_ROOT_CAUSE = r"(?:перво-?причин\w*|един\w+\s+(?:корнев\w+\s+)?причин\w*)"
+_NOT_CONFIRMED = (
+    r"(?:не[-\s]*(?:подтвер(?:д|жд)|установ|выявл|обнаруж|най[дт]|нашл|удал|удает|выдел|зафикс)\w*"
+    r"|\bнет\b|отсутству\w*|без\s+подтвержден\w*)"
+)
+_ROOT_CAUSE_CLAIM_RE = re.compile(
+    _ROOT_CAUSE + r"[^.!?\n]{0,60}?" + _NOT_CONFIRMED + r"|" + _NOT_CONFIRMED + r"[^.!?\n]{0,60}?" + _ROOT_CAUSE,
+)
+
+_DASH_RE = re.compile("[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]")      # ‐ ‑ ‒ – — ― −
+_INVISIBLE_RE = re.compile("[\u00ad\u200b\u200c\u200d\u2060\ufeff]")       # soft hyphen, zero-width
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n")
+
+
+def _normalize_claim_text(text: str) -> str:
+    """Lower case, ё -> е, every dash variant -> «-», invisible characters removed."""
+    text = _DASH_RE.sub("-", _INVISIBLE_RE.sub("", text))
+    return text.lower().replace("ё", "е")
+
+
+def _has_class_equivalent(text: Any) -> bool:
+    return isinstance(text, str) and bool(_CLASS_EQUIVALENT_RE.search(_normalize_claim_text(text)))
+
+
+def _has_reliability_claim(text: Any) -> bool:
+    """«Надёжность диагноза …» as a statement, or a reliability figure outside a technical context."""
+    if not isinstance(text, str):
+        return False
+    for sentence in _SENTENCE_SPLIT_RE.split(_normalize_claim_text(text)):
+        if _RELIABILITY_SUBJECT_RE.search(sentence):
+            return True
+        if _RELIABILITY_FIGURE_RE.search(sentence) and not (
+            _CURRICULUM_OBJECT_RE.search(sentence) and not _DIAGNOSTIC_CONTEXT_RE.search(sentence)
+        ):
+            return True
+    return False
+
+
+def _has_root_cause_claim(text: Any) -> bool:
+    return isinstance(text, str) and bool(_ROOT_CAUSE_CLAIM_RE.search(_normalize_claim_text(text)))
 
 
 def contains_retired_claim(text: Any) -> bool:
-    """True when prose states a class equivalent or a reliability figure (O4)."""
-    return isinstance(text, str) and bool(
-        _CLASS_EQUIVALENT_RE.search(text) or _RELIABILITY_CLAIM_RE.search(text)
-    )
+    """True when prose states a class equivalent, a reliability figure or a root-cause (non-)confirmation (O4)."""
+    return _has_class_equivalent(text) or _has_reliability_claim(text) or _has_root_cause_claim(text)
 
 
 def _level_statement_texts(data: Dict[str, Any]) -> List[str]:
@@ -92,6 +156,18 @@ def _level_statement_texts(data: Dict[str, Any]) -> List[str]:
         if isinstance(block, dict):
             texts.extend(v for v in block.values() if isinstance(v, str))
     return texts
+
+
+def _all_strings(value: Any) -> Iterator[str]:
+    """Every string value (not key) anywhere in a JSON-like structure."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _all_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _all_strings(item)
 
 _LEVEL_RU = {
     "mastered":    "Отличное владение",
@@ -365,13 +441,17 @@ def _validate_ai_output(
     for phrase in FORBIDDEN_PHRASES:
         if phrase in full_text:
             errors.append(f"Forbidden phrase: {phrase!r}")
-    # Only the level statement / summary is checked, not the whole JSON: the plan
-    # may legitimately say «в конце 7 класса изучают …».
-    level_texts = _level_statement_texts(data)
-    if any(_CLASS_EQUIVALENT_RE.search(t) for t in level_texts):
+    # Class equivalent: only the level statement / summary is checked, not the whole
+    # JSON: the plan may legitimately say «в конце 7 класса изучают …».
+    if any(_has_class_equivalent(t) for t in _level_statement_texts(data)):
         errors.append("Class equivalent («начало/середина/конец N класса») is not allowed")
-    if any(_RELIABILITY_CLAIM_RE.search(t) for t in level_texts):
-        errors.append("Reliability percentage of the diagnosis is not allowed")
+    # Reliability of the diagnosis and (non-)confirmation of a single root cause are
+    # claims that no field of the report may make, the plan included.
+    texts = list(_all_strings(data))
+    if any(_has_reliability_claim(t) for t in texts):
+        errors.append("Reliability / confidence of the diagnosis (percentage or statement) is not allowed")
+    if any(_has_root_cause_claim(t) for t in texts):
+        errors.append("Statements about confirming or not confirming a single root cause are not allowed")
     return len(errors) == 0, errors
 
 
@@ -1313,10 +1393,8 @@ def _build_deterministic_summary(
     if root:
         evidence_sentence = f"Углублённая проверка подтвердила первопричину: «{root}»."
     elif observed and deep_scan_run:
-        evidence_sentence = (
-            f"Зафиксированы ключевые затруднения: {observed}; "
-            "углублённая проверка не подтвердила единую первопричину."
-        )
+        # Facts only: whether a single root cause was or was not confirmed is a retired claim (O4).
+        evidence_sentence = f"Зафиксированы ключевые затруднения: {observed}."
     elif observed:
         evidence_sentence = f"Зафиксированы ключевые затруднения: {observed}; причинная цепочка не заявляется без углублённой проверки."
     else:
@@ -1353,7 +1431,7 @@ _AI_SCHEMA = """{
     "score_percent": <int скопируй из данных>,
     "status": "<above_level|on_level|partial_gap|below_level|critical>",
     "status_label_ru": "<строка — название уровня>",
-    "student_summary": "<АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 связных предложений для администратора учебного центра и преподавателя), безличным стилем, не от имени педагога. ТРЕБОВАНИЯ: (1) Назови уровень по его формулировке из данных, без «начала/середины/конца» какого-либо класса. (2) Объясни причину сбоя ТОЛЬКО если она подтверждена цепочкой углублённой проверки; иначе опиши наблюдаемые затруднения без причин. (3) Опиши тип ошибок по зафиксированным дистракторам, не приписывая ученику психологических причин. (4) Укажи ТОЧКИ ОПОРЫ (что ученик решает стабильно). (5) Назови стартовую тему плана — первую цель списка ДОПУСТИМЫХ ЦЕЛЕЙ. Не указывай сроки, часы и проценты надёжности диагноза. СТИЛЬ: профессиональный, фактологический, без общих фраз.>"
+    "student_summary": "<АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 связных предложений для администратора учебного центра и преподавателя), безличным стилем, не от имени педагога. ТРЕБОВАНИЯ: (1) Назови уровень по его формулировке из данных, без «начала/середины/конца» какого-либо класса. (2) Объясни причину сбоя ТОЛЬКО если она подтверждена цепочкой углублённой проверки; иначе опиши наблюдаемые затруднения без причин и без утверждений о том, подтверждена или не подтверждена единая первопричина. (3) Опиши тип ошибок по зафиксированным дистракторам, не приписывая ученику психологических причин. (4) Укажи ТОЧКИ ОПОРЫ (что ученик решает стабильно). (5) Назови стартовую тему плана — первую цель списка ДОПУСТИМЫХ ЦЕЛЕЙ. Не указывай сроки, часы и проценты надёжности диагноза. СТИЛЬ: профессиональный, фактологический, без общих фраз.>"
   },
   "action_plan": [
     {
@@ -1403,6 +1481,7 @@ def _build_prompt(
 3. student_summary — АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 предложений, безличный стиль, не от имени педагога, без «я»):
    • Назови уровень его формулировкой «{status_label}». НЕ называй «начало/середину/конец» какого-либо класса и не указывай проценты «надёжности диагноза».
    • {'Объясни только первопричину, подтверждённую углублённой проверкой.' if root_cause_confirmed else 'Не называй наблюдаемый дефицит «первопричиной»: опиши его как ключевое зафиксированное затруднение.'}
+   • Передавай только зафиксированные факты. НЕ делай утверждений о том, подтверждена или не подтверждена единая первопричина (ни «подтверждена», ни «не подтверждена», ни «не установлена»), и не указывай процент или оценку надёжности/достоверности диагноза.
    • Разбери когнитивные паттерны мышления ученика по дистракторам.
    • Опиши опорные навыки (базовые темы, решенные верно).
    • Дай четкую рекомендацию: с какой конкретной темы начать коррекцию — это ПЕРВАЯ цель списка ниже.
@@ -1435,6 +1514,11 @@ def _build_prompt(
 {_AI_SCHEMA}"""
 
 
+def _local_today() -> date:
+    """Today's calendar day in the learning centre's zone (Asia/Tashkent), not in the container's UTC."""
+    return datetime.now(_LOCAL_TZ).date()
+
+
 def _attempt_date(db: Session, session_id: uuid.UUID, answers: List[Any]) -> str:
     """ISO date of the diagnostic attempt (completion, else last answer, else today)."""
     from src.models.diag_models import DiagSession
@@ -1454,7 +1538,7 @@ def _attempt_date(db: Session, session_id: uuid.UUID, answers: List[Any]) -> str
             (a.answered_at for a in reversed(answers) if getattr(a, "answered_at", None)), None,
         )
     if completed is None:
-        return datetime.now(_LOCAL_TZ).date().isoformat()
+        return _local_today().isoformat()
     # Timestamps are stored as naive UTC, but the learning centre's calendar day is
     # Asia/Tashkent (UTC+5): an attempt finished at 00:00–05:00 local time falls on
     # the previous UTC date, so converting first keeps the printed date correct.
@@ -1470,7 +1554,8 @@ def strip_retired_report_fields(report_json: Any) -> Any:
     regenerated.  Their structured ``confidence_of_diagnosis`` percentage, class
     equivalent and per-step ``estimated_hours`` are removed.  The same claims
     are also written into the prose ``overall.student_summary`` («конец 7 класса
-    (заявлен 8)», «Надёжность диагноза 83%»); that text cannot be edited
+    (заявлен 8)», «Надёжность диагноза 83%», «углублённая проверка не подтвердила
+    единую первопричину»); that text cannot be edited
     sentence by sentence, so such a summary is withheld (``None`` — the front
     hides the block) until the report is regenerated.  A summary without these
     claims is returned unchanged.
@@ -1643,7 +1728,7 @@ def generate_and_save_report(
                 f"(Суть ошибки: {expl}){anc}"
             )
         chains_block = "\n".join(chain_lines) or (
-            "  (углублённая проверка не подтвердила единую первопричину)"
+            "  (углублённая проверка проведена; цепочек для разбора в данных нет)"
             if deep_scan_run else "  (спуск не потребовался)"
         )
 
@@ -1811,7 +1896,7 @@ def generate_and_save_report(
                 # Date of the attempt (not of the rebuild): a regenerated report must
                 # not look as if the student took the test today.
                 "date":             _attempt_date(db, session_id, answers_orm),
-                "generated_on":     date.today().isoformat(),
+                "generated_on":     _local_today().isoformat(),
                 "error_free":       error_free,
                 # "solved N of M": adaptive-test items only (same as level.*).
                 "total_questions":  total,

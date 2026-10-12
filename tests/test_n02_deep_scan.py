@@ -125,7 +125,8 @@ def test_summary_sentence_depends_on_whether_a_deep_scan_ran():
     ran = rg._build_deterministic_summary(**args, deep_scan_run=True)
     assert "без углублённой проверки" in without
     assert "без углублённой проверки" not in ran
-    assert "углублённая проверка не подтвердила единую первопричину" in ran
+    assert "Зафиксированы ключевые затруднения: Дроби." in ran
+    assert "первопричин" not in ran and not rg.contains_retired_claim(ran)   # O4: no (non-)confirmation claim
     assert "Deep Scan" not in without + ran
 
 

@@ -159,12 +159,13 @@ def test_report_chain_uses_the_stored_origin_link(db):
     assert "без углублённой проверки" not in rj["overall"]["student_summary"]
 
 
-def test_report_without_prerequisite_gap_but_with_deep_scan_says_not_confirmed(db):
+def test_report_without_prerequisite_gap_but_with_deep_scan_states_only_the_facts(db):
     session = make_session(db)
     db.query(DiagAnswer).filter(DiagAnswer.task_id == "d1").update({"outcome": 1, "eval_category": "correct"})
     db.commit()
     summary = build_report(db, session).report_json["overall"]["student_summary"]
-    assert "углублённая проверка не подтвердила единую первопричину" in summary
+    assert "Зафиксированы ключевые затруднения:" in summary
+    assert "первопричин" not in summary                          # O4: neither confirmed nor not confirmed
     assert "без углублённой проверки" not in summary
 
 
