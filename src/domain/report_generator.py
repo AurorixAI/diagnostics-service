@@ -97,23 +97,50 @@ _CURRICULUM_OBJECT_RE = re.compile(
     r"|компонент|оборудован|датчик|двигател|блок|агрегат|канал|издели|аппарат|реле"
     r"|предохранител|процессор|батаре|аккумулятор|лифт|насос|самолет"
 )
-_DIAGNOSTIC_CONTEXT_RE = re.compile(r"диагноз|диагностик|отчет|ученик|ребенок|тестирован|оценк")
+# The exemption is withdrawn only by the diagnosis itself being the subject; words such as
+# «ученик» are not a reason: «Предложите ученику задачи, где надёжность прибора равна 0,95».
+_DIAGNOSTIC_CONTEXT_RE = re.compile(r"диагноз|диагностик|тестирован")
+# Predicate form: «Диагноз достоверен», «Результаты диагностики достоверны», «Отчёт надёжен».
+_RELIABILITY_ADJECTIVE_RE = re.compile(
+    r"(?:диагноз|диагностик|отчет|тест|тестирован|заключен)\w*(?:\s+\w+){0,2}?\s+"
+    r"(?:(?:весьма|очень|вполне|достаточно|крайне)\s+)?(?:достовер|надеж)(?:на|ны|ен)(?![а-я])"
+)
 
-# «единая первопричина не подтверждена / не установлена», «не подтвердила единую
-# первопричину», «единой первопричины нет» - in either word order.  The negation and
-# the root cause must stand in the SAME clause: the gap between them is at most 60
-# characters and may not cross a sentence end or «;», nor a clause break «, а / , но /
-# , однако / , при этом» («Первопричина — Дроби, а в теме Степени ошибок нет» is not
-# a claim).  A plain comma («Первопричина, к сожалению, не установлена») is no break.
-_ROOT_CAUSE = r"(?:перво-?причин\w*|един\w+\s+(?:корнев\w+\s+)?причин\w*)"
-_NOT_CONFIRMED = (
-    r"(?:не[-\s]*(?:подтвер(?:д|жд)|установ|выявл|обнаруж|най[дт]|нашл|удал|удает|выдел|зафикс)\w*"
-    r"|\bнет\b|отсутству\w*|без\s+подтвержден\w*)"
+# Retired claim «единая первопричина не подтверждена»: the negation must DIRECTLY govern the
+# root-cause noun phrase (NP), never merely stand near it.  Precision first: a false positive
+# withholds a legitimate summary.  NP = «первопричина» or «единая/общая/главная/основная/
+# корневая причина» or «единый корень»; a bare «причина» is not a root cause.
+_RC_ADJ = r"(?:един|общ|главн|основн|корнев)(?:ая|ой|ую|ым|ые|ых|ое|ого)"
+_RC_NP = (
+    r"(?:перво-?причин\w*"
+    r"|" + _RC_ADJ + r"\s+причин(?:а|ы|е|у|ой|ою|ам|ами|ах)?(?![а-я])"
+    r"|един(?:ый|ого|ому|ым|ом)\s+корн(?:ь|я|ю|ем|е)(?![а-я]))"
 )
-_SAME_CLAUSE_GAP = r"(?:(?!,\s*(?:а|но|однако|при\s+этом)\b)[^.;!?\n]){0,60}?"
-_ROOT_CAUSE_CLAIM_RE = re.compile(
-    _ROOT_CAUSE + _SAME_CLAUSE_GAP + _NOT_CONFIRMED + r"|" + _NOT_CONFIRMED + _SAME_CLAUSE_GAP + _ROOT_CAUSE,
+_NOT = r"(?<![а-я])не"
+# A: negation + verb + NP, only blanks and at most one word in between
+#    («не подтвердила единую первопричину», «не позволила установить первопричину»).
+_RC_NEG_BEFORE = (
+    r"(?:" + _NOT + r"|(?<![а-я])нельзя)\s+(?:был(?:а|о|и)?\s+|удалось\s+|получилось\s+|позволил(?:а|о|и)?\s+)?"
+    r"(?:подтверд|установ|выяв|определ|найт|нашл|нашел|обнаруж|прослежив)\w*\s+(?:\w+\s+)?" + _RC_NP
 )
+# B: NP + a few words/commas (no : ( ) ; . ! ? in between) + negated predicate
+#    («первопричина, к сожалению, не установлена», «первопричину установить не удалось»);
+#    «отсутствует» / «нет» only directly after NP («первопричины нет»).  A dash after NP is
+#    accepted only when what follows is itself a negated participle («Единая первопричина —
+#    не подтверждена»), never «Первопричина — нет навыка…» / «— незафиксированный знак».
+_RC_PARTICIPLE = r"(?:был(?:а|о|и)?\s+)?(?:подтвержден|установлен|выявлен|определен|найден|обнаружен|прослежива)\w*"
+_RC_GAP = r"(?:[\s,]+\w+){0,3}?"
+_RC_NEG_AFTER = (
+    _RC_NP + r"(?:"
+    + _RC_GAP + r"[\s,]+(?:" + _NOT + r"[\s-]+" + _RC_PARTICIPLE
+    + r"|" + _NOT + r"\s+удалось|" + _NOT + r"\s+получилось"
+    + r"|(?<![а-я])нельзя\s+(?:подтвердить|установить|выявить|определить|найти))"
+    + r"|" + _RC_GAP + r"\s*-\s*" + _NOT + r"\s+" + _RC_PARTICIPLE
+    + r"|[\s,]+(?:отсутству\w*|нет(?![а-я])))"
+)
+# C: «нет единой первопричины».
+_RC_NO_NP = r"(?<![а-я])нет\s+(?:\w+\s+)?" + _RC_NP
+_ROOT_CAUSE_CLAIM_RE = re.compile(f"{_RC_NEG_BEFORE}|{_RC_NEG_AFTER}|{_RC_NO_NP}")
 
 _DASH_RE = re.compile("[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]")      # ‐ ‑ ‒ – — ― −
 _INVISIBLE_RE = re.compile("[\u00ad\u200b\u200c\u200d\u2060\ufeff]")       # soft hyphen, zero-width
@@ -135,7 +162,7 @@ def _has_reliability_claim(text: Any) -> bool:
     if not isinstance(text, str):
         return False
     for sentence in _SENTENCE_SPLIT_RE.split(_normalize_claim_text(text)):
-        if _RELIABILITY_SUBJECT_RE.search(sentence):
+        if _RELIABILITY_SUBJECT_RE.search(sentence) or _RELIABILITY_ADJECTIVE_RE.search(sentence):
             return True
         if _RELIABILITY_FIGURE_RE.search(sentence) and not (
             _CURRICULUM_OBJECT_RE.search(sentence) and not _DIAGNOSTIC_CONTEXT_RE.search(sentence)
@@ -1485,8 +1512,8 @@ def _build_prompt(
 2. overall.status — СКОПИРУЙ ТОЧНО: "{computed_status}" (уже вычислено алгоритмом).
 3. student_summary — АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 предложений, безличный стиль, не от имени педагога, без «я»):
    • Назови уровень его формулировкой «{status_label}». НЕ называй «начало/середину/конец» какого-либо класса и не указывай проценты «надёжности диагноза».
-   • {'Объясни только первопричину, подтверждённую углублённой проверкой.' if root_cause_confirmed else 'Не называй наблюдаемый дефицит «первопричиной»: опиши его как ключевое зафиксированное затруднение.'}
-   • Передавай только зафиксированные факты. НЕ делай утверждений о том, подтверждена или не подтверждена единая первопричина (ни «подтверждена», ни «не подтверждена», ни «не установлена»), и не указывай процент или оценку надёжности/достоверности диагноза.
+   • {'Первопричину, подтверждённую углублённой проверкой (она указана в блоке цепочек ниже), можно назвать первопричиной; объясни только её.' if root_cause_confirmed else 'Не называй наблюдаемый дефицит «первопричиной»: опиши его как ключевое зафиксированное затруднение.'}
+   • НИКОГДА не пиши, что первопричина не подтверждена, не установлена, не найдена или отсутствует (в любых формулировках), и не указывай процент или оценку надёжности/достоверности диагноза: передавай только зафиксированные факты.
    • Разбери когнитивные паттерны мышления ученика по дистракторам.
    • Опиши опорные навыки (базовые темы, решенные верно).
    • Дай четкую рекомендацию: с какой конкретной темы начать коррекцию — это ПЕРВАЯ цель списка ниже.

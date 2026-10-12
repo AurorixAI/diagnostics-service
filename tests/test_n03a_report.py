@@ -347,7 +347,17 @@ ROOT_CAUSE_CLAIMS = [
     "Единую первопричину не удалось установить.",
     "Единой первопричины нет.",
     "Единая первопричина отсутствует.",
-    "Единая первопричина неустановлена.",
+    "Первопричина не была подтверждена.",
+    "Первопричина пока не определена.",
+    "Проверка не позволила установить первопричину.",
+    "Тест не нашёл первопричину.",
+    "Общая причина ошибок не установлена.",
+    "Нет единой первопричины.",
+    "Первопричина отсутствует.",
+    "Первопричину установить не удалось.",
+    "Первопричина, к сожалению, не установлена.",
+    "Нельзя установить единую первопричину.",
+    "Единая первопричина не прослеживается.",
 ]
 
 
@@ -375,30 +385,122 @@ def test_neutral_root_cause_wording_is_not_a_retired_claim(good):
 
 
 @pytest.mark.parametrize("text, expected", [
-    # the negation belongs to the same clause as the root cause -> retired claim
+    # the negation directly governs the root-cause noun phrase -> retired claim
     ("Единая первопричина не подтверждена.", True),
     ("Углублённая проверка не подтвердила единую первопричину.", True),
     ("Первопричину установить не удалось.", True),
     ("Первопричина не выявлена", True),
     ("единой первопричины нет", True),
-    ("Первопричина, к сожалению, не установлена", True),               # a plain comma is not a clause break
+    ("Первопричина, к сожалению, не установлена", True),               # a plain comma is not a break
+    ("Первопричина не была подтверждена", True),
+    ("Первопричина пока не определена", True),
+    ("Проверка не позволила установить первопричину", True),
+    ("Тест не нашёл первопричину", True),
+    ("Общая причина ошибок не установлена", True),
+    ("Нет единой первопричины", True),
+    ("Первопричина отсутствует", True),
+    ("Единая первопричина — не подтверждена", True),                  # dash + negated participle
     ("В теме «Дроби» первопричина, по данным проверки, не подтверждена.", True),
     ("Ошибки в теме «Степени» есть; единая первопричина не подтверждена.", True),   # claim in the second clause
-    # the negation belongs to another clause / sentence -> not a claim
+    # the negation or «нет/отсутствует» belongs to something else -> not a claim
+    ("Углублённая проверка подтвердила первопричину: «Рациональное неравенство с невыделенным нулем».", False),
+    ("Первопричина — незафиксированный знак", False),
+    ("Первопричина — нет навыка раскрытия скобок", False),
+    ("Первопричина: нет понимания дроби", False),
+    ("Первопричина ошибок: отсутствует навык приведения к общему знаменателю", False),
+    ("Первопричина — «Дроби»: ученик не выделил целую часть", False),
+    ("Ошибок в теме «Степени» не выявлено, первопричина — дроби", False),
+    ("Первопричина затруднений — дроби (не удалось решить 3 задачи)", False),
     ("Первопричина затруднений — тема «Дроби»; в теме «Уравнения» ошибок не выявлено.", False),
     ("Первопричина — «Дроби», а в теме «Уравнения» ошибок нет.", False),
     ("Первопричина — «Дроби», но в теме «Уравнения» ошибок нет.", False),
-    ("Первопричина — «Дроби», однако в теме «Уравнения» ошибок не выявлено.", False),
     ("Первопричина — «Дроби», при этом в теме «Уравнения» ошибок не найдено.", False),
     ("Углублённая проверка подтвердила первопричину: «Дроби». Ошибок в теме «Степени» нет.", False),
     ("Первопричина — «Дроби». Других затруднений нет.", False),
+    ("Углублённая проверка подтвердила первопричину: «Дроби»; в теме «Степени» ошибок не выявлено.", False),
+    ("Первопричина — Неопределённый интеграл", False),
+    ("Первопричина — не вычисления, а дроби", False),
     ("В теме «Уравнения» ошибок не выявлено, а первопричина — «Дроби».", False),
+    ("Причина ошибки не установлена", False),                           # a bare «причина» is not a root cause
     ("Углублённая проверка подтвердила первопричину: «Неопределённый интеграл».", False),
 ])
-def test_root_cause_negation_must_be_in_the_same_clause(text, expected):
+def test_root_cause_negation_must_govern_the_root_cause(text, expected):
     assert rg.contains_retired_claim(text) is expected, text
     assert rg._has_root_cause_claim(text) is expected, text
     assert _validate(_narrative(text))[0] is (not expected), text
+
+
+# Reliability: the subject decides, not a word such as «ученик» in the sentence.
+@pytest.mark.parametrize("good", [
+    "Предложите ученику задачи, где надёжность прибора равна 0,95.",
+    "Покажите ученику, как надёжность системы зависит от надёжности элементов (0,9 и 0,8).",
+    "Надёжность работы лампы 0,9 — ученик решил неверно.",
+    "Достоверное событие имеет вероятность 1.",
+    "Ученик надёжен в вычислениях.",
+])
+def test_math_wording_with_the_word_student_is_not_a_reliability_claim(good):
+    assert not rg.contains_retired_claim(good), good
+    assert _validate(_narrative("Текст.", description=good)) == (True, []), good
+
+
+@pytest.mark.parametrize("bad", [
+    "надёжность диагноза 83%",
+    "Надёжность результатов диагностики высокая",
+    "Диагноз достоверен",
+    "Результаты диагностики достоверны",
+    "С высокой степенью достоверности диагностика показала затруднения в дробях.",
+    "Диагностика надёжна.",
+    "Отчёт весьма надёжен.",
+    "Результаты теста надёжны.",
+    "Надёжность результатов теста — 90%.",
+])
+def test_reliability_of_the_diagnosis_is_rejected_by_subject(bad):
+    assert rg.contains_retired_claim(bad), bad
+    for field in ("summary", "plan"):
+        data = _narrative(bad if field == "summary" else "Текст.", description=bad if field == "plan" else "Практика.")
+        valid, errors = _validate(data)
+        assert not valid and any("Reliability" in e for e in errors), (field, bad)
+
+
+def _kh_skill_names():
+    from pathlib import Path
+    path = Path(__file__).parent / "fixtures" / "kh_skill_names.txt"
+    return [line.rstrip("\n") for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_no_knowledge_hierarchy_name_turns_the_deterministic_wording_into_a_retired_claim():
+    """Every real skill/topic name (content DB knowledge_hierarchy, distinct name_ru) goes through the templates."""
+    names = _kh_skill_names()
+    assert len(names) > 1000
+    flagged = []
+    for name in names:
+        for sentence in (
+            f"Углублённая проверка подтвердила первопричину: «{name}».",
+            f"Зафиксированы ключевые затруднения: {name}.",
+            f"Зафиксированы ключевые затруднения: Дроби, {name}.",
+            f"Зафиксированы ключевые затруднения: {name}, {name}.",
+        ):
+            if rg.contains_retired_claim(sentence):
+                flagged.append((name, sentence))
+    assert not flagged, flagged[:5]
+
+
+def test_deterministic_summary_over_real_names_is_never_withheld():
+    names = _kh_skill_names()
+    stored = {"overall": {"student_summary": None}}
+    for name in names[::7]:                                              # a sample through the real builder
+        summary = rg._build_deterministic_summary(
+            status_label="Соответствует уровню", grade_level=8, score_pct=40,
+            boundary={"breakpoint_skills": [name]}, strong_skills=[{"skill_name_ru": name}],
+            chains=[{"root_gap_skill_name": name}],
+        )
+        stored["overall"]["student_summary"] = summary
+        assert rg.strip_retired_report_fields(stored)["overall"]["student_summary"] == summary, name
+        summary = rg._build_deterministic_summary(
+            status_label="Соответствует уровню", grade_level=8, score_pct=40,
+            boundary={"breakpoint_skills": [name]}, strong_skills=[{"skill_name_ru": name}], chains=[],
+        )
+        assert not rg.contains_retired_claim(summary), name
 
 
 def test_dash_variants_do_not_hide_a_class_equivalent_or_reliability_figure():
@@ -628,8 +730,21 @@ def test_scan_without_chain_summary_and_prompt_state_facts_only(gen):
     assert "не подтвердила единую первопричину" not in prompt
     assert "углублённая проверка проведена; цепочек для разбора в данных нет" in prompt
     # the model is told explicitly not to make the statement itself
-    assert "НЕ делай утверждений о том, подтверждена или не подтверждена единая первопричина" in prompt
+    assert "НИКОГДА не пиши, что первопричина не подтверждена, не установлена, не найдена или отсутствует" in prompt
     assert "надёжности/достоверности диагноза" in prompt
+
+
+def test_prompt_rule_is_consistent_with_and_without_a_confirmed_chain(gen):
+    gen(_gap_answers(), weak=["G7_T9_K1"], narrative=None)
+    with_chain = gen.llm_calls[-1]
+    assert "можно назвать первопричиной" in with_chain               # a confirmed root cause may be named
+    assert "НИКОГДА не пиши, что первопричина не подтверждена" in with_chain
+    assert "Не называй наблюдаемый дефицит «первопричиной»" not in with_chain
+    gen(_scan_without_chain_answers(), weak=["G8_T1_K1"], narrative=None)
+    without_chain = gen.llm_calls[-1]
+    assert "Не называй наблюдаемый дефицит «первопричиной»" in without_chain
+    assert "можно назвать первопричиной" not in without_chain
+    assert "НИКОГДА не пиши, что первопричина не подтверждена" in without_chain
 
 
 def test_model_echoing_the_retired_root_cause_claim_is_rejected_then_replaced(gen):
