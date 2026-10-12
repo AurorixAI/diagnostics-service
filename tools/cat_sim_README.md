@@ -74,3 +74,25 @@ chain's `root_gap_skill_id`), `detect_named` (any failed step incl. the scan ori
 `coherent_session_share` / `coherent_entry_share` (report weak topics, and their Deep-Scan detail skills, backed
 by a failed answer whose task sits there in the truth tree = arm-B DB), `bg_chain_nogap` (gap-free students whose chain root lies in the candidate set; not a
 pure false-positive rate). Differences use a paired bootstrap (resampling students).
+
+## Stage-3a instrumentation (DIAG-1)
+
+Every student record also carries read-only trace fields; none of the core fields depends on them (checked: OC15 grade 10,
+1500 students, all 32 core fields identical with and without the trace). The session state is only read from the fake redis
+after each answer.
+
+* `l3_visits` - one entry per L3 visit of the navigation phase: `l3, importance, n_items, n_wrong, mean_p_hat` (+ `n_l4, score,
+  resid = sum(p_hat - x), failed, complete, terminal, sig`). `p_hat = _p3pl(theta_before, a, b, c)` with the session's theta
+  before the answer. `sig` = the L3 is the injected gap G or one of its direct dependants (gap students fail those).
+  `complete = False`: the session ended inside the visit; `terminal = True`: it ended with the visit's last answer (the
+  service may not have decided it; excluded from the shadow statistics).
+* `shadow_triggers` - for every failed decided L3: `cur` (importance >= threshold and a failing skill; budget ignored),
+  `d1` (>= 2 wrong in the L3, or 1 wrong when it has a single L4), `d2` (`resid >= 1.0`), `imp_ok`, `budget_spent`,
+  `actual` (a scan really started), `sig`.
+* `scan_log` - each scan: `budget_used` at its start, `origin_l3`, initial prerequisite queue (`queue`, `queue_l3`),
+  `G_in_queue` / `G_pos`, `steps` (probed skill, L3, outcome, `gap_confirmed`, attempts), `G_origin` / `G_probed` / `G_confirmed`.
+* `chain_roots`, `chain_sources`, `confirmed_l3s`, `named_l2s`, `n_weak_topics`, `n_crit_topics`, `n_detail_skills`, `trace_aux`
+  (self-checks: replayed navigator vs item count, predicted vs observed trigger; both 0).
+
+`tools/rootcause_diag.py --tag A0 --stage stage3a` turns them into the metric tables (cluster bootstrap by gap L3 for ALL
+grades, student bootstrap per grade); `tools/rootcause_stand_b.py` generates stand B (8 seeded gap L3 per grade).
