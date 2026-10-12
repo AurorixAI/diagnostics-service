@@ -132,7 +132,7 @@ def _gap_answers():
 # ── O4: retired claims never appear ───────────────────────────────────────────
 
 def test_schema_version_is_bumped_for_the_contract_change():
-    assert rg.REPORT_SCHEMA_VERSION == 5
+    assert rg.REPORT_SCHEMA_VERSION == 6
 
 
 def test_report_has_no_reliability_percent_no_class_equivalent_no_hours(gen):
@@ -1162,3 +1162,123 @@ def test_continuation_sweep_is_linear_on_a_long_whitespace_run():
 def test_continuation_figure_line_goes_with_its_claim(text, kept):
     from src.domain.retired_claims import drop_retired_sentences
     assert drop_retired_sentences(text).strip() == kept
+
+
+# ── Inferred chains are not a confirmed root cause (stage finding) ─────────────
+
+def _inferred_only_answers():
+    """Legacy rows: the deep-scan answer has no stored origin link, so the chain is reconstructed."""
+    return [
+        ans("G8_T1_K1", "G8_T1", 0, 1),
+        ans("G7_T9_K1", "G8_T1", 0, 2, deep=True),            # no origin / step
+        ans("G8_T2_K1", "G8_T2", 1, 3),
+        ans("G8_T3_K1", "G8_T3", 0, 4),
+    ]
+
+
+def _mixed_answers():
+    """An inferred chain at grade 7 (breakpoint) and a stored-link chain at grade 8 (later)."""
+    return [
+        ans("G8_T3_K1", "G8_T3", 0, 1),
+        ans("G7_T9_K1", "G8_T3", 0, 2, deep=True),             # legacy, inferred, grade 7
+        ans("G8_T1_K1", "G8_T1", 0, 3),
+        ans("G8_T2_K1", "G8_T1", 0, 4, deep=True, origin="G8_T1_K1", step=1),   # stored link, grade 8
+    ]
+
+
+def _chains(answers):
+    return rg._reconstruct_root_cause_chains(answers, {k: {"name_ru": v.name_ru} for k, v in NODES.items()}, [], 8)
+
+
+def test_inferred_only_chains_are_observed_not_confirmed(gen):
+    rj = gen(_inferred_only_answers(), weak=["G7_T9_K1"], narrative=None).report_json
+    assert rj["root_cause_chains"] and all(c["evidence_source"] == "inferred" for c in rj["root_cause_chains"])
+    assert rj["diagnostic_boundary"]["breakpoint_evidence"] == "observed"
+    summary = rj["overall"]["student_summary"]
+    assert "Зафиксированы ключевые затруднения:" in summary and "подтвердила" not in summary
+    assert "первопричин" not in summary
+    prompt = gen.llm_calls[0]
+    assert "[связь выведена по порядку ответов (не подтверждена)]" in prompt
+    assert "[подтверждённая связь]" not in prompt
+    assert "Не называй наблюдаемый дефицит «первопричиной»" in prompt          # root_cause_confirmed is False
+    assert "Ключевой наблюдаемый дефицит" in prompt and "Подтверждённая точка слома" not in prompt
+    assert rj["action_plan"][0]["evidence"] == "observed_prerequisite"
+    assert "подтверждённый пререквизит" not in rj["action_plan"][0]["full_description"]
+
+
+def test_ai_output_with_a_root_cause_is_rejected_when_only_inferred_chains_exist(gen):
+    import json
+
+    answers = _inferred_only_answers()
+    first = gen(answers, weak=["G7_T9_K1"], narrative=None).report_json
+    status, score = first["overall"]["status"], first["overall"]["score_percent"]
+    steps = [(s_["skill_id"], s_["skill_name_ru"]) for s_ in first["action_plan"]]
+
+    def narrative_with(summary):
+        return lambda _prompt: json.dumps({
+            "overall": {"status": status, "score_percent": score, "student_summary": summary},
+            "action_plan": [
+                {"priority": i, "skill_id": sid, "skill_name_ru": name, "action_title": "Тема", "full_description": "Практика."}
+                for i, (sid, name) in enumerate(steps, 1)
+            ],
+        }, ensure_ascii=False)
+
+    before = len(gen.llm_calls)
+    echoed = gen(answers, weak=["G7_T9_K1"],
+                 narrative=narrative_with("Первопричина затруднений подтверждена углублённой проверкой.")).report_json
+    assert len(gen.llm_calls) == before + 2                              # rejected twice
+    assert echoed["report_meta"]["narrative_status"] == "deterministic_fallback"
+    assert "первопричин" not in echoed["overall"]["student_summary"]
+    assert "No root cause is confirmed" in gen.llm_calls[-1]             # the retry prompt explains why
+    for wording in ("Основная причина сбоя — дроби.", "Первопричиной сбоя является сложение дробей."):
+        before = len(gen.llm_calls)
+        gen(answers, weak=["G7_T9_K1"], narrative=narrative_with(wording))
+        assert len(gen.llm_calls) == before + 2, wording
+    before = len(gen.llm_calls)
+    ok = gen(answers, weak=["G7_T9_K1"], narrative=narrative_with("Ученик допускает ошибки в сложении дробей.")).report_json
+    assert len(gen.llm_calls) == before + 1 and ok["report_meta"]["narrative_status"] == "ready"
+
+
+def test_validator_root_cause_guard_is_off_when_a_chain_is_confirmed():
+    data = _narrative("Первопричина затруднений подтверждена углублённой проверкой.")
+    assert rg._validate_ai_output(data, computed_status="below_level", score_pct=30,
+                                  allowed_plan_skills={"G8_T1": "Дроби"})[0]           # default: confirmed
+    valid, errors = rg._validate_ai_output(data, computed_status="below_level", score_pct=30,
+                                           allowed_plan_skills={"G8_T1": "Дроби"}, root_cause_confirmed=False)
+    assert not valid and any("No root cause is confirmed" in e for e in errors)
+
+
+def test_mixed_chains_inferred_at_the_breakpoint_stay_observed(gen):
+    chains = _chains(_mixed_answers())
+    assert {c["evidence_source"] for c in chains} == {"inferred", "stored_link"}
+    boundary = rg._build_diagnostic_boundary(_mixed_answers(), {}, 8, chains)
+    assert boundary["breakpoint_evidence"] == "observed"                 # the inferred chain is at grade 7
+    rj = gen(_mixed_answers(), weak=["G7_T9_K1"], narrative=None).report_json
+    assert rj["diagnostic_boundary"]["breakpoint_evidence"] == "observed"
+    assert "Ключевой наблюдаемый дефицит" in gen.llm_calls[0]
+    prompt = gen.llm_calls[0]
+    assert "[подтверждённая связь]" in prompt and "[связь выведена по порядку ответов (не подтверждена)]" in prompt
+    assert "Первопричину, подтверждённую углублённой проверкой" in prompt     # a stored-link chain exists
+    # the confirmed chain may be named; the breakpoint itself is not claimed as confirmed
+    assert "Углублённая проверка подтвердила первопричину: «Свойства степеней»." in rj["overall"]["student_summary"]
+
+
+def test_stored_link_at_the_breakpoint_is_confirmed_with_the_positive_sentence(gen):
+    rj = gen(_gap_answers(), weak=["G7_T9_K1"], narrative=None).report_json
+    assert [c["evidence_source"] for c in rj["root_cause_chains"]] == ["stored_link"]
+    assert rj["diagnostic_boundary"]["breakpoint_evidence"] == "confirmed"
+    assert "Углублённая проверка подтвердила первопричину: «Сравнение дробей»." in rj["overall"]["student_summary"]
+    prompt = gen.llm_calls[0]
+    assert "[подтверждённая связь]" in prompt and "Подтверждённая точка слома" in prompt
+    assert "можно назвать первопричиной" in prompt
+    assert rj["action_plan"][0]["evidence"] == "confirmed_prerequisite"
+
+
+def test_chain_helpers_mirror_the_front_rule():
+    inferred = {"root_gap_grade": 6, "root_gap_skill_name": "A", "evidence_source": "inferred"}
+    stored = {"root_gap_grade": 8, "root_gap_skill_name": "B", "evidence_source": "stored_link"}
+    assert rg._confirmed_chains([inferred, stored]) == [stored]
+    assert rg._chains_at_breakpoint([inferred, stored], ["A"]) == [inferred]
+    assert rg._chains_at_breakpoint([stored, inferred], []) == [inferred]           # lowest grade
+    assert rg._chains_at_breakpoint([stored], ["Z"]) == [stored]                     # fallback: all chains
+    assert rg._confirmed_chains([{"root_gap_grade": 7}]) == [{"root_gap_grade": 7}]  # no source: not inferred

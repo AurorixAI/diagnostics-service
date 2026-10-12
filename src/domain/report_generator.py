@@ -70,6 +70,7 @@ from .retired_claims import (  # noqa: E402  (re-exported: tests and other modul
     _normalize_claim_text,
     contains_retired_claim,
     drop_retired_sentences,
+    mentions_root_cause,
 )
 
 
@@ -126,7 +127,11 @@ ERROR_PATTERNS_VERSION = 4
 # always the first plan step; error-free reports carry ``achievements`` and a
 # ``development`` plan step instead of a correction plan;
 # ``report_meta.date`` is the attempt date (``generated_on`` is the build date).
-REPORT_SCHEMA_VERSION = 5
+# 6 (N03a): a chain reconstructed from the answer order (``evidence_source == "inferred"``)
+# is never called a confirmed root cause: ``breakpoint_evidence`` is "confirmed" only when a
+# stored-link chain sits at the breakpoint, the summary / AI prompt / plan evidence follow the
+# same rule.  Schema-5 reports built before this overstated the confirmation.
+REPORT_SCHEMA_VERSION = 6
 
 
 def _distractor_value(distractor: Any) -> str:
@@ -323,8 +328,13 @@ def _validate_ai_output(
     computed_status: str,
     score_pct: int,
     allowed_plan_skills: Dict[str, str],
+    root_cause_confirmed: bool = True,
 ) -> Tuple[bool, List[str]]:
-    """Validate narrative output against deterministic report evidence."""
+    """Validate narrative output against deterministic report evidence.
+
+    ``root_cause_confirmed`` is False when no chain is backed by the stored deep-scan link:
+    the narrative may then describe observed difficulties only and must not name a root cause.
+    """
     errors: List[str] = []
     overall = data.get("overall", {})
     if overall.get("status") != computed_status:
@@ -377,6 +387,12 @@ def _validate_ai_output(
         errors.append("Reliability / confidence of the diagnosis (percentage or statement) is not allowed")
     if any(_has_root_cause_claim(t) for t in texts):
         errors.append("Statements about confirming or not confirming a single root cause are not allowed")
+    if not root_cause_confirmed and any(mentions_root_cause(t) for t in texts):
+        errors.append(
+            "No root cause is confirmed by the deep scan (the chains are reconstructed from the order of the "
+            "answers): do not use «первопричина» or «основная/главная/корневая причина», describe the "
+            "difficulties as observed ones in earlier topics"
+        )
     return len(errors) == 0, errors
 
 
@@ -887,6 +903,34 @@ def _finalize_chain(steps: List[Dict[str, Any]], grade_level: int) -> Dict[str, 
     }
 
 
+def _is_inferred_chain(chain: Dict[str, Any]) -> bool:
+    """The chain was reconstructed from the order of the answers (legacy rows without the stored origin link)."""
+    return chain.get("evidence_source") == "inferred"
+
+
+def _confirmed_chains(chains: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Chains backed by the stored deep-scan link; an inferred chain proves nothing (O4)."""
+    return [ch for ch in chains if not _is_inferred_chain(ch)]
+
+
+def _chains_at_breakpoint(chains: List[Dict[str, Any]], breakpoint_skills: List[str]) -> List[Dict[str, Any]]:
+    """Chains whose root gap sits at the breakpoint (earliest grade, or named in ``breakpoint_skills``).
+
+    The same rule as the front (``breakpointCopy`` in ``diagnostic-report.ts``); all chains when none matches.
+    """
+    grades = [
+        ch["root_gap_grade"] for ch in chains
+        if isinstance(ch.get("root_gap_grade"), (int, float)) and not isinstance(ch.get("root_gap_grade"), bool)
+    ]
+    lowest = min(grades) if grades else None
+    names = set(breakpoint_skills)
+    at_breakpoint = [
+        ch for ch in chains
+        if (lowest is not None and ch.get("root_gap_grade") == lowest) or ch.get("root_gap_skill_name") in names
+    ]
+    return at_breakpoint or list(chains)
+
+
 def _build_diagnostic_boundary(
     answers_orm: list,
     skill_map: Dict[str, Dict[str, str]],
@@ -933,7 +977,11 @@ def _build_diagnostic_boundary(
             if int(ch.get("root_gap_grade") or grade_level) == breakpoint_grade
             and ch.get("root_gap_skill_name")
         ))[:3]
-        evidence_status = "confirmed"
+        # "confirmed" only when a stored-link chain sits AT the breakpoint: a later confirmed chain does
+        # not confirm an earlier reconstructed one
+        evidence_status = (
+            "confirmed" if _confirmed_chains(_chains_at_breakpoint(chains, breakpoint_skills)) else "observed"
+        )
     else:
         breakpoint_grade = min(wrong_by_grade.keys()) if wrong_by_grade else grade_level
         breakpoint_skills = list(dict.fromkeys(wrong_by_grade.get(breakpoint_grade, [])))[:3]
@@ -1157,7 +1205,10 @@ def _build_plan_candidates(
         by_id[sid] = item
 
     for chain in chains:
-        add(chain.get("root_gap_skill_id"), chain.get("root_gap_skill_name"), "confirmed_prerequisite")
+        add(
+            chain.get("root_gap_skill_id"), chain.get("root_gap_skill_name"),
+            "observed_prerequisite" if _is_inferred_chain(chain) else "confirmed_prerequisite",
+        )
     for item in critical_gaps:
         add(item.get("skill_id"), item.get("skill_name_ru"), "measured_critical_gap", item.get("detail_skills"))
     for item in weak_skills:
@@ -1311,7 +1362,10 @@ def _build_deterministic_summary(
     within-grade equivalent and no author: the text is an automatic summary.
     ``deep_scan_run`` is accepted for compatibility: the wording no longer depends on it.
     """
-    root = chains[0].get("root_gap_skill_name") if chains else None
+    # a root cause is named only from a chain backed by the stored deep-scan link (prefer the one at the breakpoint)
+    confirmed = _confirmed_chains(chains)
+    at_breakpoint = _confirmed_chains(_chains_at_breakpoint(chains, boundary.get("breakpoint_skills") or []))
+    root = (at_breakpoint or confirmed)[0].get("root_gap_skill_name") if confirmed else None
     observed = ", ".join(boundary.get("breakpoint_skills") or [])
     verified = achievements or strong_skills
     anchors = ", ".join(item.get("skill_name_ru", "") for item in verified[:3] if item.get("skill_name_ru"))
@@ -1356,7 +1410,7 @@ _AI_SCHEMA = """{
     "score_percent": <int скопируй из данных>,
     "status": "<above_level|on_level|partial_gap|below_level|critical>",
     "status_label_ru": "<строка — название уровня>",
-    "student_summary": "<АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 связных предложений для администратора учебного центра и преподавателя), безличным стилем, не от имени педагога. ТРЕБОВАНИЯ: (1) Назови уровень по его формулировке из данных, без «начала/середины/конца» какого-либо класса. (2) Объясни причину сбоя ТОЛЬКО если она подтверждена цепочкой углублённой проверки; иначе опиши наблюдаемые затруднения без причин и без утверждений о том, подтверждена или не подтверждена единая первопричина. (3) Опиши тип ошибок по зафиксированным дистракторам, не приписывая ученику психологических причин. (4) Укажи ТОЧКИ ОПОРЫ (что ученик решает стабильно). (5) Назови стартовую тему плана — первую цель списка ДОПУСТИМЫХ ЦЕЛЕЙ. Не указывай сроки, часы и проценты надёжности диагноза. СТИЛЬ: профессиональный, фактологический, без общих фраз.>"
+    "student_summary": "<АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 связных предложений для администратора учебного центра и преподавателя), безличным стилем, не от имени педагога. ТРЕБОВАНИЯ: (1) Назови уровень по его формулировке из данных, без «начала/середины/конца» какого-либо класса. (2) Объясни причину сбоя ТОЛЬКО если она подтверждена цепочкой с пометкой «подтверждённая связь»; иначе опиши наблюдаемые затруднения без причин и без утверждений о том, подтверждена или не подтверждена единая первопричина. (3) Опиши тип ошибок по зафиксированным дистракторам, не приписывая ученику психологических причин. (4) Укажи ТОЧКИ ОПОРЫ (что ученик решает стабильно). (5) Назови стартовую тему плана — первую цель списка ДОПУСТИМЫХ ЦЕЛЕЙ. Не указывай сроки, часы и проценты надёжности диагноза. СТИЛЬ: профессиональный, фактологический, без общих фраз.>"
   },
   "action_plan": [
     {
@@ -1405,7 +1459,7 @@ def _build_prompt(
 2. overall.status — СКОПИРУЙ ТОЧНО: "{computed_status}" (уже вычислено алгоритмом).
 3. student_summary — АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 предложений, безличный стиль, не от имени педагога, без «я»):
    • Назови уровень его формулировкой «{status_label}». НЕ называй «начало/середину/конец» какого-либо класса и не указывай проценты «надёжности диагноза».
-   • {'Первопричину, подтверждённую углублённой проверкой (она указана в блоке цепочек ниже), можно назвать первопричиной; объясни только её.' if root_cause_confirmed else 'Не называй наблюдаемый дефицит «первопричиной»: опиши его как ключевое зафиксированное затруднение.'}
+   • {'Первопричину, подтверждённую углублённой проверкой (цепочка с пометкой «подтверждённая связь» в блоке ниже), можно назвать первопричиной; объясни только её. Цепочки с пометкой «связь выведена по порядку ответов (не подтверждена)» опиши лишь как наблюдаемые затруднения в более ранних темах: не называй их первопричиной и не пиши, что они подтверждены.' if root_cause_confirmed else 'Не называй наблюдаемый дефицит «первопричиной»: опиши его как ключевое зафиксированное затруднение. Цепочки с пометкой «связь выведена по порядку ответов (не подтверждена)» опиши лишь как наблюдаемые затруднения в более ранних темах; слова «первопричина» и «подтверждена» не используй.'}
    • НИКОГДА не пиши, что первопричина не подтверждена, не установлена, не найдена или отсутствует (в любых формулировках), и не указывай процент или оценку надёжности/достоверности диагноза: передавай только зафиксированные факты.
    • Разбери когнитивные паттерны мышления ученика по дистракторам.
    • Опиши опорные навыки (базовые темы, решенные верно).
@@ -1423,7 +1477,7 @@ def _build_prompt(
 ТОЧКИ ОПОРЫ (Решено верно):
 {anchor_block}
 
-ЦЕПОЧКИ ДИАГНОСТИЧЕСКОГО СПУСКА (углублённая проверка — поиск первопричин):
+ЦЕПОЧКИ ДИАГНОСТИЧЕСКОГО СПУСКА (углублённая проверка):
 {chains_block}
 
 КОГНИТИВНЫЕ ПАТТЕРНЫ ОШИБОК (По дистракторам):
@@ -1665,15 +1719,22 @@ def generate_and_save_report(
         for i, ch in enumerate(root_cause_chains, 1):
             expl = ch.get("root_gap_explanation") or "ошибка в пререквизите"
             anc = f" -> Опора: {ch['anchor_skill_name']} ({ch['anchor_grade']} кл)" if ch.get("anchor_skill_name") else " -> Опора на данном уровне не зафиксирована"
+            link = (
+                "связь выведена по порядку ответов (не подтверждена)"
+                if _is_inferred_chain(ch) else "подтверждённая связь"
+            )
             chain_lines.append(
                 f"  [{i}] Исходная тема ({ch['source_grade']} кл): {ch['source_skill_name']} "
                 f"-> Сбой в пререквизите ({ch['root_gap_grade']} кл): {ch['root_gap_skill_name']} "
-                f"(Суть ошибки: {expl}){anc}"
+                f"(Суть ошибки: {expl}){anc} [{link}]"
             )
         chains_block = "\n".join(chain_lines) or (
             "  (углублённая проверка проведена; цепочек для разбора в данных нет)"
             if deep_scan_run else "  (спуск не потребовался)"
         )
+
+        # A root cause is "confirmed" only by a chain with the stored deep-scan link (O4)
+        root_cause_confirmed = bool(_confirmed_chains(root_cause_chains))
 
         # ── Cognitive error patterns for prompt ───────────────────────────────
         cog_lines = []
@@ -1748,7 +1809,7 @@ def generate_and_save_report(
                 plan_candidates_block=plan_candidates_block,
                 plan_min_items=min(3, len(plan_candidates)),
                 plan_max_items=min(5, len(plan_candidates)),
-                root_cause_confirmed=bool(root_cause_chains),
+                root_cause_confirmed=root_cause_confirmed,
                 student_name=student_name,
                 test_code=test_code,
                 validation_errors=last_errors if attempt > 1 else None,
@@ -1769,6 +1830,7 @@ def generate_and_save_report(
                 computed_status=computed_status,
                 score_pct=score_pct,
                 allowed_plan_skills=allowed_plan_skills,
+                root_cause_confirmed=root_cause_confirmed,
             )
             if is_valid:
                 ai_data = parsed
