@@ -375,6 +375,7 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
         "weak_entries": entries, "coh_entries": coh_entries, "weak_sessions": int(entries > 0),
         "coh_sessions": int(entries > 0 and coh_entries == entries), "gap_topic_named": gap_topic_named,
         "confirmed_gaps": confirmed, "confirmed_gap_is_G": confirmed_gap_is_G,
+        "ds_unconfirmed": len(snap.get("deep_scan_unconfirmed") or []),   # probed skills whose gap was not confirmed
         "scan_triggered": ds_items > 0,                              # >=1 Deep Scan item was served
         "ds_budget_exhausted": ds_items >= budget,                   # session Deep Scan budget spent
         "hit_max_items": db.stop_reason == "max_items_reached" or int(db.items_answered) >= max_items,
