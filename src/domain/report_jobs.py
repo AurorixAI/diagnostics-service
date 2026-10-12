@@ -9,15 +9,15 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from sqlalchemy import or_
+from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from src.core.config import get_settings
 from src.core.database import SessionLocal
 from src.domain.report_generator import REPORT_SCHEMA_VERSION, generate_and_save_report
-from src.models.diag_models import DiagReport, DiagSession
+from src.models.diag_models import DiagAnswer, DiagReport, DiagSession
 
 log = logging.getLogger(__name__)
 
@@ -160,6 +160,240 @@ def enqueue_stale_report_generations(*, deterministic: bool = False) -> int:
         raise
     finally:
         db.close()
+
+
+# ── Targeted regeneration (content repairs) ───────────────────────────────────
+
+_IN_CHUNK = 500
+REFRESH_SOURCE = "regenerate_reports:refresh-task-content"
+
+
+def _chunks(items: Sequence[Any], size: int = _IN_CHUNK):
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def _unique(items: Iterable[Any]) -> list:
+    return list(dict.fromkeys(items))
+
+
+def is_queued(report: Optional[DiagReport]) -> bool:
+    """The report already has a live job: claimable ``pending`` (requested) or ``generating``."""
+    if report is None:
+        return False
+    if report.generation_status == "generating":
+        return True
+    return report.generation_status == "pending" and report.generation_requested_at is not None
+
+
+def find_regeneration_targets(
+    db: Session, *, session_ids: Sequence[uuid.UUID] = (), task_ids: Sequence[str] = (),
+) -> List[Dict[str, Any]]:
+    """Sessions whose report should be rebuilt even if it is current, with the reason for each.
+
+    * ``session_ids`` - exactly those sessions (a missing / not completed one is reported with ``skip``);
+    * ``task_ids`` - completed sessions whose answers include any of those tasks.
+    Both may be combined; a session picked twice lists both reasons.  Nothing is written.
+    """
+    reasons: Dict[uuid.UUID, List[str]] = {}
+    skipped: Dict[uuid.UUID, str] = {}
+    for session_id in _unique(session_ids):
+        session = db.query(DiagSession).filter(DiagSession.id == session_id).first()
+        if session is None:
+            skipped[session_id] = "session not found"
+        elif session.phase != "completed":
+            skipped[session_id] = f"session is not completed (phase={session.phase})"
+        else:
+            reasons.setdefault(session_id, []).append("--session-id")
+
+    wanted = _unique(str(t).strip() for t in task_ids if str(t).strip())
+    answered: Dict[uuid.UUID, set] = {}
+    for chunk in _chunks(wanted):
+        rows = (
+            db.query(DiagAnswer.session_id, DiagAnswer.task_id)
+            .join(DiagSession, DiagSession.id == DiagAnswer.session_id)
+            .filter(DiagSession.phase == "completed", DiagAnswer.task_id.in_(chunk))
+            .distinct()
+            .all()
+        )
+        for session_id, task_id in rows:
+            answered.setdefault(session_id, set()).add(task_id)
+    for session_id, tasks in answered.items():
+        reasons.setdefault(session_id, []).append("answered task " + ", ".join(sorted(tasks)))
+
+    completed_at: Dict[uuid.UUID, Any] = {}
+    for chunk in _chunks(list(reasons)):
+        for sid, when in db.query(DiagSession.id, DiagSession.completed_at).filter(DiagSession.id.in_(chunk)).all():
+            completed_at[sid] = when
+    ordered = sorted(reasons, key=lambda sid: (completed_at.get(sid) is None, completed_at.get(sid) or datetime.min, str(sid)))
+
+    targets: List[Dict[str, Any]] = []
+    for session_id in ordered:
+        report = db.query(DiagReport).filter(DiagReport.session_id == session_id).first()
+        targets.append({
+            "session_id": session_id,
+            "reasons": reasons[session_id],
+            "skip": None,
+            "report_status": report.generation_status if report else "missing",
+            "report_schema_version": int(report.report_schema_version or 0) if report else None,
+            "already_queued": is_queued(report),
+        })
+    for session_id, why in skipped.items():
+        targets.append({
+            "session_id": session_id, "reasons": ["--session-id"], "skip": why,
+            "report_status": None, "report_schema_version": None, "already_queued": False,
+        })
+    return targets
+
+
+def enqueue_forced_report_generations(
+    session_ids: Sequence[uuid.UUID], *, deterministic: bool = True, db: Optional[Session] = None,
+) -> Dict[str, List]:
+    """Queue exactly these sessions' reports even when they are current (a content repair, not a schema bump).
+
+    Same durable mechanism as the stale rebuild: the row becomes ``pending`` with ``generation_requested_at``
+    set, the worker claims it and rebuilds with ``force=True``.  ``deterministic=True`` writes the per-job
+    marker so the paid narrative model is not called.  The existing report stays readable until the new one
+    replaces it (its schema version is not lowered).  A session that already has a live job (``pending`` /
+    ``generating``) is not queued again; a missing or not completed session is reported as skipped.
+    """
+    own_session = db is None
+    db = db or SessionLocal()
+    queued: List[uuid.UUID] = []
+    already: List[uuid.UUID] = []
+    skipped: List[tuple] = []
+    try:
+        requested_at = datetime.now(timezone.utc)
+        for session_id in _unique(session_ids):
+            session = db.query(DiagSession).filter(DiagSession.id == session_id).first()
+            if session is None or session.phase != "completed":
+                skipped.append((session_id, "session not found" if session is None else "session is not completed"))
+                continue
+            report = db.query(DiagReport).filter(DiagReport.session_id == session_id).with_for_update().first()
+            if is_queued(report):
+                already.append(session_id)
+                continue
+            if report is None:
+                report = DiagReport(
+                    session_id=session.id,
+                    student_id=session.student_id,
+                    grade_level=session.grade_level,
+                    overall_theta=session.theta,
+                    overall_level=session.overall_level,
+                    topic_breakdown=session.topic_breakdown or {},
+                    weak_skills=session.weak_skills or [],
+                    recommended_start=(session.weak_skills or [None])[0],
+                    report_schema_version=0,
+                    generation_attempts=0,
+                )
+                db.add(report)
+            if deterministic:
+                report.report_json = {**(report.report_json or {}), REGENERATION_KEY: {"narrative": "deterministic"}}
+            elif isinstance(report.report_json, dict) and REGENERATION_KEY in report.report_json:
+                report.report_json = {k: v for k, v in report.report_json.items() if k != REGENERATION_KEY}
+            report.generation_status = "pending"
+            report.generation_stage = "queued"
+            report.generation_error = None
+            report.generation_attempts = 0
+            report.generation_requested_at = requested_at
+            report.generation_started_at = None
+            report.generation_completed_at = None
+            queued.append(session_id)
+        db.commit()
+        return {"queued": queued, "already_queued": already, "skipped": skipped}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        if own_session:
+            db.close()
+
+
+def refresh_answer_task_snapshots(
+    db: Session,
+    task_repo: Any,
+    *,
+    session_ids: Sequence[uuid.UUID],
+    task_ids: Sequence[str] = (),
+    execute: bool = False,
+    now: Optional[datetime] = None,
+) -> Dict[str, int]:
+    """Refresh the report-facing fields of ``diag_answers.task_snapshot`` from the current bank.
+
+    A report is built from the snapshot stored with each answer (the live bank is read only for answers
+    without one), so a content repair reaches a rebuilt report only after this refresh.  Only the
+    ``task_snapshot`` column is written - never ``outcome``, ``student_answer`` or any other column of the
+    append-only journal.  With ``task_ids`` only answers to those tasks are refreshed, otherwise every
+    answer of the given sessions.  Answers without a snapshot are left as they are (the rebuild reads
+    them live).  Dry-run (``execute=False``) fetches and counts but writes nothing.
+    """
+    from src.domain.task_display import build_diag_answer_options
+    from src.domain.task_evidence import refresh_snapshot
+
+    stats = {
+        "examined": 0, "refreshed": 0, "would_refresh": 0, "unchanged": 0, "null_snapshot": 0,
+        "missing_task": 0, "fetch_errors": 0, "build_errors": 0, "invalid_snapshot": 0,
+        "display_options_kept": 0,
+    }
+    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    wanted = _unique(str(t).strip() for t in task_ids if str(t).strip())
+    live: Dict[str, Any] = {}
+
+    def fetch(task_id: str):
+        if task_id not in live:
+            try:
+                live[task_id] = task_repo.get_by_id(task_id)             # None == 404
+            except Exception as exc:
+                log.warning("refresh: cannot fetch task %s: %s", task_id, exc)
+                live[task_id] = Ellipsis
+        return live[task_id]
+
+    for chunk in _chunks(_unique(session_ids)):
+        query = db.query(DiagAnswer.id, DiagAnswer.session_id, DiagAnswer.task_id, DiagAnswer.task_snapshot).filter(
+            DiagAnswer.session_id.in_(chunk)
+        )
+        if wanted:
+            query = query.filter(DiagAnswer.task_id.in_(wanted))
+        for answer_id, session_id, task_id, snapshot in query.order_by(DiagAnswer.id).all():
+            stats["examined"] += 1
+            if not snapshot:
+                stats["null_snapshot"] += 1
+                continue
+            task = fetch(task_id)
+            if task is Ellipsis:
+                stats["fetch_errors"] += 1
+                continue
+            if task is None:
+                stats["missing_task"] += 1
+                continue
+            try:
+                options, options_latex = build_diag_answer_options(task, seed=f"{session_id}:{task.id}")
+                refreshed, info = refresh_snapshot(
+                    snapshot, task_id, task, options, options_latex, source=REFRESH_SOURCE, refreshed_at=stamp,
+                )
+            except ValueError as exc:                                     # invalid envelope / hash mismatch
+                log.warning("refresh: answer %s has an unreadable snapshot: %s", answer_id, exc)
+                stats["invalid_snapshot"] += 1
+                continue
+            except Exception as exc:
+                log.warning("refresh: cannot rebuild answer %s task %s: %s", answer_id, task_id, exc)
+                stats["build_errors"] += 1
+                continue
+            if info["display_options_kept"]:
+                stats["display_options_kept"] += 1
+            if refreshed is None:
+                stats["unchanged"] += 1
+                continue
+            if not execute:
+                stats["would_refresh"] += 1
+                continue
+            db.execute(update(DiagAnswer).where(DiagAnswer.id == answer_id).values(task_snapshot=refreshed))
+            stats["refreshed"] += 1
+    if execute:
+        db.commit()
+    else:
+        db.rollback()
+    return stats
 
 
 def _claim_next_report(db: Session) -> Optional[tuple[DiagReport, DiagSession]]:
