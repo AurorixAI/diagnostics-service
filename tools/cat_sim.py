@@ -41,6 +41,17 @@ failed prerequisite takes the root away), ``detect_named`` = any failed step und
 incl. the scan origin; plus background rate = gap-free students whose chain root lies in the candidate L3 set
 (weak-theta students really lack those skills, so this is not a pure false-positive rate).
 
+Stage-3a instrumentation (read-only observer, no effect on the service or on any core field): each student
+record also carries ``l3_visits`` (one entry per L3 visit of the navigation phase: l3, importance, n_items, n_wrong,
+mean_p_hat, plus n_l4, score, resid = sum(p_hat - x), failed, complete, terminal, sig), ``shadow_triggers`` (for EVERY
+failed, decided L3: would the current rule trigger ignoring the budget - importance >= threshold and a failing skill - and
+the offline alternatives D1 = (>=2 wrong in the L3, or 1 wrong when the L3 has a single L4) and D2 = (residual
+sum(p_hat - x) >= 1.0)), ``scan_log`` (each scan: budget at start, origin L3, initial prerequisite queue, whether the
+injected gap L3 G is in it and where, steps = probed skill / outcome / gap_confirmed), the chain roots/sources, the
+confirmed L3s and the report's L2 topics (base rates).  p_hat = alpha_engine._p3pl(theta_before, a, b, c) with the
+session's theta before the answer (``DiagAnswer.theta_before``) and the served item's IRT parameters.  The session state is
+only READ from the fake redis after each answer; tools/rootcause_diag.py turns these fields into metrics.
+
 Setup: uv venv --python 3.11 V && uv pip install --python V/bin/python -r requirements.txt fakeredis
 Usage
 -----------------------------------------------------------------------------
@@ -66,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import hashlib
 import json
 import math
@@ -135,6 +147,7 @@ def bootstrap(content_db_url: str, truth_db_url: Optional[str], content_dir: Pat
     from src.models.diag_models import DiagAnswer, DiagSession
     from src.repositories.diag_repo import DiagAnswerRepository, DiagSessionRepository
     from src.state.redis_state import RedisStateManager
+    from src.domain.navigators.skill_navigator import SkillNavigator
 
     client = TestClient(app, base_url="http://testserver", headers={"X-Internal-Service-Token": TOKEN})
     client.__enter__()                       # keep one portal/event loop alive
@@ -220,6 +233,7 @@ def bootstrap(content_db_url: str, truth_db_url: Optional[str], content_dir: Pat
         svc=svc, rg=rg, ss=ss, ae=ae, lp=lp, content_client=content_client,
         sessions=svc.session_repo, answers=svc.answer_repo, fake_redis=fake_redis,
         nodes=nodes, tnodes=tnodes, tedges=tedges, ttask=ttask, parked=parked, DiagSession=DiagSession,
+        SkillNavigator=SkillNavigator,
         settings=diag_config.get_settings(), db_url=content_db_url,
     ))
     return _CTX
@@ -262,6 +276,135 @@ def _u(seed: int, i: int, key: str) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Stage-3a instrumentation: read-only observer of one session
+# ─────────────────────────────────────────────────────────────────────────────
+class _Trace:
+    """Collects l3_visits / shadow_triggers / scan_log of ONE simulated session.
+
+    Only READS: the session state (fake redis) before/after each answer, the answer log and the content API
+    through the already cached deterministic endpoints (``_prereq_l4_ids``).  It never calls the random task list,
+    python ``random`` or the service's mutating methods, so the session is identical with and without it."""
+
+    def __init__(self, ctx, gap: Optional[str], failset: set):
+        self.ctx, self.gap, self.failset = ctx, gap, failset
+        self.cur: Optional[Dict[str, Any]] = None
+        self.visits: List[Dict[str, Any]] = []
+        self.shadow: List[Dict[str, Any]] = []
+        self.scans: List[Dict[str, Any]] = []
+        # self-checks of the replication of the service's decisions (all should stay 0)
+        self.aux = {"len_mismatch": 0, "trigger_mismatch": 0, "terminal_visits": 0, "cut_visits": 0, "no_state": 0}
+
+    def step(self, P, Q, row: Dict[str, Any], res) -> None:
+        """P = session state the answer was applied to, Q = state after it (None once the session is over)."""
+        ctx = self.ctx
+        if P is None or P.phase != "navigation" or P.is_in_deep_scan or not P.current_skill_nav:
+            return
+        a = ctx["answers"].rows[-1]
+        p_hat = ctx["ae"]._p3pl(float(a.theta_before), float(row["irt_discrimination"] or 1.0),
+                                float(row["irt_difficulty"] or 0.0), float(row["irt_guessing"] or 0.0))
+        nav = P.current_skill_nav
+        l3 = nav["subtopic_id"]
+        v = self.cur
+        if v is None or v["l3"] != l3:
+            if v is not None:
+                self._cut(v)
+            imp = next((int(x["importance"]) for x in (P.current_subtopic_nav or {}).get("subtopics", [])
+                        if x["subtopic_id"] == l3), None)
+            v = self.cur = {"l3": l3, "importance": imp, "n_l4": len(nav["skills"]), "ps": [], "xs": []}
+        v["ps"].append(p_hat)
+        v["xs"].append(1.0 if res.is_correct else 0.0)
+        sn = ctx["SkillNavigator"].from_dict(copy.deepcopy(nav))      # replay of the service's own L4 navigator
+        if sn.move(bool(res.is_correct)) is None:                      # L3 visit finished -> pass/fail decided
+            self.cur = None
+            self._decide(v, sn, P, Q, res)
+
+    def _cut(self, v) -> None:
+        """Visit that did not finish (the session ended inside it): listed, never evaluated."""
+        self.aux["cut_visits"] += 1
+        n = len(v["ps"])
+        self.visits.append({"l3": v["l3"], "importance": v["importance"], "n_items": n,
+                            "n_wrong": int(sum(1 for x in v["xs"] if not x)),
+                            "mean_p_hat": round(sum(v["ps"]) / n, 4) if n else None, "n_l4": v["n_l4"],
+                            "complete": False, "failed": None, "terminal": True, "sig": v["l3"] in self.failset})
+
+    def close(self) -> None:
+        if self.cur is not None:
+            self._cut(self.cur)
+            self.cur = None
+
+    def _decide(self, v, sn, P, Q, res) -> None:
+        ctx = self.ctx
+        svc, ss, nodes = ctx["svc"], ctx["ss"], ctx["nodes"]
+        params = svc._peek_scan_params(P)
+        results = sn.state.results
+        n_items, n_wrong = len(results), int(sum(1 for ok in results.values() if not ok))
+        if len(v["ps"]) != n_items:
+            self.aux["len_mismatch"] += 1
+        score = sn.subtopic_score()
+        failed = score < ss.settings.mastery_threshold
+        failing = sn.get_failing_skill()
+        n = max(1, len(v["ps"]))
+        resid = float(sum(p - x for p, x in zip(v["ps"], v["xs"])))
+        terminal = bool(res.session_completed)       # the session ended with this answer: the service may not have decided
+        self.aux["terminal_visits"] += int(terminal)
+        sig = v["l3"] in self.failset
+        self.visits.append({"l3": v["l3"], "importance": v["importance"], "n_items": n_items, "n_wrong": n_wrong,
+                            "mean_p_hat": round(sum(v["ps"]) / n, 4), "n_l4": v["n_l4"], "score": score,
+                            "resid": round(resid, 4), "failed": failed, "complete": True, "terminal": terminal,
+                            "sig": sig})
+        if not failed:
+            return
+        imp_ok = v["importance"] is not None and v["importance"] >= params["importance_threshold"]
+        cur = bool(imp_ok and failing)                                   # current rule, budget ignored
+        budget_spent = P.deep_scan_items_total >= params["session_budget"]
+        observed = None
+        if not terminal and Q is not None:
+            q_scan = (Q.phase == "deep_scan" and bool(Q.deep_scan)
+                      and Q.deep_scan.get("origin_skill_id") == failing)
+            q_empty = (not q_scan) and len(Q.confirmed_gaps) > len(P.confirmed_gaps)   # trigger fired, nothing to probe
+            observed = q_scan or q_empty
+            if observed != (cur and not budget_spent):
+                self.aux["trigger_mismatch"] += 1
+            if observed:
+                queue = [pid for pid in svc._prereq_l4_ids(failing)
+                         if pid not in P.deep_scan_tested and pid != failing]
+                qs = [l3_of(nodes, q) for q in queue]
+                self.scans.append({
+                    "origin_l3": v["l3"], "origin_skill": failing, "origin_sig": sig,
+                    "budget_used": int(P.deep_scan_items_total), "budget": int(params["session_budget"]),
+                    "max_items": int(params["max_items"]), "queue": queue, "queue_l3": qs,
+                    "G_in_queue": bool(self.gap) and self.gap in qs,
+                    "G_pos": qs.index(self.gap) if (self.gap and self.gap in qs) else None,
+                    "empty": bool(q_empty), "start_row": len(ctx["answers"].rows), "n_items": 0, "steps": []})
+        elif not terminal:
+            self.aux["no_state"] += 1
+        self.shadow.append({
+            "l3": v["l3"], "importance": v["importance"], "sig": sig, "score": score, "imp_ok": imp_ok,
+            "cur": cur, "d1": bool(n_wrong >= 2 or (v["n_l4"] == 1 and n_wrong >= 1)), "d2": bool(resid >= 1.0),
+            "budget_spent": bool(budget_spent), "actual": observed, "terminal": terminal})
+
+    def finish(self, rows, required: int) -> None:
+        """Fill the steps of every scan from the answer log (same probe grouping as the report)."""
+        ctx = self.ctx
+        rg, lp, nodes = ctx["rg"], ctx["lp"], ctx["nodes"]
+        for sc in self.scans:
+            k, seg = sc["start_row"], []
+            while k < len(rows) and rows[k].is_deep_scan and rows[k].deep_scan_origin_skill_id == sc["origin_skill"]:
+                seg.append(rows[k]); k += 1
+            steps = rg._probe_steps(seg, lambda x: {"skill_id": x.skill_id, "outcome": float(x.outcome or 0)}, required)
+            sc["n_items"] = len(seg)
+            sc["steps"] = [{"skill": st["skill_id"], "l3": l3_of(nodes, st["skill_id"]),
+                            "outcome": st["outcome"], "ok": bool(lp.is_correct(st["outcome"])),
+                            "gap_confirmed": bool(st.get("gap_confirmed", not lp.is_correct(st["outcome"]))),
+                            "attempts": int(st.get("probe_attempts", 1))} for st in steps]
+            g = self.gap
+            sc["G_origin"] = bool(g) and sc["origin_l3"] == g
+            sc["G_probed"] = bool(g) and any(st["l3"] == g for st in sc["steps"])
+            sc["G_confirmed"] = bool(g) and any(st["l3"] == g and st["gap_confirmed"] for st in sc["steps"])
+            del sc["start_row"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # One student
 # ─────────────────────────────────────────────────────────────────────────────
 def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
@@ -285,6 +428,8 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
     sessions, answers = ctx["sessions"], ctx["answers"]
     sessions.rows.clear(); answers.rows.clear()
     sid, task = svc.create_session(uuid.uuid4(), grade, invite_code=None, prior_theta=0.0)
+    trace = _Trace(ctx, gap, failset)
+    state_p = svc.redis.load(str(sid))             # read-only peek (stage-3a instrumentation)
     mismatches = n = 0
     while True:
         row = cc.get_task(task.task_id).json()
@@ -298,6 +443,9 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
         ans = row["correct_answer"] if want else "x_wrong_x"
         res = svc.submit_answer(sid, task.task_id, ans)
         n += 1
+        state_q = svc.redis.load(str(sid))         # None once the session is completed
+        trace.step(state_p, state_q, row, res)
+        state_p = state_q
         if want and not (res.is_correct and res.outcome >= 1.0):
             mismatches += 1       # evaluator rejected the key itself (bank defect)
         if res.session_completed:
@@ -308,6 +456,8 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
 
     db = sessions.rows[sid]
     snap = db.state_snapshot or {}
+    trace.close()
+    trace.finish(list(answers.rows), max(1, int((snap.get("deep_scan_params") or {}).get("confirm_probes") or 1)))
     th_hat, se = float(db.theta), float(db.theta_se)
     cls_true, cls_hat = lp.classify(theta, 0.0, grade), lp.classify(th_hat, se, grade)
     rows = list(answers.rows)
@@ -361,6 +511,7 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
     confirmed = list(snap.get("confirmed_gaps") or [])
     # some skill of the injected L3 G (G itself or any of its L4) is a confirmed gap in the session
     confirmed_gap_is_G = (any(l3_of(nodes, c_) == gap for c_ in confirmed) if gap else None)
+    confirmed_l3s = sorted({x for x in (l3_of(nodes, c_) for c_ in confirmed) if x})
     ds_items = int(snap.get("deep_scan_items_total") or 0)
     budget = int(ctx["ss"].settings.deep_scan_session_budget)
     max_items = int(ctx["ss"].settings.max_items)
@@ -382,6 +533,12 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
         "scan_triggered": ds_items > 0,                              # >=1 Deep Scan item was served
         "ds_budget_exhausted": ds_items >= budget,                   # session Deep Scan budget spent
         "hit_max_items": db.stop_reason == "max_items_reached" or int(db.items_answered) >= max_items,
+        # ---- stage-3a instrumentation (new fields only; none of the fields above depends on them) ----
+        "l3_visits": trace.visits, "shadow_triggers": trace.shadow, "scan_log": trace.scans,
+        "chain_roots": root_l3, "chain_sources": [l3_of(nodes, c.get("source_skill_id") or "") for c in chains],
+        "confirmed_l3s": confirmed_l3s, "named_l2s": sorted({e["skill_id"] for e in weak_blk + crit_blk}),
+        "n_weak_topics": len(weak_blk), "n_crit_topics": len(crit_blk), "n_detail_skills": entries - len(weak_blk) - len(crit_blk),
+        "trace_aux": trace.aux,
     }
 
 
