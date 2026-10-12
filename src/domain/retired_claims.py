@@ -320,6 +320,16 @@ def _has_root_cause_claim(text: Any) -> bool:
     return False
 
 
+def mentions_root_cause(text: Any) -> bool:
+    """«первопричина» or «основная / главная / корневая / единая / общая причина» anywhere in the text."""
+    if not isinstance(text, str):
+        return False
+    normalized = _normalize_claim_text(text)
+    if "причин" not in normalized and "корен" not in normalized and "корн" not in normalized:
+        return False
+    return any(_noun_phrases(_tokens(sentence)) for sentence in _SENTENCE_RE.split(normalized.replace("\n", " ")))
+
+
 # ── Reliability / credibility of the diagnosis ────────────────────────────────
 
 _REL_NOUN = re.compile(r"(?:не)?(?:надежност|достоверност)(?:ь|и|ью|ей)?")

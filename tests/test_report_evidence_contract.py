@@ -40,7 +40,7 @@ def test_normal_wrong_answer_does_not_create_a_pseudo_root_cause():
     assert boundary["breakpoint_skills"] == ["Навык G7_ALG_1"]
 
 
-def test_deep_scan_prerequisite_descent_creates_confirmed_root_cause():
+def test_deep_scan_descent_without_the_stored_link_is_inferred_and_only_observed():
     answers = [
         _answer(skill_id="G7_ALG_1", task_id=None, outcome=0),
         _answer(
@@ -58,8 +58,12 @@ def test_deep_scan_prerequisite_descent_creates_confirmed_root_cause():
     assert chains[0]["source_skill_id"] == "G7_ALG_1"
     assert chains[0]["root_gap_skill_id"] == "G6_ARITH_2"
     boundary = report_generator._build_diagnostic_boundary(answers, skills, 7, chains)
-    assert boundary["breakpoint_evidence"] == "confirmed"
+    # legacy rows without ``deep_scan_origin_skill_id``: the chain is reconstructed from the order of the
+    # answers, which confirms nothing (O4); the breakpoint stays an observed deficit
+    assert chains[0]["evidence_source"] == "inferred"
+    assert boundary["breakpoint_evidence"] == "observed"
     assert boundary["breakpoint_level"] == "6 класс"
+    assert boundary["breakpoint_skills"] == ["Навык G6_ARITH_2"]
 
 
 def test_ai_plan_must_be_compact_and_use_only_evidence_backed_skills():
