@@ -364,7 +364,7 @@ def test_root_cause_claim_variants_are_retired(bad):
 @pytest.mark.parametrize("good", [
     "Углублённая проверка подтвердила первопричину: «Сложение дробей».",
     "Углублённая проверка подтвердила первопричину: «Неопределённый интеграл».",
-    "Зафиксированы ключевые затруднения: Дроби; причинная цепочка не заявляется без углублённой проверки.",
+    "Зафиксированы ключевые затруднения: Дроби, Степени.",
     "Зафиксированы ключевые затруднения: Дроби.",
     "Ученик не подтвердил знание дробей в трёх заданиях.",
     "Тема не изучена, причины ошибок разнообразны.",
@@ -372,6 +372,33 @@ def test_root_cause_claim_variants_are_retired(bad):
 def test_neutral_root_cause_wording_is_not_a_retired_claim(good):
     assert not rg.contains_retired_claim(good), good
     assert _validate(_narrative(good))[0], good
+
+
+@pytest.mark.parametrize("text, expected", [
+    # the negation belongs to the same clause as the root cause -> retired claim
+    ("Единая первопричина не подтверждена.", True),
+    ("Углублённая проверка не подтвердила единую первопричину.", True),
+    ("Первопричину установить не удалось.", True),
+    ("Первопричина не выявлена", True),
+    ("единой первопричины нет", True),
+    ("Первопричина, к сожалению, не установлена", True),               # a plain comma is not a clause break
+    ("В теме «Дроби» первопричина, по данным проверки, не подтверждена.", True),
+    ("Ошибки в теме «Степени» есть; единая первопричина не подтверждена.", True),   # claim in the second clause
+    # the negation belongs to another clause / sentence -> not a claim
+    ("Первопричина затруднений — тема «Дроби»; в теме «Уравнения» ошибок не выявлено.", False),
+    ("Первопричина — «Дроби», а в теме «Уравнения» ошибок нет.", False),
+    ("Первопричина — «Дроби», но в теме «Уравнения» ошибок нет.", False),
+    ("Первопричина — «Дроби», однако в теме «Уравнения» ошибок не выявлено.", False),
+    ("Первопричина — «Дроби», при этом в теме «Уравнения» ошибок не найдено.", False),
+    ("Углублённая проверка подтвердила первопричину: «Дроби». Ошибок в теме «Степени» нет.", False),
+    ("Первопричина — «Дроби». Других затруднений нет.", False),
+    ("В теме «Уравнения» ошибок не выявлено, а первопричина — «Дроби».", False),
+    ("Углублённая проверка подтвердила первопричину: «Неопределённый интеграл».", False),
+])
+def test_root_cause_negation_must_be_in_the_same_clause(text, expected):
+    assert rg.contains_retired_claim(text) is expected, text
+    assert rg._has_root_cause_claim(text) is expected, text
+    assert _validate(_narrative(text))[0] is (not expected), text
 
 
 def test_dash_variants_do_not_hide_a_class_equivalent_or_reliability_figure():

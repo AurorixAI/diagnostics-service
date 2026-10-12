@@ -100,14 +100,19 @@ _CURRICULUM_OBJECT_RE = re.compile(
 _DIAGNOSTIC_CONTEXT_RE = re.compile(r"диагноз|диагностик|отчет|ученик|ребенок|тестирован|оценк")
 
 # «единая первопричина не подтверждена / не установлена», «не подтвердила единую
-# первопричину», «единой первопричины нет» - in either word order.
+# первопричину», «единой первопричины нет» - in either word order.  The negation and
+# the root cause must stand in the SAME clause: the gap between them is at most 60
+# characters and may not cross a sentence end or «;», nor a clause break «, а / , но /
+# , однако / , при этом» («Первопричина — Дроби, а в теме Степени ошибок нет» is not
+# a claim).  A plain comma («Первопричина, к сожалению, не установлена») is no break.
 _ROOT_CAUSE = r"(?:перво-?причин\w*|един\w+\s+(?:корнев\w+\s+)?причин\w*)"
 _NOT_CONFIRMED = (
     r"(?:не[-\s]*(?:подтвер(?:д|жд)|установ|выявл|обнаруж|най[дт]|нашл|удал|удает|выдел|зафикс)\w*"
     r"|\bнет\b|отсутству\w*|без\s+подтвержден\w*)"
 )
+_SAME_CLAUSE_GAP = r"(?:(?!,\s*(?:а|но|однако|при\s+этом)\b)[^.;!?\n]){0,60}?"
 _ROOT_CAUSE_CLAIM_RE = re.compile(
-    _ROOT_CAUSE + r"[^.!?\n]{0,60}?" + _NOT_CONFIRMED + r"|" + _NOT_CONFIRMED + r"[^.!?\n]{0,60}?" + _ROOT_CAUSE,
+    _ROOT_CAUSE + _SAME_CLAUSE_GAP + _NOT_CONFIRMED + r"|" + _NOT_CONFIRMED + _SAME_CLAUSE_GAP + _ROOT_CAUSE,
 )
 
 _DASH_RE = re.compile("[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]")      # ‐ ‑ ‒ – — ― −
@@ -1384,6 +1389,7 @@ def _build_deterministic_summary(
 
     The level is stated only by its band (``status_label``); there is no
     within-grade equivalent and no author: the text is an automatic summary.
+    ``deep_scan_run`` is accepted for compatibility: the wording no longer depends on it.
     """
     root = chains[0].get("root_gap_skill_name") if chains else None
     observed = ", ".join(boundary.get("breakpoint_skills") or [])
@@ -1392,11 +1398,10 @@ def _build_deterministic_summary(
     error_free = not root and not observed
     if root:
         evidence_sentence = f"Углублённая проверка подтвердила первопричину: «{root}»."
-    elif observed and deep_scan_run:
-        # Facts only: whether a single root cause was or was not confirmed is a retired claim (O4).
-        evidence_sentence = f"Зафиксированы ключевые затруднения: {observed}."
     elif observed:
-        evidence_sentence = f"Зафиксированы ключевые затруднения: {observed}; причинная цепочка не заявляется без углублённой проверки."
+        # Verified facts only (O4): no statement about whether a single root cause was confirmed,
+        # and no meta-statement about what the report does or does not claim.
+        evidence_sentence = f"Зафиксированы ключевые затруднения: {observed}."
     else:
         evidence_sentence = "В выполненных заданиях затруднения не зафиксированы."
     if anchors:
