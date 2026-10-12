@@ -975,3 +975,63 @@ def test_accuracy_and_confidence_of_the_diagnosis_are_retired_claims(text):
 def test_accuracy_and_confidence_in_ordinary_mathematics_pass(text):
     assert not rg.contains_retired_claim(text), text
     assert _validate(_narrative("Текст.", description=text)) == (True, []), text
+
+
+# ── Final fixes: probability term, everyday words, conditional subjects, sweep, recall ──
+
+@pytest.mark.parametrize("text", [
+    "Повторить: вероятность достоверного события равна 100%.",
+    "Повторить: вероятность достоверного события равна 1,0.",
+    "Событие достоверно",
+    "Достоверное и невозможное события",
+    "Достоверное событие имеет вероятность 1.",
+    # «точность / уверенность» in ordinary study prose: «тест» alone is not a diagnostic subject
+    "Следите за точностью вычислений в тесте.",
+    "Развивайте уверенность при решении тестов.",
+    "Повысить уверенность при решении заданий теста.",
+    # «метод / оценка / вывод» are subjects only when about the diagnosis
+    "Метод подстановки надёжен.",
+    "Оценка достоверности корня: подставьте найденное значение.",
+])
+def test_final_probability_term_everyday_words_and_conditional_subjects_pass(text):
+    assert not rg.contains_retired_claim(text), text
+    assert _validate(_narrative("Текст.", description=text)) == (True, []), text
+
+
+@pytest.mark.parametrize("text", [
+    "Точность диагностики — 87%",
+    "Уверенность в результатах теста 85%",
+    "Точность теста 90%",
+    "Результат достоверен на 90%",
+    "Метод диагностики надёжен.",
+    "Оценка уровня надёжна.",
+])
+def test_final_diagnostic_subjects_still_rejected(text):
+    assert rg.contains_retired_claim(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "Единую первопричину подтвердить невозможно",
+    "Первопричина осталась неустановленной",
+    "Первопричина осталась невыясненной",
+    "Невозможно установить единую первопричину",
+    "Первопричину невозможно установить",
+    "Не удалось выяснить единую первопричину",
+])
+def test_final_root_cause_recall(text):
+    assert rg.contains_retired_claim(text), text
+    assert not _validate(_narrative("Текст.", description=text))[0], text
+
+
+@pytest.mark.parametrize("prose, expected", [
+    ("Шаг 1.\n- Надёжность диагноза 83%.\n- Решите пример.\nГотово.", "Шаг 1.\n- Решите пример.\nГотово."),
+    ("Повторите дроби. Единая первопричина не подтверждена. Решите пример.", "Повторите дроби. Решите пример."),
+    ("Строка один\nЕдиная первопричина не подтверждена\nСтрока три", "Строка один\nСтрока три"),
+    ("Повторите. Надёжность\nдиагноза 83%. Решите.", "Повторите. Решите."),        # claim wrapped over a line break
+    ("Только плохое. Надёжность диагноза 83%.", "Только плохое."),
+    ("В конце 7 класса изучают степени.\nНадёжность прибора равна 0,95.", "В конце 7 класса изучают степени.\nНадёжность прибора равна 0,95."),
+])
+def test_plan_sweep_drops_only_the_offending_line_and_keeps_separators(prose, expected):
+    assert rg.drop_retired_sentences(prose) == expected
+    stored = {"action_plan": [{"priority": 1, "skill_id": "G8_T1", "full_description": prose}]}
+    assert rg.strip_retired_report_fields(stored)["action_plan"][0]["full_description"] == expected

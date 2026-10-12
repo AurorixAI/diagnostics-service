@@ -86,7 +86,7 @@ _RC_ONE = re.compile(r"един(?:ый|ого|ому|ым|ом)")
 _RC_ROOT = re.compile(r"корень|корня|корню|корнем|корне")
 
 # finite / participle forms that AFFIRM (when not negated) that something was established
-_PASSIVE = re.compile(r"(?:подтвержден|установлен|выявлен|определен|найден|обнаружен|прослежен)(?:а|о|ы)?")
+_PASSIVE = re.compile(r"(?:подтвержден|установлен|выявлен|определен|найден|обнаружен|прослежен|выяснен)(?:а|о|ы)?")
 _PASSIVE_FEM = re.compile(r"(?:подтвержден|установлен|выявлен|определен|найден|обнаружен|прослежен)а")
 _PRESENT_REFL = re.compile(r"(?:подтвержда|устанавлива|выявля|определя|обнаружива|прослежива)(?:ется|ются)")
 _PAST_REFL = re.compile(r"(?:подтвердил|установил|выявил|определил|обнаружил|нашл)(?:ась|ись|ось)")
@@ -101,7 +101,12 @@ _MODAL = frozenset({
     "позволил", "позволила", "позволило", "позволили", "позволяет", "позволяют",
     "может", "могут", "могла", "могло", "мог", "могли", "смог", "смогла", "смогли", "сможет", "смогут",
 })
-_INFINITIVE = frozenset({"установить", "определить", "подтвердить", "выявить", "найти", "обнаружить", "выделить"})
+_INFINITIVE = frozenset({"установить", "определить", "подтвердить", "выявить", "найти", "обнаружить", "выделить", "выяснить"})
+_IMPOSSIBLE = ("нельзя", "невозможно")
+_REMAINED = frozenset({"осталась", "осталось", "остались", "остается", "остаются", "останется"})
+_UNESTABLISHED = re.compile(
+    r"(?:неустановлен|невыяснен|неопределен|неподтвержден|невыявлен|необнаружен|ненайден)(?:н?ой|н?ым|н?ыми|н?ые|н?ая|н?ое|н?ую|н?ых)?"
+)
 _ABSENT = re.compile(r"отсутству[а-я]{1,8}")
 _CLAUSE_BREAKERS = frozenset({"а", "но", "однако"})
 _MAX_GAP_WORDS = 5          # words between NP and a negated predicate
@@ -187,8 +192,12 @@ def _negated_predicate_at(tokens: Sequence[str], i: int) -> bool:
         if tokens[j] in _MODAL and j + 2 < n and tokens[j + 1] == "быть" and _PASSIVE.fullmatch(tokens[j + 2]):
             return True
         return False
-    if token == "нельзя":
-        return i + 1 < n and tokens[i + 1] in _INFINITIVE
+    if token in _IMPOSSIBLE:
+        if i + 1 < n and tokens[i + 1] in _INFINITIVE:
+            return True                                        # «первопричину нельзя / невозможно установить»
+        return token == "невозможно" and i >= 1 and tokens[i - 1] in _INFINITIVE    # «… подтвердить невозможно»
+    if token in _REMAINED:
+        return i + 1 < n and _UNESTABLISHED.fullmatch(tokens[i + 1]) is not None   # «осталась неустановленной»
     # «первопричина выявлена не была»
     return bool(
         _PASSIVE.fullmatch(token) and i + 2 < n and tokens[i + 1] == "не" and tokens[i + 2] in _AUX
@@ -199,7 +208,7 @@ def _claim_negation_before(tokens: Sequence[str], starts: Set[int]) -> bool:
     """A: «не подтвердила (наличие) единую первопричину», «не позволила установить первопричину»."""
     n = len(tokens)
     for i, token in enumerate(tokens):
-        if token not in ("не", "нельзя"):
+        if token != "не" and token not in _IMPOSSIBLE:
             continue
         j = i + 1
         if token == "не" and j < n and tokens[j] in _AUX:
@@ -210,7 +219,7 @@ def _claim_negation_before(tokens: Sequence[str], starts: Set[int]) -> bool:
             end = j + 1
         elif token == "не" and tokens[j] in _MODAL and j + 1 < n and tokens[j + 1] in _INFINITIVE:
             end = j + 2
-        elif token == "нельзя" and tokens[j] in _INFINITIVE:
+        elif token in _IMPOSSIBLE and tokens[j] in _INFINITIVE:
             end = j + 1
         else:
             continue
@@ -304,15 +313,21 @@ _NUMBER = re.compile(r"\d{1,6}(?:[.,]\d{1,6})?")
 _PROBABILITY = re.compile(r"[01][.,]\d{1,6}")
 _PERCENT_WORD = re.compile(r"процент[а-я]{0,4}")
 
-# the subject of the claim: the diagnosis / report / assessment / method itself
+# the subject of the claim: the diagnosis / report itself ...
 _SUBJECT = re.compile(
-    r"(?:диагноз|диагностик|тест|тестирован|отчет|заключен|оценк|измерен|метод|методик|вывод)"
-    r"(?:а|ы|у|е|и|ом|ой|ию|ие|ия|ии|ов|ам|ами|ах|ем)?"
+    r"(?:диагноз|диагностик|тест|тестирован|отчет|заключен)(?:а|ы|у|е|и|ом|ой|ию|ие|ия|ии|ов|ам|ами|ах|ем)?"
     r"|(?:диагностическ|оценочн)(?:ий|ая|ое|ие|ого|ой|ому|им|ом|ую|их|ими|ые)"
 )
-_DIAGNOSIS_ONLY = re.compile(
-    r"(?:диагноз|диагностик|тест|тестирован|отчет|заключен)(?:а|ы|у|е|и|ом|ой|ию|ие|ия|ии|ов|ам|ами|ах|ем)?"
-    r"|диагностическ(?:ий|ая|ое|ие|ого|ой|ому|им|ом|ую|их|ими|ые)"
+# ... or an assessment / method / conclusion / measurement that is itself about the diagnosis
+# («метод диагностики», «оценка уровня»); «метод подстановки» and «достоверность корня» are not.
+_CONDITIONAL_SUBJECT = re.compile(
+    r"(?:оценк|измерен|метод|методик|вывод)(?:а|ы|у|е|и|ом|ой|ию|ие|ия|ии|ов|ам|ами|ах|ем)?"
+)
+_DIAGNOSIS_STRONG = re.compile(
+    r"(?:диагноз|диагностик|отчет)(?:а|ы|у|е|и|ом|ой|ию|ие|ия|ии|ов|ам|ами|ах|ем)?"
+)
+_DIAGNOSIS_WEAK = re.compile(
+    r"(?:тест|тестирован|заключен)(?:а|ы|у|е|и|ом|ой|ию|ие|ия|ии|ов|ам|ами|ах|ем)?"
 )
 _LEVEL_OBJECT = frozenset({"уровня", "знаний", "ученика", "подготовки"})
 _RESULT = re.compile(r"результат(?:а|ы|у|е|ом|ов|ам|ами|ах)?")
@@ -339,25 +354,47 @@ def _tech_follows(tokens: Sequence[str], i: int) -> bool:
     )
 
 
+def _subject_at(tokens: Sequence[str], j: int) -> bool:
+    token = tokens[j]
+    if _SUBJECT.fullmatch(token):
+        return True
+    if _CONDITIONAL_SUBJECT.fullmatch(token) and j + 1 < len(tokens):
+        nxt = tokens[j + 1]
+        return bool(
+            _SUBJECT.fullmatch(nxt) or nxt in _LEVEL_OBJECT
+            if token.startswith("оценк") else _SUBJECT.fullmatch(nxt)
+        )
+    return False
+
+
 def _subject_after(tokens: Sequence[str], i: int, max_words: int = 3) -> bool:
     for j in range(i + 1, min(len(tokens), i + 1 + max_words)):
         token = tokens[j]
         if not (_is_word(token) or _NUMBER.fullmatch(token)):
             return False
-        if _SUBJECT.fullmatch(token):
+        if _subject_at(tokens, j):
             return True
     return False
 
 
 def _diagnostic_subject_after(tokens: Sequence[str], i: int, max_words: int = 4) -> bool:
-    """«Точность диагностики», «Точность оценки уровня», «Уверенность в результате диагностики»."""
+    """«Точность диагностики», «Точность оценки уровня», «Уверенность в результатах теста 85%».
+
+    ``тест`` / ``тестирование`` / ``заключение`` alone are everyday words («уверенность при решении
+    тестов»): they count with a figure after the noun or a preceding «результат…».
+    """
+    saw_result = False
     for j in range(i + 1, min(len(tokens), i + 1 + max_words)):
         token = tokens[j]
         if not (_is_word(token) or _NUMBER.fullmatch(token)):
             return False
-        if _DIAGNOSIS_ONLY.fullmatch(token):
+        if _DIAGNOSIS_STRONG.fullmatch(token):
             return True
-        if re.fullmatch(r"оценк[а-я]{1,3}", token) and tokens[j + 1:j + 2] and tokens[j + 1] in _LEVEL_OBJECT:
+        if token.startswith("оценк") and j + 1 < len(tokens) and tokens[j + 1] in _LEVEL_OBJECT:
+            return True
+        if _RESULT.fullmatch(token):
+            saw_result = True
+        elif _DIAGNOSIS_WEAK.fullmatch(token) and (saw_result or _figure_after(tokens, i)):
             return True
     return False
 
@@ -367,7 +404,7 @@ def _subject_before(tokens: Sequence[str], i: int, max_between: int = 3) -> bool
         token = tokens[j]
         if not (_is_word(token) or _NUMBER.fullmatch(token)):
             return False
-        if _SUBJECT.fullmatch(token):
+        if _subject_at(tokens, j):
             return True
     return False
 
@@ -421,6 +458,11 @@ def _result_judged_before(tokens: Sequence[str], i: int) -> bool:
     return False
 
 
+def _event_nearby(tokens: Sequence[str], i: int) -> bool:
+    """«Достоверное событие» / «событие достоверно» is the probability term, not a claim."""
+    return any(re.fullmatch(r"событ[а-я]{1,4}", t) for t in tokens[max(0, i - 3):i + 4])
+
+
 def _reliability_in_sentence(tokens: Sequence[str]) -> bool:
     for i, token in enumerate(tokens):
         if _REL_NOUN.fullmatch(token):
@@ -433,12 +475,17 @@ def _reliability_in_sentence(tokens: Sequence[str]) -> bool:
             if _figure_after(tokens, i) or _figure_before(tokens, i):        # «надёжность 83%», «83% надёжности»
                 return True
         elif _REL_ADJ.fullmatch(token):
+            if _event_nearby(tokens, i):                       # «вероятность достоверного события равна 100%»
+                continue
             if _subject_before(tokens, i):                     # «Диагноз достоверен»
                 return True
             if _result_judged_before(tokens, i):               # «Результаты можно считать надёжными»
                 return True
             tech_subject = i >= 1 and _TECH.fullmatch(tokens[i - 1])
-            if _figure_after(tokens, i, limit=4) and not tech_subject:      # «Результат достоверен на 90%»
+            credibility = token.startswith(("достовер", "недостовер"))
+            if _figure_after(tokens, i, limit=4) and not tech_subject and (
+                not credibility or any(_RESULT.fullmatch(t) for t in tokens[max(0, i - 2):i])
+            ):                                                 # «Результат достоверен на 90%»
                 return True
         elif _SOFT_NOUN.fullmatch(token) and _diagnostic_subject_after(tokens, i):
             return True                                        # «Точность диагностики — 87%», «Уверенность в диагностике 85%»
@@ -462,14 +509,34 @@ def contains_retired_claim(text: Any) -> bool:
     return _has_class_equivalent(text) or _has_reliability_claim(text) or _has_root_cause_claim(text)
 
 
-def drop_retired_sentences(text: Any) -> Any:
-    """Plan prose without the sentences that make a reliability or root-cause claim.
+_SEGMENT_RE = re.compile(r"((?<=[.!?])\s+|\n+)")
+_SENTENCE_ONLY_RE = re.compile(r"((?<=[.!?])\s+)")
 
-    A class equivalent is NOT swept here: in the plan «в конце 7 класса изучают …» is a
-    curriculum reference.  Text without such a sentence is returned unchanged.
+
+def _drop_flagged_segments(text: str, splitter: "re.Pattern[str]") -> str:
+    parts = splitter.split(text)                       # segment, separator, segment, ...
+    segments, separators = parts[0::2], parts[1::2] + [""]
+    kept = [
+        segment + separator
+        for segment, separator in zip(segments, separators)
+        if not (_has_reliability_claim(segment) or _has_root_cause_claim(segment))
+    ]
+    return text if len(kept) == len(segments) else "".join(kept).rstrip()
+
+
+def drop_retired_sentences(text: Any) -> Any:
+    """Plan prose without the sentences / lines that make a reliability or root-cause claim.
+
+    Sentences and lines (bullets) are cut separately and re-joined with their original
+    separators, so one hit removes only its own line.  A claim that wraps over a line break is
+    caught by a second, sentence-only pass.  A class equivalent is NOT swept here: in the plan
+    «в конце 7 класса изучают …» is a curriculum reference.  Clean text is returned unchanged.
     """
     if not isinstance(text, str):
         return text
-    sentences = _SENTENCE_RE.split(text)
-    kept = [s for s in sentences if not (_has_reliability_claim(s) or _has_root_cause_claim(s))]
-    return text if len(kept) == len(sentences) else " ".join(kept).strip()
+    if not (_has_reliability_claim(text) or _has_root_cause_claim(text)):
+        return text
+    cleaned = _drop_flagged_segments(text, _SEGMENT_RE)
+    if _has_reliability_claim(cleaned) or _has_root_cause_claim(cleaned):
+        cleaned = _drop_flagged_segments(cleaned, _SENTENCE_ONLY_RE)
+    return cleaned
