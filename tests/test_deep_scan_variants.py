@@ -4,7 +4,9 @@
   DEEP_SCAN_CONFIRM_PROBES           a gap needs N wrong answers on different items
   DEEP_SCAN_TRIGGER_MODE             "importance" (current) | "hard_prereq"
 
-Defaults must reproduce the behaviour from before the flags existed.
+The shipped defaults are variant OC15 (offset 1.5, 2 confirmation probes, importance trigger;
+owner-approved 2026-10-12).  The pre-OC15 behaviour (offset 0, 1 probe) is selected explicitly
+by the tests that describe it.
 """
 import copy
 import random
@@ -77,15 +79,22 @@ def chains_of(answers, confirm=None, grade=8):
 
 # ── config: defaults and environment ──────────────────────────────────────────
 
-def test_flag_defaults_keep_the_current_behaviour(monkeypatch):
+def test_flag_defaults_are_variant_oc15(monkeypatch):
     for name in ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE"):
         monkeypatch.delenv(name, raising=False)
     cfg = Settings(_env_file=None)
-    assert cfg.deep_scan_probe_difficulty_offset == 0.0
-    assert cfg.deep_scan_confirm_probes == 1
-    assert cfg.deep_scan_trigger_mode == "importance"
+    assert cfg.deep_scan_probe_difficulty_offset == 1.5
+    assert cfg.deep_scan_confirm_probes == 2
+    assert cfg.deep_scan_trigger_mode == "importance"                  # unchanged by OC15
     assert cfg.deep_scan_importance_threshold == 8 and cfg.deep_scan_max_items == 6
     assert cfg.deep_scan_session_budget == 6
+
+
+def test_pre_oc15_behaviour_is_selectable_from_the_environment(monkeypatch):
+    monkeypatch.setenv("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "0.0")
+    monkeypatch.setenv("DEEP_SCAN_CONFIRM_PROBES", "1")
+    cfg = Settings(_env_file=None)
+    assert (cfg.deep_scan_probe_difficulty_offset, cfg.deep_scan_confirm_probes) == (0.0, 1)
 
 
 def test_flags_are_overridable_from_the_environment(monkeypatch):
@@ -170,7 +179,8 @@ def test_offset_never_touches_measurement_items(monkeypatch):
 
 # ── 2. confirmation by N wrong answers on different items ────────────────────
 
-def test_default_one_wrong_answer_is_a_gap_at_once():
+def test_one_probe_setting_makes_a_wrong_answer_a_gap_at_once(monkeypatch):
+    monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", 1, raising=False)   # pre-OC15 rule (default is 2)
     picked = []
     service = make_service({"B": ["B1"]}, picked)
     state = scanning_state("B", ["C"])
@@ -857,3 +867,14 @@ def test_answer_handling_leaves_complete_params_untouched(monkeypatch):
     seen = []
     answering_service(state, seen)._submit_answer_locked(session_id="sid", task_id="T", student_answer="1", time_ms=1)
     assert state.deep_scan_params is stored and seen == [stored]
+
+
+def test_a_new_session_freezes_the_oc15_defaults(monkeypatch):
+    for name in ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE",
+                 "DEEP_SCAN_IMPORTANCE_THRESHOLD", "DEEP_SCAN_SESSION_BUDGET", "DEEP_SCAN_MAX_ITEMS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(ss, "settings", Settings(_env_file=None))
+    state = SessionState(session_id="s", student_id="u", grade_level=8)
+    assert SessionService._scan_params(state) == {
+        "confirm_probes": 2, "probe_difficulty_offset": 1.5, "trigger_mode": "importance",
+        "importance_threshold": 8, "session_budget": 6, "max_items": 6}

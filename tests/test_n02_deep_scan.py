@@ -13,6 +13,16 @@ from src.domain.session_state import SessionState
 T0 = datetime(2026, 10, 1, 10, 0, 0)
 
 
+@pytest.fixture(autouse=True)
+def classic_scan_flags(monkeypatch):
+    """This module describes the scan engine where ONE wrong answer makes a gap and probes target
+    theta exactly.  The shipped defaults are variant OC15 (2 confirmation probes, offset 1.5), so
+    the classic flags are set explicitly (the OC15 behaviour is tested in test_deep_scan_variants)."""
+    from src.domain import session_service as ss
+    monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", 1, raising=False)
+    monkeypatch.setattr(ss.settings, "deep_scan_probe_difficulty_offset", 0.0, raising=False)
+
+
 def answer(skill, outcome, *, minute, deep=False, origin=None, step=None, task="T", aid=None):
     return NS(id=aid or f"a{minute:03d}", skill_id=skill, task_id=None, outcome=outcome,
               is_deep_scan=deep, phase="deep_scan" if deep else "navigation",

@@ -1296,8 +1296,9 @@ class SessionService:
                 return self._advance_topic(state, False)
             return self._next_deep_scan_task(state, scan)
 
-        # Incorrect.  With DEEP_SCAN_CONFIRM_PROBES = 1 (default) one wrong answer makes
-        # the skill a gap.  With N > 1 it must be wrong on N different items first: until
+        # Incorrect.  With the session's confirm_probes = 1 (DEEP_SCAN_CONFIRM_PROBES=1, the
+        # pre-OC15 rule) one wrong answer makes the skill a gap.  With N > 1 (default 2) it
+        # must be wrong on N different items first: until
         # then the same skill is probed again (another unused item, same target
         # difficulty); a correct answer on any of them closes the branch above.  When the
         # scan budget ends the skill first, it stays unconfirmed - not a gap.
@@ -1394,8 +1395,8 @@ class SessionService:
         """IRT-nearest unused task for a skill, any unused task, or None.
 
         Measurement items target theta.  A Deep Scan probe targets
-        theta - DEEP_SCAN_PROBE_DIFFICULTY_OFFSET (default 0: theta), i.e. easier items
-        for a positive offset (the session's frozen value, see ``_scan_params``);
+        theta - DEEP_SCAN_PROBE_DIFFICULTY_OFFSET (default 1.5, variant OC15; 0 = theta), i.e.
+        easier items for a positive offset (the session's frozen value, see ``_scan_params``);
         this is the only place the offset applies.  The target is clamped to the
         content API's target_b range ([-4, 4], same as the theta grid): theta near
         -4 minus a positive offset would otherwise get a 422 and break the session.

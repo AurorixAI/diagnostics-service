@@ -90,6 +90,9 @@ PROD_SETTINGS = {
     "DEEP_SCAN_SESSION_BUDGET": "6", "DEEP_SCAN_MAX_ITEMS": "6",
     "DEEP_SCAN_IMPORTANCE_THRESHOLD": "8", "MASTERY_THRESHOLD": "0.6",
 }
+# Deep Scan flags whose defaults live in the diagnostic-service Settings (variant OC15 since 2026-10-12);
+# not pinned here, only reported with the effective settings.
+VARIANT_FLAGS = ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE")
 TOKEN = "cat-sim-internal-token"
 EFFECTIVE_SETTINGS: Dict[str, Dict[str, Any]] = {}     # arm label -> settings reported by the workers
 
@@ -438,7 +441,10 @@ def _effective_settings(ctx, extra) -> Dict[str, Any]:
     """Settings as the worker's diagnostic-service Settings object actually holds them
     (PROD_SETTINGS + --setting overrides + every overridden key), not what the parent env says."""
     st = ctx["settings"]
-    keys = list(PROD_SETTINGS) + [k.upper() for k in dict(extra) if k.upper() not in PROD_SETTINGS]
+    # The Deep Scan variant flags are always reported: their defaults (variant OC15) are not pinned
+    # in PROD_SETTINGS, so a run without --setting must still show which values it actually used.
+    keys = list(PROD_SETTINGS) + [k for k in VARIANT_FLAGS if k not in PROD_SETTINGS]
+    keys += [k.upper() for k in dict(extra) if k.upper() not in keys]
     return {k: getattr(st, k.lower(), "<unknown setting>") for k in keys}
 
 

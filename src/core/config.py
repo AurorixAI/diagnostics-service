@@ -64,20 +64,24 @@ class Settings(BaseSettings):
     # total reaches this value.  The per-scan cap (deep_scan_max_items) still applies.
     deep_scan_session_budget: int = Field(default=6, ge=0)  # sweep 2026-10-07: largest value with accuracy within noise and +0.3 items
     # ── Deep Scan variants (DIAG-1 stage 2) ──────────────────────────────────
-    # Three independent switches; the defaults reproduce the behaviour from before
-    # they existed, item for item.  All are overridable from the environment.
+    # Three independent switches, all overridable from the environment.  The defaults are
+    # variant OC15 (owner-approved 2026-10-12): offset 1.5 + 2 confirmation probes, trigger
+    # mode unchanged.  Evidence: tools/sim_results/rootcause_stage2_summary.txt, 7 grades x
+    # n=1500, paired bootstrap vs the old defaults - false root-cause claims -1.3 pp pooled
+    # (G10 11.7% -> 4.6%), accuracy and test length unchanged.  The pre-OC15 behaviour is
+    # DEEP_SCAN_PROBE_DIFFICULTY_OFFSET=0.0 and DEEP_SCAN_CONFIRM_PROBES=1.
     #
     # DEEP_SCAN_PROBE_DIFFICULTY_OFFSET: a Deep Scan probe is the unused item whose
-    # IRT difficulty is nearest to b = theta - offset (1.0 -> easier probes).  Only
-    # Deep Scan probes are affected; measurement items still target theta.
-    deep_scan_probe_difficulty_offset: float = Field(default=0.0, allow_inf_nan=False)
+    # IRT difficulty is nearest to b = theta - offset (1.5 -> easier probes; 0 -> theta).
+    # Only Deep Scan probes are affected; measurement items still target theta.
+    deep_scan_probe_difficulty_offset: float = Field(default=1.5, allow_inf_nan=False)
     # DEEP_SCAN_CONFIRM_PROBES: a probed skill is declared a gap only after this many
     # wrong answers on different items of that skill.  A correct answer at any point
     # closes the branch (skill mastered).  A skill that runs out of unused items (or
     # of budget) before confirmation is NOT a gap; it is recorded as unconfirmed.
     # Every extra item counts toward deep_scan_max_items, the session budget and
-    # max_items exactly like a first probe.
-    deep_scan_confirm_probes: int = Field(default=1, ge=1)
+    # max_items exactly like a first probe.  1 = one wrong answer is a gap (pre-OC15 rule).
+    deep_scan_confirm_probes: int = Field(default=2, ge=1)
     # DEEP_SCAN_TRIGGER_MODE: which failed L3 starts a scan.
     #   "importance"  - L3 importance >= deep_scan_importance_threshold (current rule);
     #   "hard_prereq" - the failed L3 has at least one HARD prerequisite edge,
