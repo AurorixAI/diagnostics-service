@@ -8,9 +8,43 @@ rewrites a mathematical expression.
 from __future__ import annotations
 
 
+import ast
+import json
 import re
 from fractions import Fraction
 from typing import Optional
+
+# A stored answer longer than this is never parsed as a wrapped value.
+_MAX_WRAPPED_ANSWER_CHARS = 2000
+
+
+def display_student_answer(raw: object) -> object:
+    """The answer text a report shows, without changing the (append-only) journal row.
+
+    Some historical rows hold the answer as the repr or JSON of a transport object,
+    ``{'text': '$x \\in [1; +\\infty)$', 'is_correct': False}``.  When the value is such a dict with a
+    string ``text``, that text is returned; anything else (plain answers, set notation such as
+    ``{1; 2}`` or ``{x | x>0}``, malformed or oversized values, non-strings) comes back unchanged.
+    Only ``json.loads`` and ``ast.literal_eval`` are used - nothing is evaluated.
+    """
+    if not isinstance(raw, str):
+        return raw
+    text = raw.strip()
+    if not text.startswith("{") or len(text) > _MAX_WRAPPED_ANSWER_CHARS:
+        return raw
+    value: object = None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        try:
+            value = ast.literal_eval(text)
+        except Exception:                       # SyntaxError, ValueError, MemoryError, RecursionError, ...
+            return raw
+    if isinstance(value, dict):
+        inner = value.get("text")
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip()
+    return raw
 
 def answer_value_key(value: object) -> str:
     text = str(value or "").strip()

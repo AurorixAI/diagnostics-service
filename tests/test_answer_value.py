@@ -5,7 +5,7 @@ from fractions import Fraction
 import pytest
 
 from src.domain.answer_evaluator import AnswerEvaluator
-from src.domain.answer_value import answer_value_key, answers_equivalent, exact_number
+from src.domain.answer_value import answer_value_key, answers_equivalent, display_student_answer, exact_number
 
 
 @pytest.mark.parametrize("first, second", [
@@ -87,3 +87,38 @@ def test_mcq_display_wrapped_distractor_is_recorded_as_distractor():
     )
 
     assert AnswerEvaluator().evaluate(task, "$1$") == (0.0, "distractor")
+
+
+LATEX = r"$y = 2 \pm \sqrt{x - 1}$, $x \in [1; +\infty)$"
+
+
+def test_display_answer_unwraps_a_python_repr_dict_with_escaped_backslashes():
+    stored = repr({"text": LATEX, "is_correct": False})                    # backslashes doubled, quotes single
+    assert "\\\\pm" in stored and stored.startswith("{'text'")
+    assert display_student_answer(stored) == LATEX
+    assert display_student_answer("  " + stored + "\n") == LATEX              # surrounding blanks
+
+
+def test_display_answer_unwraps_a_json_dict():
+    import json
+    assert display_student_answer(json.dumps({"text": LATEX, "is_correct": True})) == LATEX
+    assert display_student_answer('{"text": "x = 5"}') == "x = 5"
+
+
+@pytest.mark.parametrize("raw", [
+    "x = 5", "$\\frac{1}{2}$", "", "   ", "{1; 2}", "{x | x>0}", "{1, 2, 3}", "{}", "{-3; 5}", "{x \\in R}",
+    "{'text': 'unterminated", "{'text': }", "{'a': 1}", "{'text': 5}", "{'text': ''}", "{'text': None}",
+    '{"text": 7}', "[{'text': 'x'}]", "x {'text': 'y'}",
+    "{'text': __import__('os').getcwd()}",                           # never evaluated
+    "{'text': 'a'} + {'text': 'b'}",
+])
+def test_display_answer_leaves_everything_else_unchanged(raw):
+    assert display_student_answer(raw) == raw
+
+
+def test_display_answer_passes_non_strings_through_and_caps_the_input():
+    assert display_student_answer(None) is None and display_student_answer(5) == 5
+    long_dict = repr({"text": "x" * 3000, "is_correct": False})
+    assert len(long_dict) > 2000 and display_student_answer(long_dict) == long_dict
+    nested = "{'text': " + "[" * 500 + "1" + "]" * 500 + "}"                 # deep nesting must not raise
+    assert display_student_answer(nested) == nested

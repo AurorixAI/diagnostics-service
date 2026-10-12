@@ -31,7 +31,7 @@ from src.core.gemini_client import call_gemini
 from src.models.diag_models import DiagReport
 from src.repositories.diag_repo import DiagReportRepository
 from src.repositories.knowledge_repo import KnowledgeRepository
-from .answer_value import answer_value_key
+from .answer_value import answer_value_key, display_student_answer
 from .level_policy import (
     LEGACY_STATUS,
     STATUS_LABEL_RU,
@@ -131,7 +131,9 @@ ERROR_PATTERNS_VERSION = 4
 # is never called a confirmed root cause: ``breakpoint_evidence`` is "confirmed" only when a
 # stored-link chain sits at the breakpoint, the summary / AI prompt / plan evidence follow the
 # same rule.  Schema-5 reports built before this overstated the confirmation.
-REPORT_SCHEMA_VERSION = 6
+# 7 (N03a): the shown student answer is the answer TEXT (historical rows stored a dict repr
+# ``{'text': …, 'is_correct': False}``); see ``answer_value.display_student_answer``.
+REPORT_SCHEMA_VERSION = 7
 
 
 def _distractor_value(distractor: Any) -> str:
@@ -458,10 +460,14 @@ def _build_error_patterns(
     for a in selected:
         info = skill_map.get(a.skill_id, {})
         skill_name_ru = info.get("name_ru") or a.skill_id
-        raw_answer = (a.student_answer or "").strip()
+        stored_answer = (a.student_answer or "").strip()
         # Sanitize internal markers → None so frontend renders "—"
-        if raw_answer in ("x_wrong_x", "wrong", ""):
+        if stored_answer in ("x_wrong_x", "wrong", ""):
             raw_answer = None
+        else:
+            # historical rows hold a transport dict repr ({'text': '…', 'is_correct': False}):
+            # the report shows the answer text; the journal row itself is never touched
+            raw_answer = display_student_answer(stored_answer)
 
         # ── Enrich from content-service ─────────────────────────────────────
         question_text: Optional[str] = None
@@ -537,7 +543,7 @@ def _build_error_patterns(
             # is unique; never attribute another answer's context to this row.
             matches = [p for p in previous_patterns if (
                 p.get('answer_id') == str(a.id) if p.get('answer_id') else
-                p.get('task_id') == a.task_id and p.get('student_answer') == raw_answer
+                p.get('task_id') == a.task_id and p.get('student_answer') in (stored_answer, raw_answer)
             )]
             if len(matches) == 1:
                 from copy import deepcopy
@@ -689,7 +695,9 @@ def _chain_step(a, skill_map, ep_by_task, grade_level) -> Dict[str, Any]:
         "eval_category": a.eval_category,
         "question_text": ep.get("question_text"),
         "question_latex": ep.get("question_latex"),
-        "student_answer": ep.get("student_answer") or (a.student_answer if a.student_answer not in ("x_wrong_x", "wrong") else "—"),
+        "student_answer": ep.get("student_answer") or (
+            display_student_answer(a.student_answer) if a.student_answer not in ("x_wrong_x", "wrong") else "—"
+        ),
         "student_answer_latex": ep.get("student_answer_latex"),
         "correct_answer": ep.get("correct_answer"),
         "correct_answer_latex": ep.get("correct_answer_latex"),
@@ -1831,8 +1839,7 @@ def generate_and_save_report(
         for i, a in enumerate(selected_wrong, 1):
             name = skill_map.get(a.skill_id, {}).get("name_ru", a.skill_id)
             ans = (a.student_answer or "").strip()
-            if ans in ("x_wrong_x", "wrong", ""):
-                ans = "—"
+            ans = "—" if ans in ("x_wrong_x", "wrong", "") else display_student_answer(ans)
             wrong_lines.append(f"  [{i}] {name}: ответ={repr(ans)}, категория={a.eval_category}")
         wrong_block = "\n".join(wrong_lines) or "  (нет неверных ответов)"
 
