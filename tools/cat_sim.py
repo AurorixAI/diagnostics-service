@@ -91,6 +91,7 @@ PROD_SETTINGS = {
     "DEEP_SCAN_IMPORTANCE_THRESHOLD": "8", "MASTERY_THRESHOLD": "0.6",
 }
 TOKEN = "cat-sim-internal-token"
+EFFECTIVE_SETTINGS: Dict[str, Dict[str, Any]] = {}     # arm label -> settings reported by the workers
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bootstrap: content-service app and diagnostic-service share the package name
@@ -352,6 +353,12 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
     if gap:
         gt = anc(gap, "L2")
         gap_topic_named = any(e["skill_id"] == gt for e in weak_blk + crit_blk)
+    confirmed = list(snap.get("confirmed_gaps") or [])
+    # some skill of the injected L3 G (G itself or any of its L4) is a confirmed gap in the session
+    confirmed_gap_is_G = (any(l3_of(nodes, c_) == gap for c_ in confirmed) if gap else None)
+    ds_items = int(snap.get("deep_scan_items_total") or 0)
+    budget = int(ctx["ss"].settings.deep_scan_session_budget)
+    max_items = int(ctx["ss"].settings.max_items)
     return {
         "i": i, "theta": theta, "gap": gap, "theta_hat": th_hat, "se": se,
         "cat_true": cls_true["category"], "cat_hat": cls_hat["category"],
@@ -365,7 +372,10 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
         "ds_origin_l3": sorted({l3_of(nodes, a_.deep_scan_origin_skill_id or "") or "?" for a_ in rows if a_.is_deep_scan}), "fp": fp, "key_mismatch": mismatches,
         "weak_entries": entries, "coh_entries": coh_entries, "weak_sessions": int(entries > 0),
         "coh_sessions": int(entries > 0 and coh_entries == entries), "gap_topic_named": gap_topic_named,
-        "confirmed_gaps": list(snap.get("confirmed_gaps") or []),
+        "confirmed_gaps": confirmed, "confirmed_gap_is_G": confirmed_gap_is_G,
+        "scan_triggered": ds_items > 0,                              # >=1 Deep Scan item was served
+        "ds_budget_exhausted": ds_items >= budget,                   # session Deep Scan budget spent
+        "hit_max_items": db.stop_reason == "max_items_reached" or int(db.items_answered) >= max_items,
     }
 
 
@@ -389,7 +399,15 @@ def _worker(args):
     out = []
     for i in idxs:
         out.append(simulate_student(ctx, i, seed, grade, gap_list, gap_fraction, gap_fail_p, fail_cache, depth))
-    return out
+    return out, _effective_settings(ctx, extra)
+
+
+def _effective_settings(ctx, extra) -> Dict[str, Any]:
+    """Settings as the worker's diagnostic-service Settings object actually holds them
+    (PROD_SETTINGS + --setting overrides + every overridden key), not what the parent env says."""
+    st = ctx["settings"]
+    keys = list(PROD_SETTINGS) + [k.upper() for k in dict(extra) if k.upper() not in PROD_SETTINGS]
+    return {k: getattr(st, k.lower(), "<unknown setting>") for k in keys}
 
 
 def run_arm(label: str, db_url: str, truth_url: Optional[str], a) -> List[Dict[str, Any]]:
@@ -401,8 +419,11 @@ def run_arm(label: str, db_url: str, truth_url: Optional[str], a) -> List[Dict[s
             for s in range(0, a.n_students, chunk)]
     t0, res = time.time(), []
     with mp.get_context("spawn").Pool(a.workers) as pool:
-        for k, part in enumerate(pool.imap_unordered(_worker, jobs), 1):
+        for k, (part, eff) in enumerate(pool.imap_unordered(_worker, jobs), 1):
             res.extend(part)
+            EFFECTIVE_SETTINGS.setdefault(label, eff)
+            if EFFECTIVE_SETTINGS[label] != eff:
+                raise RuntimeError(f"workers disagree on settings: {EFFECTIVE_SETTINGS[label]} vs {eff}")
             if k % 10 == 0 or k == len(jobs):
                 print(f"  [{label}] {len(res)}/{a.n_students} students, {time.time() - t0:.0f}s", flush=True)
     res.sort(key=lambda r: r["i"])
@@ -416,8 +437,24 @@ def _arr(recs, key, dtype=float):
     return np.array([r[key] for r in recs], dtype=dtype)
 
 
+def _flag(recs, key, fallback=None) -> np.ndarray:
+    """0/1 array of a boolean per-student field (None -> 0); fallback(r) for records of older runs."""
+    def one(r):
+        v = r.get(key)
+        if v is None and fallback is not None:
+            v = fallback(r)
+        return 1.0 if v else 0.0
+    return np.array([one(r) for r in recs], float)
+
+
 def per_student_matrix(recs) -> Dict[str, np.ndarray]:
     return {
+        # Stage-0 root-cause metrics (older result files lack some fields; derived where possible)
+        "gap_topic_named": _flag(recs, "gap_topic_named"),
+        "confirmed_gap_is_G": _flag(recs, "confirmed_gap_is_G"),
+        "scan_triggered": _flag(recs, "scan_triggered", lambda r: r["ds_items"] > 0),
+        "ds_budget_exhausted": _flag(recs, "ds_budget_exhausted"),
+        "hit_max_items": _flag(recs, "hit_max_items", lambda r: r["stop"] == "max_items_reached"),
         "acc_cat": np.array([r["cat_true"] == r["cat_hat"] for r in recs], float),
         "acc_status": np.array([r["status_true"] == r["status_hat"] for r in recs], float),
         "sq_err": (_arr(recs, "theta_hat") - _arr(recs, "theta")) ** 2,
@@ -445,7 +482,10 @@ def summarize(recs) -> Dict[str, Any]:
         "acc_category_gap": m["acc_cat"][g].mean() if g.any() else None,
         "acc_category_nogap": m["acc_cat"][~g].mean() if (~g).any() else None,
         "detect_by_gap": {
-            k: {t: float(np.mean([r[t] for r in recs if r["gap"] == k])) for t in ("detected", "cause", "named")}
+            k: {**{t: float(np.mean([r[t] for r in recs if r["gap"] == k])) for t in ("detected", "cause", "named")},
+                **{t: float(np.mean([bool(r.get(t)) for r in recs if r["gap"] == k]))
+                   for t in ("gap_topic_named", "confirmed_gap_is_G", "scan_triggered")},
+                "n": sum(1 for r in recs if r["gap"] == k)}
             for k in sorted({r["gap"] for r in recs if r["gap"]})},
         "acc_status5": m["acc_status"].mean(),
         "rmse_theta": math.sqrt(m["sq_err"].mean()), "bias_theta": m["err"].mean(),
@@ -457,6 +497,21 @@ def summarize(recs) -> Dict[str, Any]:
         "detect_cause": m["cause"][g].mean() if g.any() else None,
         "detect_named": m["named"][g].mean() if g.any() else None,
         "bg_chain_nogap": m["fp"][~g].mean() if (~g).any() else None,
+        # stage-0 metrics: gap_topic_named = report names the gap L3's L2 topic (gap students);
+        # confirmed_gap_is_G = a skill of the gap L3 is in confirmed_gaps (gap students);
+        # fp_nogap = gap-free students whose chain root lies in the candidate gap-L3 set (cf. detect_*)
+        "gap_topic_named": m["gap_topic_named"][g].mean() if g.any() else None,
+        "confirmed_gap_is_G": m["confirmed_gap_is_G"][g].mean() if g.any() else None,
+        "fp_nogap": m["fp"][~g].mean() if (~g).any() else None,
+        "scan_triggered_gap": m["scan_triggered"][g].mean() if g.any() else None,
+        "scan_triggered_nogap": m["scan_triggered"][~g].mean() if (~g).any() else None,
+        "ds_items_mean_gap": m["ds_items"][g].mean() if g.any() else None,
+        "ds_items_mean_nogap": m["ds_items"][~g].mean() if (~g).any() else None,
+        "ds_items_mean_if_triggered": (m["ds_items"][m["scan_triggered"] > 0].mean()
+                                       if (m["scan_triggered"] > 0).any() else None),
+        "ds_budget_exhausted": m["ds_budget_exhausted"].mean(),
+        "ds_budget_exhausted_gap": m["ds_budget_exhausted"][g].mean() if g.any() else None,
+        "hit_max_items": m["hit_max_items"].mean(),
         "coherent_session_share": float(m["coh_sessions"].sum() / max(1, m["weak_sessions"].sum())),
         "coherent_entry_share": float(m["coh_entries"].sum() / max(1, m["weak_entries"].sum())),
         "sessions_with_weak_pct": 100 * float(m["weak_sessions"].mean()),
@@ -470,6 +525,7 @@ def paired_bootstrap(ra, rb, n_boot=2000, seed=12345) -> Dict[str, Any]:
     """B - A with 95% percentile CI, resampling students (same index in both arms)."""
     assert [r["i"] for r in ra] == [r["i"] for r in rb]
     A, B = per_student_matrix(ra), per_student_matrix(rb)
+    new_fields = all("ds_budget_exhausted" in r and "confirmed_gap_is_G" in r for r in (ra[0], rb[0]))
     n = len(ra)
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, n, (n_boot, n))
@@ -510,8 +566,20 @@ def paired_bootstrap(ra, rb, n_boot=2000, seed=12345) -> Dict[str, Any]:
         mean_metric("detect_root", "detected", gi, gidx)
         mean_metric("detect_cause", "cause", gi, gidx)
         mean_metric("detect_named", "named", gi, gidx)
+        mean_metric("gap_topic_named", "gap_topic_named", gi, gidx)
+        mean_metric("ds_items_gap", "ds_items", gi, gidx)
+        if new_fields:
+            mean_metric("confirmed_gap_is_G", "confirmed_gap_is_G", gi, gidx)
+            mean_metric("scan_triggered_gap", "scan_triggered", gi, gidx)
+            mean_metric("ds_budget_exhausted_gap", "ds_budget_exhausted", gi, gidx)
     if nidx is not None:
         mean_metric("bg_chain_nogap", "fp", ngi, nidx)
+        mean_metric("fp_nogap", "fp", ngi, nidx)
+        mean_metric("scan_triggered_nogap", "scan_triggered", ngi, nidx)
+        mean_metric("ds_items_nogap", "ds_items", ngi, nidx)
+    if new_fields:      # fields recorded only by runs made after the stage-0 change
+        mean_metric("ds_budget_exhausted", "ds_budget_exhausted")
+        mean_metric("hit_max_items", "hit_max_items")
     for name, num, den in (("coherent_session_share", "coh_sessions", "weak_sessions"),
                            ("coherent_entry_share", "coh_entries", "weak_entries")):
         ra_, rb_ = A[num].sum() / max(1, A[den].sum()), B[num].sum() / max(1, B[den].sum())
@@ -534,7 +602,10 @@ def print_summary(label: str, s: Dict[str, Any]) -> None:
     print(f"[{label}] n={s['n']} (gap={s['n_gap']}) acc3={f(s['acc_category'])} acc5={f(s['acc_status5'])} "
           f"rmse={f(s['rmse_theta'])} bias={f(s['bias_theta'])} len={f(s['len_mean'],2)}/p90={f(s['len_p90'],0)} "
           f"cover={f(s['covered_all_pct'],1)}% ds={f(s['deep_scan_items_mean'],2)} "
-          f"detect={f(s['detect_root'])} cause={f(s['detect_cause'])} named={f(s['detect_named'])} bgchain={f(s['bg_chain_nogap'])} "
+          f"detect={f(s['detect_root'])} cause={f(s['detect_cause'])} named={f(s['detect_named'])} fp={f(s['fp_nogap'])} "
+          f"topic_named={f(s['gap_topic_named'])} conf_is_G={f(s['confirmed_gap_is_G'])} "
+          f"scan(gap/nogap)={f(s['scan_triggered_gap'],2)}/{f(s['scan_triggered_nogap'],2)} "
+          f"budget_exh={f(s['ds_budget_exhausted'],2)} max_items={f(s['hit_max_items'],2)} "
           f"coh_sess={s['coherent_session_share']:.3f} coh_entry={s['coherent_entry_share']:.3f} "
           f"keymis={s['key_mismatch_items']} stops={s['stop_reasons']}")
 
@@ -669,7 +740,7 @@ def main() -> None:
 
     arms: Dict[str, Any] = {}
     out: Dict[str, Any] = {"args": {k: str(v) for k, v in vars(a).items() if k != "content_db_url"},
-                           "settings": {k: os.environ.get(k, v) for k, v in PROD_SETTINGS.items()}, "arms": arms}
+                           "settings": None, "arms": arms}
     scratch_url = None
     try:
         truth = a.truth_db_url
@@ -694,7 +765,8 @@ def main() -> None:
             print(f"gap L3 candidates (tasks in all arms): {len(a.gap_l3)}", flush=True)
         for label, url in (("A", a.content_db_url),) + ((("B", scratch_url),) if scratch_url else ()):
             recs = run_arm(label, url, truth, a)
-            arms[label] = {"summary": summarize(recs), "students": recs}
+            arms[label] = {"summary": summarize(recs), "students": recs, "settings": EFFECTIVE_SETTINGS.get(label)}
+            out["settings"] = EFFECTIVE_SETTINGS.get(label)        # effective, as read back from the workers
             print_summary(label, arms[label]["summary"])
         if "B" in arms:
             out["paired_bootstrap_B_minus_A"] = paired_bootstrap(arms["A"]["students"], arms["B"]["students"], a.n_boot)

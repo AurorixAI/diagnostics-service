@@ -1,0 +1,369 @@
+{
+ "tag": "base",
+ "grades": {
+  "5": {
+   "summary": {
+    "acc_category": 0.844,
+    "rmse_theta": 0.38309001201286874,
+    "len_mean": 35.272666666666666,
+    "gap_topic_named": 0.5498614958448753,
+    "detect_named": 0.11911357340720222,
+    "detect_cause": 0.004155124653739612,
+    "detect_root": 0.002770083102493075,
+    "confirmed_gap_is_G": 0.15373961218836565,
+    "scan_triggered_gap": 0.9833795013850416,
+    "scan_triggered_nogap": 0.9691516709511568,
+    "fp_nogap": 0.002570694087403599,
+    "ds_budget_exhausted": 0.5226666666666666,
+    "hit_max_items": 0.37666666666666665
+   },
+   "by_class": {
+    "typical": {
+     "cause": 0.0,
+     "named": 0.036414565826330535,
+     "root": 0.0,
+     "conf_is_G": 0.047619047619047616,
+     "topic_named": 0.5770308123249299,
+     "scan": 0.988795518207283,
+     "n": 357
+    },
+    "dependant": {
+     "cause": 0.00821917808219178,
+     "named": 0.2,
+     "root": 0.005479452054794521,
+     "conf_is_G": 0.25753424657534246,
+     "topic_named": 0.5232876712328767,
+     "scan": 0.9780821917808219,
+     "n": 365
+    }
+   },
+   "runtime_s": 101.2,
+   "settings": {
+    "MAX_ITEMS": 42,
+    "WARMUP_ITEMS": 5,
+    "MIN_ITEMS": 12,
+    "SE_THRESHOLD": 0.3,
+    "MIN_SECTION_COVERAGE": 5,
+    "CLASSIFICATION_MIN_ITEMS": 20,
+    "CLASSIFICATION_SE_THRESHOLD": 0.4,
+    "CLASSIFICATION_CONFIDENCE_THRESHOLD": 0.9,
+    "DEEP_SCAN_SESSION_BUDGET": 6,
+    "DEEP_SCAN_MAX_ITEMS": 6,
+    "DEEP_SCAN_IMPORTANCE_THRESHOLD": 8,
+    "MASTERY_THRESHOLD": 0.6
+   }
+  },
+  "6": {
+   "summary": {
+    "acc_category": 0.852,
+    "rmse_theta": 0.3751077604253552,
+    "len_mean": 35.766,
+    "gap_topic_named": 0.6011080332409973,
+    "detect_named": 0.07617728531855955,
+    "detect_cause": 0.00554016620498615,
+    "detect_root": 0.002770083102493075,
+    "confirmed_gap_is_G": 0.1038781163434903,
+    "scan_triggered_gap": 0.9889196675900277,
+    "scan_triggered_nogap": 0.9884318766066839,
+    "fp_nogap": 0.0,
+    "ds_budget_exhausted": 0.85,
+    "hit_max_items": 0.38466666666666666
+   },
+   "by_class": {
+    "typical": {
+     "cause": 0.0,
+     "named": 0.014005602240896359,
+     "root": 0.0,
+     "conf_is_G": 0.022408963585434174,
+     "topic_named": 0.5434173669467787,
+     "scan": 0.9859943977591037,
+     "n": 357
+    },
+    "dependant": {
+     "cause": 0.010958904109589041,
+     "named": 0.136986301369863,
+     "root": 0.005479452054794521,
+     "conf_is_G": 0.18356164383561643,
+     "topic_named": 0.6575342465753424,
+     "scan": 0.9917808219178083,
+     "n": 365
+    }
+   },
+   "runtime_s": 101.2,
+   "settings": {
+    "MAX_ITEMS": 42,
+    "WARMUP_ITEMS": 5,
+    "MIN_ITEMS": 12,
+    "SE_THRESHOLD": 0.3,
+    "MIN_SECTION_COVERAGE": 5,
+    "CLASSIFICATION_MIN_ITEMS": 20,
+    "CLASSIFICATION_SE_THRESHOLD": 0.4,
+    "CLASSIFICATION_CONFIDENCE_THRESHOLD": 0.9,
+    "DEEP_SCAN_SESSION_BUDGET": 6,
+    "DEEP_SCAN_MAX_ITEMS": 6,
+    "DEEP_SCAN_IMPORTANCE_THRESHOLD": 8,
+    "MASTERY_THRESHOLD": 0.6
+   }
+  },
+  "7": {
+   "summary": {
+    "acc_category": 0.85,
+    "rmse_theta": 0.3650652659933016,
+    "len_mean": 36.378,
+    "gap_topic_named": 0.7673130193905817,
+    "detect_named": 0.08587257617728532,
+    "detect_cause": 0.008310249307479225,
+    "detect_root": 0.00554016620498615,
+    "confirmed_gap_is_G": 0.10249307479224377,
+    "scan_triggered_gap": 0.945983379501385,
+    "scan_triggered_nogap": 0.9318766066838047,
+    "fp_nogap": 0.005141388174807198,
+    "ds_budget_exhausted": 0.7333333333333333,
+    "hit_max_items": 0.4126666666666667
+   },
+   "by_class": {
+    "typical": {
+     "cause": 0.0,
+     "named": 0.0700280112044818,
+     "root": 0.0,
+     "conf_is_G": 0.08123249299719888,
+     "topic_named": 0.9607843137254902,
+     "scan": 0.938375350140056,
+     "n": 357
+    },
+    "dependant": {
+     "cause": 0.01643835616438356,
+     "named": 0.10136986301369863,
+     "root": 0.010958904109589041,
+     "conf_is_G": 0.1232876712328767,
+     "topic_named": 0.5780821917808219,
+     "scan": 0.9534246575342465,
+     "n": 365
+    }
+   },
+   "runtime_s": 104.0,
+   "settings": {
+    "MAX_ITEMS": 42,
+    "WARMUP_ITEMS": 5,
+    "MIN_ITEMS": 12,
+    "SE_THRESHOLD": 0.3,
+    "MIN_SECTION_COVERAGE": 5,
+    "CLASSIFICATION_MIN_ITEMS": 20,
+    "CLASSIFICATION_SE_THRESHOLD": 0.4,
+    "CLASSIFICATION_CONFIDENCE_THRESHOLD": 0.9,
+    "DEEP_SCAN_SESSION_BUDGET": 6,
+    "DEEP_SCAN_MAX_ITEMS": 6,
+    "DEEP_SCAN_IMPORTANCE_THRESHOLD": 8,
+    "MASTERY_THRESHOLD": 0.6
+   }
+  },
+  "8": {
+   "summary": {
+    "acc_category": 0.8366666666666667,
+    "rmse_theta": 0.37975817538026596,
+    "len_mean": 36.940666666666665,
+    "gap_topic_named": 0.8476454293628809,
+    "detect_named": 0.2299168975069252,
+    "detect_cause": 0.03185595567867036,
+    "detect_root": 0.019390581717451522,
+    "confirmed_gap_is_G": 0.3074792243767313,
+    "scan_triggered_gap": 0.945983379501385,
+    "scan_triggered_nogap": 0.9280205655526992,
+    "fp_nogap": 0.011568123393316195,
+    "ds_budget_exhausted": 0.8166666666666667,
+    "hit_max_items": 0.454
+   },
+   "by_class": {
+    "typical": {
+     "cause": 0.0,
+     "named": 0.0028011204481792717,
+     "root": 0.0,
+     "conf_is_G": 0.01680672268907563,
+     "topic_named": 0.7843137254901961,
+     "scan": 0.9187675070028011,
+     "n": 357
+    },
+    "dependant": {
+     "cause": 0.06301369863013699,
+     "named": 0.4520547945205479,
+     "root": 0.038356164383561646,
+     "conf_is_G": 0.5917808219178082,
+     "topic_named": 0.9095890410958904,
+     "scan": 0.9726027397260274,
+     "n": 365
+    }
+   },
+   "runtime_s": 107.5,
+   "settings": {
+    "MAX_ITEMS": 42,
+    "WARMUP_ITEMS": 5,
+    "MIN_ITEMS": 12,
+    "SE_THRESHOLD": 0.3,
+    "MIN_SECTION_COVERAGE": 5,
+    "CLASSIFICATION_MIN_ITEMS": 20,
+    "CLASSIFICATION_SE_THRESHOLD": 0.4,
+    "CLASSIFICATION_CONFIDENCE_THRESHOLD": 0.9,
+    "DEEP_SCAN_SESSION_BUDGET": 6,
+    "DEEP_SCAN_MAX_ITEMS": 6,
+    "DEEP_SCAN_IMPORTANCE_THRESHOLD": 8,
+    "MASTERY_THRESHOLD": 0.6
+   }
+  },
+  "9": {
+   "summary": {
+    "acc_category": 0.8353333333333334,
+    "rmse_theta": 0.3817266595255725,
+    "len_mean": 37.014,
+    "gap_topic_named": 0.7631578947368421,
+    "detect_named": 0.09695290858725762,
+    "detect_cause": 0.0,
+    "detect_root": 0.0,
+    "confirmed_gap_is_G": 0.13988919667590027,
+    "scan_triggered_gap": 0.945983379501385,
+    "scan_triggered_nogap": 0.9383033419023136,
+    "fp_nogap": 0.0,
+    "ds_budget_exhausted": 0.5933333333333334,
+    "hit_max_items": 0.4513333333333333
+   },
+   "by_class": {
+    "typical": {
+     "cause": 0.0,
+     "named": 0.0,
+     "root": 0.0,
+     "conf_is_G": 0.0,
+     "topic_named": 0.7619047619047619,
+     "scan": 0.9355742296918768,
+     "n": 357
+    },
+    "dependant": {
+     "cause": 0.0,
+     "named": 0.1917808219178082,
+     "root": 0.0,
+     "conf_is_G": 0.27671232876712326,
+     "topic_named": 0.7643835616438356,
+     "scan": 0.9561643835616438,
+     "n": 365
+    }
+   },
+   "runtime_s": 105.9,
+   "settings": {
+    "MAX_ITEMS": 42,
+    "WARMUP_ITEMS": 5,
+    "MIN_ITEMS": 12,
+    "SE_THRESHOLD": 0.3,
+    "MIN_SECTION_COVERAGE": 5,
+    "CLASSIFICATION_MIN_ITEMS": 20,
+    "CLASSIFICATION_SE_THRESHOLD": 0.4,
+    "CLASSIFICATION_CONFIDENCE_THRESHOLD": 0.9,
+    "DEEP_SCAN_SESSION_BUDGET": 6,
+    "DEEP_SCAN_MAX_ITEMS": 6,
+    "DEEP_SCAN_IMPORTANCE_THRESHOLD": 8,
+    "MASTERY_THRESHOLD": 0.6
+   }
+  },
+  "10": {
+   "summary": {
+    "acc_category": 0.8333333333333334,
+    "rmse_theta": 0.38734950830658826,
+    "len_mean": 37.146,
+    "gap_topic_named": 0.6717451523545707,
+    "detect_named": 0.13573407202216067,
+    "detect_cause": 0.1260387811634349,
+    "detect_root": 0.08725761772853186,
+    "confirmed_gap_is_G": 0.13573407202216067,
+    "scan_triggered_gap": 0.9986149584487535,
+    "scan_triggered_nogap": 0.9974293059125964,
+    "fp_nogap": 0.12210796915167095,
+    "ds_budget_exhausted": 0.974,
+    "hit_max_items": 0.4266666666666667
+   },
+   "by_class": {
+    "typical": {
+     "cause": 0.0,
+     "named": 0.0196078431372549,
+     "root": 0.0,
+     "conf_is_G": 0.0196078431372549,
+     "topic_named": 0.5574229691876751,
+     "scan": 1.0,
+     "n": 357
+    },
+    "dependant": {
+     "cause": 0.2493150684931507,
+     "named": 0.2493150684931507,
+     "root": 0.1726027397260274,
+     "conf_is_G": 0.2493150684931507,
+     "topic_named": 0.7835616438356164,
+     "scan": 0.9972602739726028,
+     "n": 365
+    }
+   },
+   "runtime_s": 111.8,
+   "settings": {
+    "MAX_ITEMS": 42,
+    "WARMUP_ITEMS": 5,
+    "MIN_ITEMS": 12,
+    "SE_THRESHOLD": 0.3,
+    "MIN_SECTION_COVERAGE": 5,
+    "CLASSIFICATION_MIN_ITEMS": 20,
+    "CLASSIFICATION_SE_THRESHOLD": 0.4,
+    "CLASSIFICATION_CONFIDENCE_THRESHOLD": 0.9,
+    "DEEP_SCAN_SESSION_BUDGET": 6,
+    "DEEP_SCAN_MAX_ITEMS": 6,
+    "DEEP_SCAN_IMPORTANCE_THRESHOLD": 8,
+    "MASTERY_THRESHOLD": 0.6
+   }
+  },
+  "11": {
+   "summary": {
+    "acc_category": 0.8313333333333334,
+    "rmse_theta": 0.3918841430051651,
+    "len_mean": 37.26866666666667,
+    "gap_topic_named": 0.7894736842105263,
+    "detect_named": 0.05678670360110803,
+    "detect_cause": 0.023545706371191136,
+    "detect_root": 0.004155124653739612,
+    "confirmed_gap_is_G": 0.07894736842105263,
+    "scan_triggered_gap": 0.981994459833795,
+    "scan_triggered_nogap": 0.9768637532133676,
+    "fp_nogap": 0.007712082262210797,
+    "ds_budget_exhausted": 0.9386666666666666,
+    "hit_max_items": 0.43133333333333335
+   },
+   "by_class": {
+    "typical": {
+     "cause": 0.0,
+     "named": 0.0392156862745098,
+     "root": 0.0,
+     "conf_is_G": 0.056022408963585436,
+     "topic_named": 0.7535014005602241,
+     "scan": 0.9831932773109243,
+     "n": 357
+    },
+    "dependant": {
+     "cause": 0.04657534246575343,
+     "named": 0.07397260273972603,
+     "root": 0.00821917808219178,
+     "conf_is_G": 0.10136986301369863,
+     "topic_named": 0.8246575342465754,
+     "scan": 0.9808219178082191,
+     "n": 365
+    }
+   },
+   "runtime_s": 110.3,
+   "settings": {
+    "MAX_ITEMS": 42,
+    "WARMUP_ITEMS": 5,
+    "MIN_ITEMS": 12,
+    "SE_THRESHOLD": 0.3,
+    "MIN_SECTION_COVERAGE": 5,
+    "CLASSIFICATION_MIN_ITEMS": 20,
+    "CLASSIFICATION_SE_THRESHOLD": 0.4,
+    "CLASSIFICATION_CONFIDENCE_THRESHOLD": 0.9,
+    "DEEP_SCAN_SESSION_BUDGET": 6,
+    "DEEP_SCAN_MAX_ITEMS": 6,
+    "DEEP_SCAN_IMPORTANCE_THRESHOLD": 8,
+    "MASTERY_THRESHOLD": 0.6
+   }
+  }
+ }
+}

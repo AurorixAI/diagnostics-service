@@ -1,0 +1,623 @@
+{
+ "description": "Fixed stand for the root-cause detection study (stage 0). Per grade: 2 typical mid-program gap L3 (several active L4; no in-grade HARD dependant, except where noted) + 2 L3 with >=1 in-grade HARD-edge dependant. Gap students fail the L3 and its direct dependants (depth 1) with p=fail_p.",
+ "selected": "2026-10-12 from algo_content (read-only): active L3 with >=3 active L4 having active tasks and >=80 active tasks; mid-program; earlier gap sets reused where they fit the class; no chosen L3 is an in-grade (hard/soft) dependant of another chosen L3.",
+ "params": {
+  "seed": 1,
+  "n_students": 1500,
+  "gap_fraction": 0.5,
+  "gap_fail_p": 0.85,
+  "dependant_depth": 1
+ },
+ "grades": {
+  "5": {
+   "typical": [
+    "G5_P34",
+    "G5_P35"
+   ],
+   "dependant": [
+    "G5_P28",
+    "G5_P43"
+   ],
+   "gap_l3": [
+    "G5_P34",
+    "G5_P35",
+    "G5_P28",
+    "G5_P43"
+   ],
+   "detail": {
+    "G5_P34": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 3,
+     "n_active_tasks": 246,
+     "importance": 9,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G5_P35": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 3,
+     "n_active_tasks": 174,
+     "importance": 6,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G5_P28": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 4,
+     "n_active_tasks": 206,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G5_P31",
+       "importance": 6
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G5_P43": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 3,
+     "n_active_tasks": 154,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G5_P46",
+       "importance": 5
+      },
+      {
+       "id": "G5_P47",
+       "importance": 5
+      }
+     ],
+     "in_grade_soft_dependants": [
+      {
+       "id": "G5_P44",
+       "importance": 7
+      },
+      {
+       "id": "G5_P45",
+       "importance": 6
+      }
+     ],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    }
+   }
+  },
+  "6": {
+   "typical": [
+    "G6_P42",
+    "G6_P29"
+   ],
+   "dependant": [
+    "G6_P21",
+    "G6_P35"
+   ],
+   "gap_l3": [
+    "G6_P42",
+    "G6_P29",
+    "G6_P21",
+    "G6_P35"
+   ],
+   "detail": {
+    "G6_P42": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 5,
+     "n_active_tasks": 439,
+     "importance": 10,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G6_P29": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 9,
+     "n_active_tasks": 341,
+     "importance": 7,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": false
+    },
+    "G6_P21": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 4,
+     "n_active_tasks": 215,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G6_P22",
+       "importance": 7
+      },
+      {
+       "id": "G6_P23",
+       "importance": 6
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G6_P35": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 5,
+     "n_active_tasks": 250,
+     "importance": 7,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G6_P36",
+       "importance": 7
+      }
+     ],
+     "in_grade_soft_dependants": [
+      {
+       "id": "G6_P38",
+       "importance": 6
+      }
+     ],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    }
+   }
+  },
+  "7": {
+   "typical": [
+    "G7_P32",
+    "G7_P21"
+   ],
+   "dependant": [
+    "G7_P22",
+    "G7_P27"
+   ],
+   "gap_l3": [
+    "G7_P32",
+    "G7_P21",
+    "G7_P22",
+    "G7_P27"
+   ],
+   "detail": {
+    "G7_P32": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 7,
+     "n_active_tasks": 176,
+     "importance": 9,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G7_P21": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 4,
+     "n_active_tasks": 227,
+     "importance": 7,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": false
+    },
+    "G7_P22": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 3,
+     "n_active_tasks": 107,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G7_P23",
+       "importance": 7
+      },
+      {
+       "id": "G7_P25",
+       "importance": 6
+      }
+     ],
+     "in_grade_soft_dependants": [
+      {
+       "id": "G7_P24",
+       "importance": 7
+      }
+     ],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G7_P27": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 5,
+     "n_active_tasks": 235,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G7_P29",
+       "importance": 7
+      },
+      {
+       "id": "G7_P33",
+       "importance": 7
+      }
+     ],
+     "in_grade_soft_dependants": [
+      {
+       "id": "G7_P28",
+       "importance": 2
+      }
+     ],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    }
+   }
+  },
+  "8": {
+   "typical": [
+    "G8_P25",
+    "G8_P26"
+   ],
+   "dependant": [
+    "G8_P09",
+    "G8_P15"
+   ],
+   "gap_l3": [
+    "G8_P25",
+    "G8_P26",
+    "G8_P09",
+    "G8_P15"
+   ],
+   "detail": {
+    "G8_P25": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 8,
+     "n_active_tasks": 158,
+     "importance": 9,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G8_P26": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 7,
+     "n_active_tasks": 307,
+     "importance": 7,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [
+      {
+       "id": "G8_P27",
+       "importance": 9
+      }
+     ],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G8_P09": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 4,
+     "n_active_tasks": 302,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G8_P10",
+       "importance": 6
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G8_P15": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 11,
+     "n_active_tasks": 232,
+     "importance": 8,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G8_P16",
+       "importance": 7
+      },
+      {
+       "id": "G8_P17",
+       "importance": 9
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": true,
+     "reused_from_earlier_set": false
+    }
+   }
+  },
+  "9": {
+   "typical": [
+    "G9_P25",
+    "G9_P27"
+   ],
+   "dependant": [
+    "G9_P31",
+    "G9_P08"
+   ],
+   "gap_l3": [
+    "G9_P25",
+    "G9_P27",
+    "G9_P31",
+    "G9_P08"
+   ],
+   "detail": {
+    "G9_P25": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 5,
+     "n_active_tasks": 155,
+     "importance": 9,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G9_P27": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 17,
+     "n_active_tasks": 185,
+     "importance": 6,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G9_P31": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 5,
+     "n_active_tasks": 113,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G9_P32",
+       "importance": 7
+      },
+      {
+       "id": "G9_P33",
+       "importance": 6
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    },
+    "G9_P08": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 4,
+     "n_active_tasks": 150,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G9_P16",
+       "importance": 4
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": true
+    }
+   }
+  },
+  "10": {
+   "typical": [
+    "G10_P23",
+    "G10_P26"
+   ],
+   "dependant": [
+    "G10_P17",
+    "G10_P13"
+   ],
+   "gap_l3": [
+    "G10_P23",
+    "G10_P26",
+    "G10_P17",
+    "G10_P13"
+   ],
+   "detail": {
+    "G10_P23": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 8,
+     "n_active_tasks": 169,
+     "importance": 8,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": false
+    },
+    "G10_P26": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 4,
+     "n_active_tasks": 124,
+     "importance": 8,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": false
+    },
+    "G10_P17": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 3,
+     "n_active_tasks": 88,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G10_P18",
+       "importance": 10
+      },
+      {
+       "id": "G10_P20",
+       "importance": 9
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": true,
+     "reused_from_earlier_set": false
+    },
+    "G10_P13": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 5,
+     "n_active_tasks": 111,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G10_P14",
+       "importance": 10
+      },
+      {
+       "id": "G10_P15",
+       "importance": 9
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": true,
+     "reused_from_earlier_set": false
+    }
+   }
+  },
+  "11": {
+   "typical": [
+    "G11_P37",
+    "G11_P24"
+   ],
+   "dependant": [
+    "G11_P35",
+    "G11_P23"
+   ],
+   "gap_l3": [
+    "G11_P37",
+    "G11_P24",
+    "G11_P35",
+    "G11_P23"
+   ],
+   "detail": {
+    "G11_P37": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 3,
+     "n_active_tasks": 108,
+     "importance": 7,
+     "in_grade_hard_dependants": [],
+     "in_grade_soft_dependants": [
+      {
+       "id": "G11_P38",
+       "importance": 9
+      }
+     ],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": false
+    },
+    "G11_P24": {
+     "class": "typical",
+     "n_active_l4_with_tasks": 4,
+     "n_active_tasks": 205,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G11_P25",
+       "importance": 4
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": false,
+     "reused_from_earlier_set": false
+    },
+    "G11_P35": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 3,
+     "n_active_tasks": 119,
+     "importance": 9,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G11_P36",
+       "importance": 10
+      },
+      {
+       "id": "G11_P37",
+       "importance": 7
+      },
+      {
+       "id": "G11_P38",
+       "importance": 9
+      },
+      {
+       "id": "G11_P40",
+       "importance": 10
+      },
+      {
+       "id": "G11_P43",
+       "importance": 7
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": true,
+     "reused_from_earlier_set": true
+    },
+    "G11_P23": {
+     "class": "dependant",
+     "n_active_l4_with_tasks": 4,
+     "n_active_tasks": 202,
+     "importance": 10,
+     "in_grade_hard_dependants": [
+      {
+       "id": "G11_P30",
+       "importance": 6
+      },
+      {
+       "id": "G11_P31",
+       "importance": 10
+      },
+      {
+       "id": "G11_P33",
+       "importance": 9
+      }
+     ],
+     "in_grade_soft_dependants": [],
+     "trigger_eligible": true,
+     "reused_from_earlier_set": true
+    }
+   }
+  }
+ },
+ "reference_sets": {
+  "5": [
+   "G5_P28",
+   "G5_P34",
+   "G5_P35",
+   "G5_P43"
+  ],
+  "6": [
+   "G6_P11",
+   "G6_P21",
+   "G6_P35",
+   "G6_P42"
+  ],
+  "7": [
+   "G7_P15",
+   "G7_P22",
+   "G7_P27",
+   "G7_P32"
+  ],
+  "8": [
+   "G8_P09",
+   "G8_P16",
+   "G8_P25",
+   "G8_P26"
+  ],
+  "9": [
+   "G9_P08",
+   "G9_P25",
+   "G9_P27",
+   "G9_P31"
+  ],
+  "11": [
+   "G11_P23",
+   "G11_P27",
+   "G11_P35",
+   "G11_P46"
+  ]
+ },
+ "reference_sets_note": "gap sets of the earlier audit (f1g5 S1, f1g6 S1, f1g7, f1g8, f1g9, f1g11 requested arms); use rootcause_run.py --stand-set reference to reproduce those baselines."
+}
