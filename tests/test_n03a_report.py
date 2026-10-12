@@ -1083,3 +1083,60 @@ def test_final_final_look_alikes_still_pass(text):
 ])
 def test_plan_sweep_handles_wrapped_claims_and_list_markers(prose, expected):
     assert rg.drop_retired_sentences(prose) == expected
+
+
+# ── Last change: linear time on 100 KB, noun window, figure-only continuation ──
+
+def _best_time(text, runs=3):
+    import time
+    best = None
+    for _ in range(runs):
+        started = time.perf_counter()
+        rg.contains_retired_claim(text)
+        elapsed = time.perf_counter() - started
+        best = elapsed if best is None else min(best, elapsed)
+    return best
+
+
+@pytest.mark.parametrize("unit", [
+    "достоверен 5 % ", "достоверен и ", "достоверен событие ", "надежность ", "первопричина ",
+    "диагноз достоверен ", "первопричина не ", "не подтвердила первопричину ", "результат достоверен на 5 % ",
+    "точность ", "уверенность в тесте ",
+])
+def test_detectors_are_linear_on_100_kb_of_repeated_units(unit):
+    small = unit * (25_000 // len(unit))
+    large = unit * (100_000 // len(unit))
+    assert len(large) >= 99_000
+    t_small, t_large = _best_time(small), _best_time(large)
+    assert t_large < 0.2, (unit, t_large)
+    assert t_large / max(t_small, 1e-3) < 6, (unit, t_small, t_large)          # 4x the text, not 16x the time
+
+
+@pytest.mark.parametrize("text", [
+    "Надёжность результата по теме «Дроби» — 83%",
+    "Надёжность результатов по теме «Дроби» составляет 85%",
+    "Достоверность результатов по теме «Дроби» около 85%",
+    "Надёжность на данный момент составляет около 83%",
+    "Надёжность этой оценки по текущим данным составляет 83%",
+    "Оценка надёжности — около 83 процентов",
+    "Достоверность результатов по теме событий 85%",
+    "Точность диагностики — 87%",
+])
+def test_reliability_noun_keeps_the_wide_figure_window(text):
+    assert rg.contains_retired_claim(text), text
+    assert not _validate(_narrative("Текст.", description=text))[0], text
+
+
+def test_the_narrow_window_applies_only_to_the_weak_diagnostic_subjects():
+    assert not rg.contains_retired_claim("Уверенность при решении тестов повысилась на 15%")
+
+
+@pytest.mark.parametrize("prose, expected", [
+    ("Надёжность диагноза\n15% задач решите повторно.", "15% задач решите повторно."),
+    ("Диагноз достоверен\n90% ошибок — в дробях.", "90% ошибок — в дробях."),
+    ("Надёжность диагноза\n— 83%. Решите.", "Решите."),
+    ("Надёжность диагноза\n83 процента.\nРешите.", "Решите."),
+    ("Надёжность диагноза\n- 0,83. Решите.", "Решите."),
+])
+def test_wrapped_claim_takes_only_a_figure_only_line(prose, expected):
+    assert rg.drop_retired_sentences(prose) == expected

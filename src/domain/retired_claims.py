@@ -364,7 +364,7 @@ _TECH = re.compile(
     r"|лифт|насос|самолет)" + _TECH_ENDINGS
     + r"|узел|станок|реле|издели(?:е|я|ю|ем|й)|оборудован(?:ие|ия|ию|ием)|батаре(?:я|и|й|ю|ей)"
 )
-_WINDOW_FIGURE = 4          # tokens after the reliability noun searched for a figure
+_WINDOW_FIGURE = 8          # tokens after the reliability noun searched for a figure
 
 
 def _tech_follows(tokens: Sequence[str], i: int) -> bool:
@@ -414,7 +414,7 @@ def _diagnostic_subject_after(tokens: Sequence[str], i: int, max_words: int = 4)
             return True
         if _RESULT.fullmatch(token):
             saw_result = True
-        elif _DIAGNOSIS_WEAK.fullmatch(token) and (saw_result or _figure_after(tokens, i)):
+        elif _DIAGNOSIS_WEAK.fullmatch(token) and (saw_result or _figure_after(tokens, i, limit=4)):
             return True
     return False
 
@@ -478,18 +478,23 @@ def _result_judged_before(tokens: Sequence[str], i: int) -> bool:
     return False
 
 
-def _event_nearby(tokens: Sequence[str], i: int) -> bool:
+def _event_nearby(tokens: Sequence[str], i: int, first_diag: int) -> bool:
     """«Достоверное событие» / «событие достоверно» is the probability term, not a claim.
 
     Never when a result / diagnostic subject precedes the adjective in the sentence
-    («Результат по теме «Случайные события» надёжен на 85%», «Диагноз достоверен, событие не влияет»).
+    («Результат по теме «Случайные события» надёжен на 85%», «Диагноз достоверен, событие не влияет»);
+    ``first_diag`` is the index of the first such token (-1 when there is none).
     """
-    if any(_RESULT.fullmatch(t) or _SUBJECT.fullmatch(t) for t in tokens[:i]):
+    if 0 <= first_diag < i:
         return False
     return any(re.fullmatch(r"событ[а-я]{1,4}", t) for t in tokens[max(0, i - 3):i + 4])
 
 
 def _reliability_in_sentence(tokens: Sequence[str]) -> bool:
+    # computed once per sentence: scanning tokens[:i] for every adjective would be quadratic
+    first_result = next((k for k, t in enumerate(tokens) if _RESULT.fullmatch(t)), -1)
+    first_subject = next((k for k, t in enumerate(tokens) if _SUBJECT.fullmatch(t)), -1)
+    first_diag = min((k for k in (first_result, first_subject) if k >= 0), default=-1)
     for i, token in enumerate(tokens):
         if _REL_NOUN.fullmatch(token):
             if _subject_after(tokens, i):                      # «надёжность результатов диагностики»
@@ -501,7 +506,7 @@ def _reliability_in_sentence(tokens: Sequence[str]) -> bool:
             if _figure_after(tokens, i) or _figure_before(tokens, i):        # «надёжность 83%», «83% надёжности»
                 return True
         elif _REL_ADJ.fullmatch(token):
-            if _event_nearby(tokens, i):                       # «вероятность достоверного события равна 100%»
+            if _event_nearby(tokens, i, first_diag):           # «вероятность достоверного события равна 100%»
                 continue
             if _subject_before(tokens, i):                     # «Диагноз достоверен»
                 return True
@@ -510,7 +515,7 @@ def _reliability_in_sentence(tokens: Sequence[str]) -> bool:
             tech_subject = i >= 1 and _TECH.fullmatch(tokens[i - 1])
             credibility = token.startswith(("достовер", "недостовер"))
             if _figure_after(tokens, i, limit=4) and not tech_subject and (
-                not credibility or any(_RESULT.fullmatch(t) for t in tokens[:i])
+                not credibility or 0 <= first_result < i
             ):                                                 # «Результат достоверен на 90%»
                 return True
         elif _SOFT_NOUN.fullmatch(token) and _diagnostic_subject_after(tokens, i):
@@ -541,8 +546,10 @@ _SENTENCE_ONLY_RE = re.compile(r"((?<=[.!?])\s+)")
 
 # the figure of a claim that wrapped onto the next line: «— 83%», «83%», «- 0,83» (a bullet «- Решите» is not)
 _LIST_MARKER_RE = re.compile(r"\s*\d{1,2}[.)]")
+_DASH_CLASS = "[-\u2010-\u2015\u2212]"
 _CONTINUATION_RE = re.compile(
-    r"\s*(?:[-\u2010-\u2015\u2212]\s*)?(?:\d{1,3}(?:[.,]\d+)?\s*(?:%|процент)|[-\u2010-\u2015\u2212]\s*[01][.,]\d+)"
+    r"\s*(?:" + _DASH_CLASS + r"\s*)?"
+    r"(?:\d{1,3}(?:[.,]\d+)?\s*(?:%|процент[а-я]{0,4})|[01][.,]\d+)\s*[.;]?\s*"
 )
 
 
@@ -564,7 +571,7 @@ def _drop_flagged_segments(text: str, splitter: "re.Pattern[str]") -> str:
     previous_open = False                              # the previous segment was dropped without a closing .!?
     for segment, separator in zip(segments, separators):
         flagged = _has_reliability_claim(segment) or _has_root_cause_claim(segment)
-        continuation = previous_open and _CONTINUATION_RE.match(segment) is not None
+        continuation = previous_open and _CONTINUATION_RE.fullmatch(segment) is not None
         if flagged or continuation:                    # «Надёжность диагноза\n— 83%.» goes as a whole
             dropped = True
             previous_open = flagged and not segment.rstrip().endswith((".", "!", "?"))
