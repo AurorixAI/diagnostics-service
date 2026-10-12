@@ -6,6 +6,7 @@
 
 Defaults must reproduce the behaviour from before the flags existed.
 """
+import copy
 import random
 from datetime import datetime, timedelta
 from types import SimpleNamespace as NS
@@ -508,7 +509,10 @@ def test_first_scan_freezes_the_session_flags(monkeypatch):
     assert state.deep_scan_params is None
     service._init_deep_scan(state, "G8_A")
     assert state.deep_scan_params == {"confirm_probes": 2, "probe_difficulty_offset": 1.0,
-                                      "trigger_mode": "hard_prereq"}
+                                      "trigger_mode": "hard_prereq",
+                                      "importance_threshold": ss.settings.deep_scan_importance_threshold,
+                                      "session_budget": ss.settings.deep_scan_session_budget,
+                                      "max_items": ss.settings.deep_scan_max_items}
     stored = dict(state.deep_scan_params)
     # the settings change later (config redeploy / env edit): the session keeps its own values
     monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", 1, raising=False)
@@ -617,4 +621,141 @@ def test_create_session_freezes_the_flags_before_any_navigation(monkeypatch):
     with pytest.raises(Stop):
         service.create_session(student_id="u", grade_level=8)
     assert seen == [{"confirm_probes": 2, "probe_difficulty_offset": ss.settings.deep_scan_probe_difficulty_offset,
-                     "trigger_mode": "hard_prereq"}]
+                     "trigger_mode": "hard_prereq",
+                     "importance_threshold": ss.settings.deep_scan_importance_threshold,
+                     "session_budget": ss.settings.deep_scan_session_budget,
+                     "max_items": ss.settings.deep_scan_max_items}]
+
+
+def test_negative_offset_target_is_clamped_to_the_upper_bound(monkeypatch):
+    # a negative offset makes probes HARDER: theta 3.2 + 1.5 = 4.7 would be a 422 (le=4) in content-service
+    monkeypatch.setattr(ss.settings, "deep_scan_probe_difficulty_offset", -1.5, raising=False)
+    bank = FakeTasks([0.4, 3.9])
+    state = state_with_theta(3.2, scanning=True)
+    assert service_with_bank(bank)._select_task_for_skill(state, "S").irt_difficulty == 3.9
+    assert bank.targets == [4.0]
+
+
+# ── every flag is frozen at creation; nothing in the session flow reads the live settings ─────────────────
+
+SIX_KEYS = {"confirm_probes", "probe_difficulty_offset", "trigger_mode",
+            "importance_threshold", "session_budget", "max_items"}
+
+
+def set_live(monkeypatch, **flags):
+    for name, value in flags.items():
+        monkeypatch.setattr(ss.settings, f"deep_scan_{name}", value, raising=False)
+
+
+def test_create_session_freezes_all_six_flags(monkeypatch):
+    set_live(monkeypatch, confirm_probes=3, probe_difficulty_offset=0.75, trigger_mode="hard_prereq",
+             importance_threshold=9, session_budget=4, max_items=3)
+    service = object.__new__(SessionService)
+    service.session_repo = NS(get_by_invite_code=lambda _code: None)
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def build_grid(state):
+        seen.append(state.deep_scan_params)
+        raise Stop
+
+    service._build_topic_grid = build_grid
+    with pytest.raises(Stop):
+        service.create_session(student_id="u", grade_level=8)
+    assert seen == [{"confirm_probes": 3, "probe_difficulty_offset": 0.75, "trigger_mode": "hard_prereq",
+                     "importance_threshold": 9, "session_budget": 4, "max_items": 3}]
+    assert set(seen[0]) == SIX_KEYS
+
+
+def test_frozen_importance_threshold_is_used_after_the_setting_changes(monkeypatch):
+    set_live(monkeypatch, importance_threshold=8)
+    service = service_with_edges({})
+    state = state_with_theta(0.0, scanning=False)
+    SessionService._scan_params(state)                                  # create_session
+    set_live(monkeypatch, importance_threshold=3)                       # config edited mid-session
+    assert not service._l3_warrants_deep_scan(state, NS(subtopic_id="L3", importance=5))
+    assert service._l3_warrants_deep_scan(state, NS(subtopic_id="L3", importance=8))
+    other = state_with_theta(0.0, scanning=False)
+    set_live(monkeypatch, importance_threshold=3)
+    SessionService._scan_params(other)
+    set_live(monkeypatch, importance_threshold=10)
+    assert service._l3_warrants_deep_scan(other, NS(subtopic_id="L3", importance=5))     # frozen 3, not live 10
+
+
+def test_frozen_session_budget_is_used_after_the_setting_changes(monkeypatch):
+    set_live(monkeypatch, session_budget=2)
+    state = state_with_theta(0.0, scanning=False)
+    SessionService._scan_params(state)
+    set_live(monkeypatch, session_budget=100)
+    state.deep_scan_items_total = 1
+    assert not SessionService._deep_scan_budget_spent(state)
+    state.deep_scan_items_total = 2
+    assert SessionService._deep_scan_budget_spent(state)                # frozen 2, live 100 ignored
+    # ... and the scan engine obeys it: the second probe spends the budget and ends the scan
+    service = make_service({}, [])
+    scan_state = scanning_state("B", ["C"])
+    scan_state.deep_scan_params = dict(state.deep_scan_params)
+    scan_state.deep_scan_items_total = 1
+    assert service._advance_deep_scan(scan_state, True) == "ADVANCED"
+    other = state_with_theta(0.0, scanning=False)
+    set_live(monkeypatch, session_budget=1)
+    SessionService._scan_params(other)
+    set_live(monkeypatch, session_budget=0)
+    other.deep_scan_items_total = 0
+    assert not SessionService._deep_scan_budget_spent(other)            # frozen 1, live 0 ignored
+
+
+def test_frozen_max_items_caps_the_scan_after_the_setting_changes(monkeypatch):
+    set_live(monkeypatch, max_items=2)
+    service, state = frozen_state({"G8_A": ["B", "C", "D"]})
+    SessionService._scan_params(state)
+    set_live(monkeypatch, max_items=6)
+    service._init_deep_scan(state, "G8_A")
+    assert state.deep_scan["max_items"] == 2                            # frozen 2, live 6 ignored
+    assert service._advance_deep_scan(state, True) == "task:C"
+    assert service._advance_deep_scan(state, True) == "ADVANCED"        # per-scan cap of 2 reached
+
+
+# ── backward compatibility: sessions stored before the flags / before some flag existed ───────────────────
+
+def test_preview_paths_do_not_freeze_a_pre_flag_session(monkeypatch):
+    set_live(monkeypatch, importance_threshold=8, trigger_mode="importance", session_budget=6)
+    service = service_with_edges({})
+    state = navigation_state(9)
+    assert state.deep_scan_params is None
+    before = copy.deepcopy(state.to_dict())
+    assert service._has_pending_critical_probe(state, False) is True    # live fallback: importance 9 >= 8
+    assert state.deep_scan_params is None
+    assert service._l3_warrants_deep_scan(state, NS(subtopic_id="L3", importance=9))
+    assert SessionService._deep_scan_budget_spent(state) is False
+    assert SessionService._peek_scan_params(state)["session_budget"] == 6
+    assert state.deep_scan_params is None and state.to_dict() == before
+
+
+def test_partially_stored_params_fall_back_to_live_settings_without_mutation(monkeypatch):
+    set_live(monkeypatch, importance_threshold=8, session_budget=6, max_items=6)
+    old = {"confirm_probes": 2, "probe_difficulty_offset": 0.5, "trigger_mode": "importance"}   # before the 3 new keys
+    state = SessionState(session_id="s", student_id="u", grade_level=8)
+    state.deep_scan_params = dict(old)
+    peeked = SessionService._peek_scan_params(state)
+    assert peeked["confirm_probes"] == 2 and peeked["probe_difficulty_offset"] == 0.5
+    assert (peeked["importance_threshold"], peeked["session_budget"], peeked["max_items"]) == (8, 6, 6)
+    assert state.deep_scan_params == old                                # peek stores nothing
+    service = service_with_edges({})
+    assert service._l3_warrants_deep_scan(state, NS(subtopic_id="L3", importance=8))
+    assert state.deep_scan_params == old
+    # first real use freezes the missing keys; stored ones are kept as they were
+    set_live(monkeypatch, importance_threshold=5)
+    frozen = SessionService._scan_params(state)
+    assert set(frozen) == SIX_KEYS and frozen["importance_threshold"] == 5 and frozen["confirm_probes"] == 2
+    set_live(monkeypatch, importance_threshold=9)
+    assert SessionService._scan_params(state)["importance_threshold"] == 5
+
+
+def test_complete_params_are_returned_as_is(monkeypatch):
+    state = SessionState(session_id="s", student_id="u", grade_level=8)
+    SessionService._scan_params(state)
+    stored = state.deep_scan_params
+    assert SessionService._peek_scan_params(state) is stored and SessionService._scan_params(state) is stored

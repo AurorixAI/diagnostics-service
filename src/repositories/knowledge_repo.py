@@ -9,6 +9,8 @@ need to know about the transport switch.
 """
 from __future__ import annotations
 
+import logging
+import math
 import random
 import types
 from typing import List, Optional
@@ -16,6 +18,12 @@ from typing import List, Optional
 from src.clients import content_client
 
 BASE = "/api/v1/content"
+
+log = logging.getLogger(__name__)
+
+# content-service GET /tasks validates target_b with Query(ge=-4, le=4); anything outside
+# is a 422 there, so the transport layer clamps instead of letting a caller break a session.
+TARGET_B_MIN, TARGET_B_MAX = -4.0, 4.0
 
 # Maximum additional IRT b-param distance allowed beyond the closest match.
 # Keeps pool tight: tasks in pool differ by at most 0.1 from the best-matching task.
@@ -111,7 +119,13 @@ class TaskRepository:
         if difficulty:
             params["difficulty"] = difficulty
         if target_b is not None:
-            params["target_b"] = target_b
+            if math.isfinite(target_b):
+                params["target_b"] = min(TARGET_B_MAX, max(TARGET_B_MIN, target_b))
+            else:
+                log.warning(
+                    "get_tasks_for_skill(%s): non-finite target_b %r not sent to content-service",
+                    skill_id, target_b,
+                )
         if exclude_ids:
             params["exclude_ids"] = exclude_ids
         resp = content_client.get(f"{BASE}/tasks", params=params)
@@ -132,6 +146,13 @@ class TaskRepository:
         theta receive different task variants from the pool — critical for fairness
         when many tasks share the same irt_difficulty value.
         """
+        if not math.isfinite(target_b):
+            # No usable target (the repository logs it and sends none): any unused item.
+            candidates = self.get_tasks_for_skill(
+                skill_id, exclude_ids=exclude_ids, limit=20, target_b=target_b
+            )
+            return random.choice(candidates) if candidates else None
+        target_b = min(TARGET_B_MAX, max(TARGET_B_MIN, target_b))   # as sent to the API
         candidates = self.get_tasks_for_skill(
             skill_id, exclude_ids=exclude_ids, limit=20, target_b=target_b
         )

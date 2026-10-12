@@ -396,23 +396,42 @@ def _seed_pg(ctx, seed: int, i: int) -> None:
 def _worker(args):
     (db_url, truth_url, content_dir, extra, idxs, seed, grade, gap_list, gap_fraction, gap_fail_p, depth) = args
     import logging
-    ctx = bootstrap(db_url, truth_url, Path(content_dir), extra)
-    logging.disable(logging.WARNING)
-    fail_cache: Dict[str, set] = ctx.setdefault("_fail_cache", {})
+    import traceback
+    # Every failure leaves the worker as a plain RuntimeError: some exceptions
+    # (httpx.HTTPStatusError) cannot be unpickled in the parent, which kills Pool's
+    # result thread and hangs the run forever.  Building the message is guarded too.
+    try:
+        ctx = bootstrap(db_url, truth_url, Path(content_dir), extra)
+        logging.disable(logging.WARNING)
+        fail_cache: Dict[str, set] = ctx.setdefault("_fail_cache", {})
+        settings_used = _effective_settings(ctx, extra)
+    except Exception as e:
+        raise RuntimeError(f"worker bootstrap failed (grade {grade}, seed {seed}): {_error_detail(e)}\n"
+                           f"{traceback.format_exc()[-1500:]}") from None
     out = []
     for i in idxs:
         try:
             out.append(simulate_student(ctx, i, seed, grade, gap_list, gap_fraction, gap_fail_p, fail_cache, depth))
         except Exception as e:
-            # Re-raise as a plain RuntimeError: some exceptions (httpx.HTTPStatusError) cannot be
-            # unpickled in the parent, which kills Pool's result thread and hangs the run forever.
-            import traceback
-            detail = repr(e)
-            resp = getattr(e, "response", None)
-            if resp is not None:
-                detail += f" | {resp.request.method} {resp.request.url} -> {resp.status_code}: {resp.text[:300]}"
-            raise RuntimeError(f"student {i} (grade {grade}, seed {seed}): {detail}\n{traceback.format_exc()[-1500:]}") from None
-    return out, _effective_settings(ctx, extra)
+            raise RuntimeError(f"student {i} (grade {grade}, seed {seed}): {_error_detail(e)}\n"
+                               f"{traceback.format_exc()[-1500:]}") from None
+    return out, settings_used
+
+
+def _error_detail(e: BaseException) -> str:
+    """repr(e), plus the HTTP request/response when e carries one.  Never raises: if reading
+    the response fails, repr(e) alone is still reported."""
+    try:
+        detail = repr(e)
+    except Exception:
+        detail = f"<unrepresentable {type(e).__name__}>"
+    try:
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            detail += f" | {resp.request.method} {resp.request.url} -> {resp.status_code}: {resp.text[:300]}"
+    except Exception as inner:
+        detail += f" | (response details unavailable: {inner!r})"
+    return detail
 
 
 def _effective_settings(ctx, extra) -> Dict[str, Any]:

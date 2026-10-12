@@ -66,12 +66,15 @@ class SessionState:
     # Probed skills whose gap was NOT confirmed (DEEP_SCAN_CONFIRM_PROBES > 1: wrong
     # answers short of the required number and no unused item left).  Not gaps.
     deep_scan_unconfirmed: List[str] = field(default_factory=list)
-    # Deep Scan flags FIXED for this session when its first scan starts:
-    # {"confirm_probes", "probe_difficulty_offset", "trigger_mode"}.  The scan engine
-    # and the report both read the session's own values, so a config change later
-    # (mid-session, or before the report is rebuilt) never changes what the session
-    # did or how its chains are read.  None = no scan started (or a pre-flag session:
-    # the report then uses the old rules, confirm_probes = 1).
+    # Deep Scan flags FIXED for this session at create_session:
+    # {"confirm_probes", "probe_difficulty_offset", "trigger_mode",
+    #  "importance_threshold", "session_budget", "max_items"}.  The trigger rule, the scan
+    # engine, probe selection and the report all read the session's own values, so a
+    # config change later (mid-session, or before the report is rebuilt) never changes
+    # what the session did or how its chains are read.  None = a session created before
+    # the flags existed (the report then uses the old rules, confirm_probes = 1; the
+    # service freezes the flags from the live settings at its first Deep Scan use); a
+    # dict stored before some key existed gets that key the same way.
     deep_scan_params: Optional[dict] = None
 
     # Navigation context to restore after a one-off fallback task (see

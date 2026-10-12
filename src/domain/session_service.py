@@ -66,6 +66,8 @@ from src.repositories.diag_repo import (
     DiagSessionRepository,
 )
 from src.repositories.knowledge_repo import (
+    TARGET_B_MAX,
+    TARGET_B_MIN,
     KnowledgeRepository,
     SkillPrerequisiteRepository,
     TaskRepository,
@@ -76,9 +78,23 @@ from src.core import auth_client
 
 log = logging.getLogger(__name__)
 
-# content-service GET /tasks accepts target_b in [-4, 4] (Query ge/le); keep requests inside it.
-_TARGET_B_MIN, _TARGET_B_MAX = -4.0, 4.0
+# content-service GET /tasks accepts target_b in [-4, 4] (Query ge/le); keep requests inside it
+# (the repository clamps too, this keeps the stored/served target consistent with it).
+_TARGET_B_MIN, _TARGET_B_MAX = TARGET_B_MIN, TARGET_B_MAX
 settings = get_settings()
+
+# The Deep Scan flags of a session, frozen in ``SessionState.deep_scan_params`` at
+# ``create_session``: key -> (settings attribute, cast).  A config change must never
+# alter a running session, so nothing in the session flow reads ``settings.deep_scan_*``
+# directly - only ``SessionService._scan_params`` / ``_peek_scan_params`` do.
+_SCAN_PARAM_SOURCES = {
+    "confirm_probes": ("deep_scan_confirm_probes", int),
+    "probe_difficulty_offset": ("deep_scan_probe_difficulty_offset", float),
+    "trigger_mode": ("deep_scan_trigger_mode", str),
+    "importance_threshold": ("deep_scan_importance_threshold", int),
+    "session_budget": ("deep_scan_session_budget", int),
+    "max_items": ("deep_scan_max_items", int),
+}
 
 
 class SessionService:
@@ -129,7 +145,7 @@ class SessionService:
             grade_level=grade_level,
         )
         state.theta = ThetaState(theta=prior_theta)
-        self._scan_params(state)   # freeze the session's Deep Scan flags (trigger mode included) at creation
+        self._scan_params(state)   # freeze all of the session's Deep Scan flags (_SCAN_PARAM_SOURCES) at creation
 
         # 2. Load topic grid → build TopicNavigator states per L1 section
         self._build_topic_grid(state)
@@ -648,32 +664,39 @@ class SessionService:
 
     @staticmethod
     def _deep_scan_budget_spent(state: SessionState) -> bool:
-        """True once the session's Deep Scan items reached DEEP_SCAN_SESSION_BUDGET."""
-        return state.deep_scan_items_total >= settings.deep_scan_session_budget
+        """True once the session's Deep Scan items reached its (frozen) session budget
+        (DEEP_SCAN_SESSION_BUDGET at the session's creation).  Read-only."""
+        return state.deep_scan_items_total >= SessionService._peek_scan_params(state)["session_budget"]
 
     @staticmethod
     def _scan_params(state: SessionState) -> dict:
-        """Deep Scan flags of THIS session, frozen from the settings at first use.
+        """Deep Scan flags of THIS session, frozen from the settings.
 
-        ``create_session`` stores them in the state, so the trigger rule, every scan,
-        probe selection and the report read the stored values, never the live
-        settings.  Sessions created before the flags existed freeze them at their
-        first use instead."""
-        if state.deep_scan_params is None:
-            state.deep_scan_params = SessionService._peek_scan_params(state)
-        return state.deep_scan_params
+        ``create_session`` stores all of them in the state (``_SCAN_PARAM_SOURCES``), so
+        the trigger rule, every scan, probe selection, the budgets and the report read
+        the stored values, never the live settings.  A session created before the flags
+        existed (None), or before some flag existed (key missing), freezes the missing
+        values at its first use instead."""
+        params = SessionService._peek_scan_params(state)
+        if params is not state.deep_scan_params:
+            state.deep_scan_params = params
+        return params
 
     @staticmethod
     def _peek_scan_params(state: SessionState) -> dict:
-        """The session's frozen flags, or (pre-flag session not frozen yet) the live
-        settings, WITHOUT storing anything: for read-only previews."""
-        if state.deep_scan_params is not None:
-            return state.deep_scan_params
-        return {
-            "confirm_probes": int(settings.deep_scan_confirm_probes),
-            "probe_difficulty_offset": float(settings.deep_scan_probe_difficulty_offset),
-            "trigger_mode": str(settings.deep_scan_trigger_mode),
-        }
+        """The session's frozen flags WITHOUT storing anything: for read-only paths.
+
+        Flags the session does not hold yet (a pre-flag session: ``deep_scan_params`` is
+        None; or one stored before a newer flag existed: the key is missing) come from
+        the live settings; the state is left untouched."""
+        stored = state.deep_scan_params
+        if stored is not None and all(stored.get(key) is not None for key in _SCAN_PARAM_SOURCES):
+            return stored
+        params = dict(stored or {})
+        for key, (attr, cast) in _SCAN_PARAM_SOURCES.items():
+            if params.get(key) is None:
+                params[key] = cast(getattr(settings, attr))
+        return params
 
     def _l3_warrants_deep_scan(self, state: SessionState, subtopic) -> bool:
         """Trigger rule for a failed L3 (DEEP_SCAN_TRIGGER_MODE).
@@ -682,12 +705,13 @@ class SessionService:
         "hard_prereq": the L3 has at least one HARD prerequisite edge, whatever
         its importance.  The trigger and ``_has_pending_critical_probe`` both ask
         this one question, so an early stop can never skip a scan that would start.
-        The mode is the session's frozen one, read without storing anything
-        (``_peek_scan_params``) because the preview must not mutate the state.
+        The mode and the threshold are the session's frozen ones, read without storing
+        anything (``_peek_scan_params``) because the preview must not mutate the state.
         """
-        if self._peek_scan_params(state)["trigger_mode"] == "hard_prereq":
+        params = self._peek_scan_params(state)
+        if params["trigger_mode"] == "hard_prereq":
             return bool(self.prereq_repo.get_prerequisites(subtopic.subtopic_id, hard_only=True))
-        return subtopic.importance >= settings.deep_scan_importance_threshold
+        return subtopic.importance >= params["importance_threshold"]
 
     def _has_pending_critical_probe(self, state: SessionState, correct: bool) -> bool:
         """Preview the current L4 answer without mutating persisted navigation."""
@@ -1188,7 +1212,7 @@ class SessionService:
         self, state: SessionState, failing_skill_id: str
     ) -> Optional[TaskOut]:
         """Build a DeepScanState from the prerequisite graph of the failing skill."""
-        self._scan_params(state)   # no-op since create_session; freezes flags of pre-flag sessions
+        params = self._scan_params(state)   # no-op since create_session; freezes flags of pre-flag sessions
         prereq_ids = [
             pid for pid in self._prereq_l4_ids(failing_skill_id)
             if pid not in state.deep_scan_tested and pid != failing_skill_id
@@ -1197,7 +1221,7 @@ class SessionService:
         scan = DeepScanState(
             origin_skill_id=failing_skill_id,
             queue=prereq_ids,
-            max_items=settings.deep_scan_max_items,
+            max_items=params["max_items"],
         )
 
         if not prereq_ids:

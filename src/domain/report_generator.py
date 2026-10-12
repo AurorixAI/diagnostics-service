@@ -692,8 +692,8 @@ def _reconstruct_root_cause_chains(
     answers is attached to the preceding wrong navigation answer).
 
     ``confirm_probes`` is the number of wrong answers on different items that made
-    a probed skill a gap IN THIS SESSION (the value stored in its state when its
-    first scan started; None = a session without it, i.e. the old rule of 1).  It
+    a probed skill a gap IN THIS SESSION (the value frozen in its state at session
+    creation; None = a session created before the flags existed, i.e. the old rule of 1).  It
     is never read from the live settings, so a rebuilt report gives the same
     chains.  See ``_probe_steps``.  A chain step is a probed skill, failed only if
     its gap was confirmed.
