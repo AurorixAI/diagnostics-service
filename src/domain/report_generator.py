@@ -21,8 +21,9 @@ import json
 import logging
 import re
 import uuid
-from datetime import date, datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
@@ -41,6 +42,11 @@ from .level_policy import (
 
 log = logging.getLogger(__name__)
 
+try:
+    _LOCAL_TZ = ZoneInfo("Asia/Tashkent")
+except ZoneInfoNotFoundError:  # image without tz database: Tashkent has been UTC+5 without DST since 1991
+    _LOCAL_TZ = timezone(timedelta(hours=5))
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 VALID_STATUS = {"above_level", "on_level", "partial_gap", "below_level", "critical"}
@@ -50,6 +56,43 @@ FORBIDDEN_PHRASES = [
     "порекомендуйте ребёнку",
     "deep scan",   # teacher-facing text is Russian: «углублённая проверка»
 ]
+
+# N03a (O4): claims that have no verified basis and must never reach a report.
+# The detectors live in ``retired_claims`` (class equivalent, reliability of the
+# diagnosis, (non-)confirmation of a single root cause); this module decides WHERE
+# each one is applied: the class equivalent only to the level statement (the plan may
+# legitimately say «в конце 7 класса изучают …»), the other two to every string.
+from .retired_claims import (  # noqa: E402  (re-exported: tests and other modules use these names)
+    _CLASS_EQUIVALENT_RE,
+    _has_class_equivalent,
+    _has_reliability_claim,
+    _has_root_cause_claim,
+    _normalize_claim_text,
+    contains_retired_claim,
+    drop_retired_sentences,
+)
+
+
+def _level_statement_texts(data: Dict[str, Any]) -> List[str]:
+    """Prose fields of a narrative that state the level: the ``overall`` / ``level`` strings."""
+    texts: List[str] = []
+    for key in ("overall", "level"):
+        block = data.get(key)
+        if isinstance(block, dict):
+            texts.extend(v for v in block.values() if isinstance(v, str))
+    return texts
+
+
+def _all_strings(value: Any) -> Iterator[str]:
+    """Every string value (not key) anywhere in a JSON-like structure."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _all_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _all_strings(item)
 
 _LEVEL_RU = {
     "mastered":    "Отличное владение",
@@ -77,7 +120,13 @@ ERROR_PATTERNS_VERSION = 4
 # fully current just because its journal version still matches.
 # 4 (N02): one level policy (``level`` object), evidence-gated weak topics on L2,
 # Deep Scan chains from the stored origin link.
-REPORT_SCHEMA_VERSION = 4
+# 5 (N03a, owner decision O4): no ``overall.confidence_of_diagnosis`` percentage,
+# no ``class_equivalent`` ("beginning/middle/end of grade N"), no invented
+# ``estimated_hours`` per plan step; ``recommended_start`` is one object and is
+# always the first plan step; error-free reports carry ``achievements`` and a
+# ``development`` plan step instead of a correction plan;
+# ``report_meta.date`` is the attempt date (``generated_on`` is the build date).
+REPORT_SCHEMA_VERSION = 5
 
 
 def _distractor_value(distractor: Any) -> str:
@@ -209,18 +258,17 @@ def _student_answer_latex(student_answer: Optional[str], option_pairs: List[Tupl
     return None
 
 
-def _legacy_overall(level: Dict[str, Any]) -> Tuple[str, str, str]:
-    """(status code, label, class_equivalent) in the pre-N02 report field format.
+def _legacy_overall(level: Dict[str, Any]) -> Tuple[str, str]:
+    """(status code, label) in the pre-N02 report field format.
 
     The front end reads ``overall.status`` (above_level | on_level | partial_gap |
-    below_level | critical), ``overall.status_label_ru`` and
-    ``overall.class_equivalent``; they are filled from ``level_policy``.
+    below_level | critical) and ``overall.status_label_ru``; they are filled
+    from ``level_policy``.  The class equivalent was removed in N03a.
     """
     status = level.get("status") or "on_level"
     return (
         LEGACY_STATUS.get(status, "on_level"),
         STATUS_LABEL_RU.get(status, STATUS_LABEL_RU["on_level"]),
-        level.get("class_equivalent") or "",
     )
 
 
@@ -318,6 +366,17 @@ def _validate_ai_output(
     for phrase in FORBIDDEN_PHRASES:
         if phrase in full_text:
             errors.append(f"Forbidden phrase: {phrase!r}")
+    # Class equivalent: only the level statement / summary is checked, not the whole
+    # JSON: the plan may legitimately say «в конце 7 класса изучают …».
+    if any(_has_class_equivalent(t) for t in _level_statement_texts(data)):
+        errors.append("Class equivalent («начало/середина/конец N класса») is not allowed")
+    # Reliability of the diagnosis and (non-)confirmation of a single root cause are
+    # claims that no field of the report may make, the plan included.
+    texts = list(_all_strings(data))
+    if any(_has_reliability_claim(t) for t in texts):
+        errors.append("Reliability / confidence of the diagnosis (percentage or statement) is not allowed")
+    if any(_has_root_cause_claim(t) for t in texts):
+        errors.append("Statements about confirming or not confirming a single root cause are not allowed")
     return len(errors) == 0, errors
 
 
@@ -1108,35 +1167,132 @@ def _build_plan_candidates(
     return candidates
 
 
-def _build_fallback_action_plan(candidates: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+def _plan_item_from_candidate(priority: int, candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """One evidence-backed plan step.  No duration: nothing in the data supports one."""
+    name = candidate["skill_name_ru"]
+    evidence = candidate["evidence"]
+    qualifier = (
+        "Это подтверждённый пререквизит, поэтому с него следует начать коррекцию."
+        if evidence == "confirmed_prerequisite"
+        else "Затруднение зафиксировано в диагностике и требует целевой отработки."
+    )
+    return {
+        "priority": priority,
+        "skill_id": candidate["skill_id"],
+        "skill_name_ru": name,
+        "action_title": f"Отработать: {name}",
+        "full_description": (
+            f"Сначала восстановить базовый алгоритм навыка «{name}» на коротких примерах. "
+            f"Затем проверить применение правила в задачах с новым контекстом. {qualifier}"
+        ),
+        "evidence": evidence,
+        "source": "deterministic_fallback",
+    }
+
+
+def _build_fallback_action_plan(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """A usable, evidence-backed plan when the narrative provider is unavailable."""
-    plan = []
-    for priority, candidate in enumerate(candidates, 1):
-        name = candidate["skill_name_ru"]
-        evidence = candidate["evidence"]
-        qualifier = (
-            "Это подтверждённый пререквизит, поэтому с него следует начать коррекцию."
-            if evidence == "confirmed_prerequisite"
-            else "Затруднение зафиксировано в диагностике и требует целевой отработки."
-        )
-        plan.append({
-            "priority": priority,
-            "skill_id": candidate["skill_id"],
-            "skill_name_ru": name,
-            "action_title": f"Отработать: {name}",
-            "full_description": (
-                f"Сначала восстановить базовый алгоритм навыка «{name}» на коротких примерах. "
-                f"Затем проверить применение правила в задачах с новым контекстом. {qualifier}"
-            ),
-            "estimated_hours": 2,
-            "source": "deterministic_fallback",
+    return [_plan_item_from_candidate(priority, c) for priority, c in enumerate(candidates, 1)]
+
+
+def _finalize_action_plan(
+    plan: List[Dict[str, Any]], candidates: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Make the plan consistent with the single recommended start (N03a, point 5).
+
+    * the first mandatory step is always ``candidates[0]`` - the target the plan
+      builder ranked first (confirmed prerequisite, then measured gaps, then
+      observed errors); a narrative that put it elsewhere or left it out is
+      corrected here instead of trusted;
+    * ``estimated_hours`` never survives: there is no basis for durations;
+    * priorities are renumbered 1..n.
+    """
+    items = [dict(item) for item in plan if isinstance(item, dict)]
+    for item in items:
+        item.pop("estimated_hours", None)
+    if candidates:
+        first = candidates[0]
+        index = next((i for i, item in enumerate(items) if item.get("skill_id") == first["skill_id"]), None)
+        if index is None:
+            items.insert(0, _plan_item_from_candidate(1, first))
+            del items[5:]
+        elif index:
+            items.insert(0, items.pop(index))
+    for number, item in enumerate(items, 1):
+        item["priority"] = number
+    return items
+
+
+def _build_achievements(
+    topic_breakdown: Dict[str, Any],
+    skill_map: Dict[str, Dict[str, str]],
+    answers: List[Any],
+) -> List[Dict[str, Any]]:
+    """L2 topics verified by the answer journal: >= 1 correct and no wrong attempt."""
+    result: List[Dict[str, Any]] = []
+    for topic_id, info in topic_breakdown.items():
+        mine = [a for a in answers if getattr(a, "topic_id", None) == topic_id]
+        correct = sum(1 for a in mine if is_correct(getattr(a, "outcome", None)))
+        if correct < 1 or correct != len(mine):
+            continue
+        alpha = float((info or {}).get("alpha", 0))
+        result.append({
+            "skill_id": topic_id,
+            "skill_name_ru": skill_map.get(topic_id, {}).get("name_ru", topic_id),
+            "correct_answers": correct,
+            "mastery_percent": int(max(0, min(100, (0.5 + alpha / 4.0) * 100))),
         })
-    return plan
+    result.sort(key=lambda x: (-x["correct_answers"], -x["mastery_percent"], x["skill_id"]))
+    return result
+
+
+def _build_development_step(achievements: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Next development step of an error-free student: no deficit is implied.
+
+    The focus is the verified topic with the lowest mastery estimate - the one
+    that has the most room to grow - which is a plain fact of the data.
+    """
+    if not achievements:
+        return None
+    focus = min(achievements, key=lambda a: (a["mastery_percent"], a["correct_answers"], a["skill_id"]))
+    name = focus["skill_name_ru"]
+    return {
+        "priority": 1,
+        "skill_id": focus["skill_id"],
+        "skill_name_ru": name,
+        "action_title": f"Развитие: {name}",
+        "full_description": (
+            "Все выполненные задания решены верно, дефицит не выявлен. Следующий шаг — развитие: "
+            f"предложить задачи повышенной сложности и в новом контексте по теме «{name}», "
+            "затем сравнить способы решения и обосновать выбор метода. "
+            "Тема выбрана потому, что среди решённых без ошибок тем у неё наименьшая оценка освоения."
+        ),
+        "kind": "development",
+        "evidence": "error_free_development",
+        "source": "deterministic_development",
+    }
+
+
+def _recommended_start(
+    plan: List[Dict[str, Any]], candidates: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """The one recommended start: by construction the first plan step."""
+    if not plan:
+        return None
+    first = plan[0]
+    evidence = first.get("evidence") or next(
+        (c["evidence"] for c in candidates if c["skill_id"] == first.get("skill_id")), None,
+    )
+    return {
+        "skill_id": first.get("skill_id"),
+        "skill_name_ru": first.get("skill_name_ru"),
+        "evidence": evidence,
+    }
 
 
 def _build_deterministic_summary(
     *,
-    class_equivalent: str,
+    status_label: str,
     grade_level: int,
     score_pct: int,
     boundary: Dict[str, Any],
@@ -1146,23 +1302,32 @@ def _build_deterministic_summary(
     solved: Optional[int] = None,
     total: Optional[int] = None,
     provisional: bool = False,
+    achievements: Optional[List[Dict[str, Any]]] = None,
+    development_focus: Optional[str] = None,
 ) -> str:
-    """Safe fallback conclusion that never invents a causal explanation."""
+    """Safe fallback conclusion that never invents a causal explanation.
+
+    The level is stated only by its band (``status_label``); there is no
+    within-grade equivalent and no author: the text is an automatic summary.
+    ``deep_scan_run`` is accepted for compatibility: the wording no longer depends on it.
+    """
     root = chains[0].get("root_gap_skill_name") if chains else None
     observed = ", ".join(boundary.get("breakpoint_skills") or [])
-    anchors = ", ".join(item.get("skill_name_ru", "") for item in strong_skills[:2] if item.get("skill_name_ru"))
+    verified = achievements or strong_skills
+    anchors = ", ".join(item.get("skill_name_ru", "") for item in verified[:3] if item.get("skill_name_ru"))
+    error_free = not root and not observed
     if root:
         evidence_sentence = f"Углублённая проверка подтвердила первопричину: «{root}»."
-    elif observed and deep_scan_run:
-        evidence_sentence = (
-            f"Зафиксированы ключевые затруднения: {observed}; "
-            "углублённая проверка не подтвердила единую первопричину."
-        )
     elif observed:
-        evidence_sentence = f"Зафиксированы ключевые затруднения: {observed}; причинная цепочка не заявляется без углублённой проверки."
+        # Verified facts only (O4): no statement about whether a single root cause was confirmed,
+        # and no meta-statement about what the report does or does not claim.
+        evidence_sentence = f"Зафиксированы ключевые затруднения: {observed}."
     else:
         evidence_sentence = "В выполненных заданиях затруднения не зафиксированы."
-    anchors_sentence = f"Опорные навыки: {anchors}." if anchors else "Устойчивые опорные навыки требуют дальнейшего наблюдения."
+    if anchors:
+        anchors_sentence = ("Подтверждены навыки: " if error_free else "Опорные навыки: ") + f"{anchors}."
+    else:
+        anchors_sentence = "Устойчивые опорные навыки требуют дальнейшего наблюдения."
     result = (
         f"Решено {solved} из {total} заданий адаптивного теста"
         if solved is not None and total is not None else f"Результат — {score_pct}%"
@@ -1170,11 +1335,17 @@ def _build_deterministic_summary(
     provisional_sentence = (
         " Оценка предварительная: точность измерения пока ограничена." if provisional else ""
     )
+    if root or observed:
+        closing = "Коррекцию следует начать с первого пункта индивидуального плана и подтвердить перенос навыка на новой задаче."
+    elif development_focus:
+        closing = (
+            f"Следующий шаг — развитие: задачи повышенной сложности и в новом контексте по теме «{development_focus}»."
+        )
+    else:
+        closing = "Рекомендуется развивать опорные навыки на задачах с новым контекстом."
     return (
-        f"{result}. Уровень по результатам измерения — {class_equivalent} (заявлен {grade_level} класс).{provisional_sentence} "
-        f"{evidence_sentence} {anchors_sentence} "
-        + ("Коррекцию следует начать с первого пункта индивидуального плана и подтвердить перенос навыка на новой задаче."
-           if root or observed else "Рекомендуется развивать опорные навыки на задачах с новым контекстом.")
+        f"{result}. Результат измерения: «{status_label}» (заявленный класс — {grade_level}).{provisional_sentence} "
+        f"{evidence_sentence} {anchors_sentence} {closing}"
     )
 
 
@@ -1185,7 +1356,7 @@ _AI_SCHEMA = """{
     "score_percent": <int скопируй из данных>,
     "status": "<above_level|on_level|partial_gap|below_level|critical>",
     "status_label_ru": "<строка — название уровня>",
-    "student_summary": "<МЕТОДИЧЕСКОЕ ЗАКЛЮЧЕНИЕ ПЕДАГОГА-ДИАГНОСТА (4-6 связных предложений для администратора учебного центра и преподавателя). ТРЕБОВАНИЯ: (1) Назови реальный академический уровень ({class_equivalent}) относительно тестируемого {grade_level} класса. (2) Объясни МЕХАНИКУ СБОЯ (Root-Cause): укажи, какой именно базовый дефицит в младших классах (6-7 классы) разрушает усвоение программы {grade_level} класса с опорой на цепочки углублённой проверки. (3) Опиши КОГНИТИВНЫЙ ПРОФИЛЬ ОШИБОК по зафиксированным дистракторам (знаки четных степеней, скобки, распределительный закон). (4) Укажи ТОЧКИ ОПОРЫ (что ученик решает стабильно). (5) Дай прямую методическую рекомендацию по стартовой теме коррекции и группе зачисления. СТИЛЬ: профессиональный, экспертный, фактологический, без общих фраз и без сухой статистики.>"
+    "student_summary": "<АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 связных предложений для администратора учебного центра и преподавателя), безличным стилем, не от имени педагога. ТРЕБОВАНИЯ: (1) Назови уровень по его формулировке из данных, без «начала/середины/конца» какого-либо класса. (2) Объясни причину сбоя ТОЛЬКО если она подтверждена цепочкой углублённой проверки; иначе опиши наблюдаемые затруднения без причин и без утверждений о том, подтверждена или не подтверждена единая первопричина. (3) Опиши тип ошибок по зафиксированным дистракторам, не приписывая ученику психологических причин. (4) Укажи ТОЧКИ ОПОРЫ (что ученик решает стабильно). (5) Назови стартовую тему плана — первую цель списка ДОПУСТИМЫХ ЦЕЛЕЙ. Не указывай сроки, часы и проценты надёжности диагноза. СТИЛЬ: профессиональный, фактологический, без общих фраз.>"
   },
   "action_plan": [
     {
@@ -1193,8 +1364,7 @@ _AI_SCHEMA = """{
       "skill_id": "<ТОЛЬКО идентификатор из списка ДОПУСТИМЫХ ЦЕЛЕЙ>",
       "skill_name_ru": "<ТОЧНОЕ название из списка ДОПУСТИМЫХ ЦЕЛЕЙ>",
       "action_title": "<заголовок MAX 8 слов>",
-      "full_description": "<3-5 предложений: что именно отрабатывать, какие типы задач, на какие правила обратить внимание, как проверить усвоение. НЕ добавляй в конце текст про количество часов, так как часы указываются отдельно в estimated_hours>",
-      "estimated_hours": <int>
+      "full_description": "<3-5 предложений: что именно отрабатывать, какие типы задач, на какие правила обратить внимание, как проверить усвоение. НЕ указывай сроки, количество часов и обещания «полной готовности»>"
     }
   ]
 }"""
@@ -1208,7 +1378,7 @@ def _build_prompt(
     correct: int,
     total: int,
     computed_status: str,
-    class_equivalent: str,
+    status_label: str,
     topics_block: str,
     wrong_block: str,
     chains_block: str,
@@ -1233,18 +1403,19 @@ def _build_prompt(
 ПРАВИЛА:
 1. Ответ — ТОЛЬКО валидный JSON. Без markdown-обёрток, без текста до/после.
 2. overall.status — СКОПИРУЙ ТОЧНО: "{computed_status}" (уже вычислено алгоритмом).
-3. student_summary — ЭКСПЕРТНОЕ ПЕДАГОГИЧЕСКОЕ ЗАКЛЮЧЕНИЕ (4-6 предложений):
-   • Сформулируй реальный академический уровень: {class_equivalent}.
-   • {'Объясни только первопричину, подтверждённую углублённой проверкой.' if root_cause_confirmed else 'Не называй наблюдаемый дефицит «первопричиной»: опиши его как ключевое зафиксированное затруднение.'}
+3. student_summary — АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 предложений, безличный стиль, не от имени педагога, без «я»):
+   • Назови уровень его формулировкой «{status_label}». НЕ называй «начало/середину/конец» какого-либо класса и не указывай проценты «надёжности диагноза».
+   • {'Первопричину, подтверждённую углублённой проверкой (она указана в блоке цепочек ниже), можно назвать первопричиной; объясни только её.' if root_cause_confirmed else 'Не называй наблюдаемый дефицит «первопричиной»: опиши его как ключевое зафиксированное затруднение.'}
+   • НИКОГДА не пиши, что первопричина не подтверждена, не установлена, не найдена или отсутствует (в любых формулировках), и не указывай процент или оценку надёжности/достоверности диагноза: передавай только зафиксированные факты.
    • Разбери когнитивные паттерны мышления ученика по дистракторам.
    • Опиши опорные навыки (базовые темы, решенные верно).
-   • Дай четкую рекомендацию: с какой конкретной темы начать коррекцию и в какую группу определить ученика.
-4. action_plan — от {plan_min_items} до {plan_max_items} приоритетных шагов. Используй ТОЛЬКО цели из списка ниже, не добавляй темы от себя.
+   • Дай четкую рекомендацию: с какой конкретной темы начать коррекцию — это ПЕРВАЯ цель списка ниже.
+4. action_plan — от {plan_min_items} до {plan_max_items} приоритетных шагов. Используй ТОЛЬКО цели из списка ниже, не добавляй темы от себя. Первым шагом (priority 1) ОБЯЗАТЕЛЬНО поставь первую цель списка. Не указывай сроки и часы.
 
 ДАННЫЕ АДАПТИВНОЙ ДИАГНОСТИКИ:
 Ученик: {student_name} | Заявленный класс: {grade_level} | Код теста: {test_code}
 Решено: {correct} из {total} заданий адаптивного теста ({score_pct}%; это факт о выданном наборе, уровень определён по θ, а не по этому проценту)
-Реальный уровень (IRT): {class_equivalent} | Статус: {computed_status}
+Уровень по результатам измерения (IRT): {status_label} | Статус: {computed_status}
 
 АКАДЕМИЧЕСКАЯ ГРАНИЦА ЗНАНИЙ:
 {boundary_block}
@@ -1266,6 +1437,90 @@ def _build_prompt(
 
 ВЕРНИ ТОЛЬКО JSON:
 {_AI_SCHEMA}"""
+
+
+def _local_today() -> date:
+    """Today's calendar day in the learning centre's zone (Asia/Tashkent), not in the container's UTC."""
+    return datetime.now(_LOCAL_TZ).date()
+
+
+def _attempt_date(db: Session, session_id: uuid.UUID, answers: List[Any]) -> str:
+    """ISO date of the diagnostic attempt (completion, else last answer, else today)."""
+    from src.models.diag_models import DiagSession
+
+    try:
+        completed = db.query(DiagSession.completed_at).filter(DiagSession.id == session_id).scalar()
+    except Exception as exc:  # the date is informational; never fail a report over it
+        log.warning("Could not read completion time of session %s: %s", session_id, exc)
+        completed = None
+        try:
+            db.rollback()  # a failed statement aborts the transaction; the report still has to be saved
+        except Exception as rollback_exc:
+            log.warning("Rollback after failed completion-time read of session %s failed: %s",
+                        session_id, rollback_exc)
+    if completed is None:
+        completed = next(
+            (a.answered_at for a in reversed(answers) if getattr(a, "answered_at", None)), None,
+        )
+    if completed is None:
+        return _local_today().isoformat()
+    # Timestamps are stored as naive UTC, but the learning centre's calendar day is
+    # Asia/Tashkent (UTC+5): an attempt finished at 00:00–05:00 local time falls on
+    # the previous UTC date, so converting first keeps the printed date correct.
+    if completed.tzinfo is None:
+        completed = completed.replace(tzinfo=timezone.utc)
+    return completed.astimezone(_LOCAL_TZ).date().isoformat()
+
+
+_PLAN_IDENTIFIER_KEYS = frozenset({"skill_id", "skill_name_ru", "evidence", "priority"})
+
+
+def _sweep_plan_prose(value: Any) -> Any:
+    """Plan strings without the sentences that claim reliability or (non-)confirm a root cause."""
+    if isinstance(value, str):
+        return drop_retired_sentences(value)
+    if isinstance(value, list):
+        return [_sweep_plan_prose(v) for v in value]
+    if isinstance(value, dict):
+        return {k: (v if k in _PLAN_IDENTIFIER_KEYS else _sweep_plan_prose(v)) for k, v in value.items()}
+    return value
+
+
+def strip_retired_report_fields(report_json: Any) -> Any:
+    """Copy of a stored report without claims retired by N03a (decision O4).
+
+    Reports built before schema 5 stay in the database until they are
+    regenerated.  Their structured ``confidence_of_diagnosis`` percentage, class
+    equivalent and per-step ``estimated_hours`` are removed.  The same claims
+    are also written into the prose ``overall.student_summary`` («конец 7 класса
+    (заявлен 8)», «Надёжность диагноза 83%», «углублённая проверка не подтвердила
+    единую первопричину»); that text cannot be edited
+    sentence by sentence, so such a summary is withheld (``None`` — the front
+    hides the block) until the report is regenerated.  A summary without these
+    claims is returned unchanged.  In the action plan the same prose claims are
+    removed sentence by sentence (a step keeps the rest of its text).
+    """
+    if not isinstance(report_json, dict):
+        return report_json
+    from copy import deepcopy
+
+    cleaned = deepcopy(report_json)
+    for block in (cleaned.get("overall"), cleaned.get("level")):
+        if isinstance(block, dict):
+            block.pop("confidence_of_diagnosis", None)
+            block.pop("class_equivalent", None)
+    overall = cleaned.get("overall")
+    if isinstance(overall, dict) and contains_retired_claim(overall.get("student_summary")):
+        overall["student_summary"] = None
+    plan = cleaned.get("action_plan")
+    if isinstance(plan, list):
+        for item in plan:
+            if isinstance(item, dict):
+                item.pop("estimated_hours", None)
+                # plan prose: only the offending sentence goes, the rest of the step stays
+                for key in [k for k in item if k not in _PLAN_IDENTIFIER_KEYS]:
+                    item[key] = _sweep_plan_prose(item[key])
+    return cleaned
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -1306,6 +1561,7 @@ def generate_and_save_report(
     # Persistence below must also be safe when evidence collection fails before
     # the narrative call is reached.
     ai_data: Optional[Dict[str, Any]] = None
+    recommended_start: Optional[Dict[str, Any]] = None
     if (
         existing
         and existing.report_json
@@ -1369,9 +1625,9 @@ def generate_and_save_report(
         deep_scan_run = bool(prerequisite_answers)
         # ── Level — only from theta/se (never from %-correct, never from AI) ──
         level = build_level(th, se, grade_level, solved=correct, total=total)
-        computed_status, computed_label_ru, class_equivalent = _legacy_overall(level)
-        log.info("Computed level=%s status=%s (solved=%d/%d, theta=%.2f, class_eq=%s, provisional=%s)",
-                 level["category"], computed_status, correct, total, th, class_equivalent, level["provisional"])
+        computed_status, computed_label_ru = _legacy_overall(level)
+        log.info("Computed level=%s status=%s (solved=%d/%d, theta=%.2f, provisional=%s)",
+                 level["category"], computed_status, correct, total, th, level["provisional"])
 
         # ── Advanced Diagnostic Data Blocks ───────────────────────────────────
         root_cause_chains = _reconstruct_root_cause_chains(answers_orm, skill_map, error_patterns, grade_level)
@@ -1415,7 +1671,7 @@ def generate_and_save_report(
                 f"(Суть ошибки: {expl}){anc}"
             )
         chains_block = "\n".join(chain_lines) or (
-            "  (углублённая проверка не подтвердила единую первопричину)"
+            "  (углублённая проверка проведена; цепочек для разбора в данных нет)"
             if deep_scan_run else "  (спуск не потребовался)"
         )
 
@@ -1443,6 +1699,13 @@ def generate_and_save_report(
 
         # ── Wrong answers block for prompt (max 8, unique skills) ────────────
         wrong_answers = [a for a in answers_orm if not is_correct(a.outcome)]
+        # Error-free attempt: every journal answer is correct and nothing in the
+        # evidence asks for a correction.  Such a report shows achievements and a
+        # development step, never a deficit, and does not need the narrative model
+        # (its prompt is a correction prompt).
+        achievements = _build_achievements(topic_breakdown, skill_map, answers_orm)
+        error_free = bool(answers_orm) and not wrong_answers and not plan_candidates
+        development_step = _build_development_step(achievements) if error_free else None
         seen: set = set()
         selected_wrong = []
         for a in wrong_answers:
@@ -1465,8 +1728,9 @@ def generate_and_save_report(
             db.commit()
         last_errors: List[str] = []
 
-        # ``skip_narrative``: deterministic backfills never call the paid model.
-        for attempt in range(1, 1 if skip_narrative else 3):
+        # ``skip_narrative``: deterministic backfills never call the paid model;
+        # an error-free attempt has nothing to correct, so it is deterministic too.
+        for attempt in range(1, 1 if (skip_narrative or error_free) else 3):
             prompt = _build_prompt(
                 grade_level=grade_level,
                 overall_level=overall_level,
@@ -1474,7 +1738,7 @@ def generate_and_save_report(
                 correct=correct,
                 total=total,
                 computed_status=computed_status,
-                class_equivalent=class_equivalent,
+                status_label=computed_label_ru,
                 topics_block=topics_block,
                 wrong_block=wrong_block,
                 chains_block=chains_block,
@@ -1514,15 +1778,16 @@ def generate_and_save_report(
                 last_errors = errors
                 log.warning("Attempt %d: validation errors: %s", attempt, errors[:3])
 
-        if not ai_data and not skip_narrative:
+        if not ai_data and not skip_narrative and not error_free:
             log.warning("AI generation unavailable for session %s; using deterministic report wording.", session_id)
-
-        # ── Reliability Calculation (rho = 1 - SE^2) ──────────────────────────
-        reliability = round(max(0.0, min(0.99, 1.0 - (float(theta_se) ** 2))), 2)
 
         # ── Clean action plan descriptions ──────────────────────────────────
         action_plan_cleaned = []
-        for item in (ai_data or {}).get("action_plan", _build_fallback_action_plan(plan_candidates)):
+        if error_free:
+            plan_source: List[Any] = [development_step] if development_step else []
+        else:
+            plan_source = (ai_data or {}).get("action_plan", _build_fallback_action_plan(plan_candidates))
+        for item in plan_source:
             if isinstance(item, dict):
                 raw_desc = str(item.get("full_description") or "").strip()
                 cleaned_desc = re.sub(
@@ -1534,11 +1799,14 @@ def generate_and_save_report(
                 item_copy = dict(item)
                 item_copy["full_description"] = cleaned_desc
                 action_plan_cleaned.append(item_copy)
+        # One recommended start: the first mandatory step is plan_candidates[0].
+        action_plan = _finalize_action_plan(action_plan_cleaned, plan_candidates)
+        recommended_start = _recommended_start(action_plan, plan_candidates)
 
         # ── Merge AI + computed data ──────────────────────────────────────────
         overall_block = (ai_data or {}).get("overall", {})
         deterministic_summary = _build_deterministic_summary(
-            class_equivalent=class_equivalent,
+            status_label=computed_label_ru,
             grade_level=grade_level,
             score_pct=score_pct,
             boundary=diagnostic_boundary,
@@ -1548,6 +1816,8 @@ def generate_and_save_report(
             solved=correct,
             total=total,
             provisional=level["provisional"],
+            achievements=achievements if error_free else None,
+            development_focus=development_step["skill_name_ru"] if development_step else None,
         )
         # Content-service lookups that failed (transport, not "not found") make the
         # parent-topic mapping / names incomplete.  Such a report is usable but is
@@ -1566,7 +1836,11 @@ def generate_and_save_report(
                 "test_code":        test_code,
                 "error_patterns_version": ERROR_PATTERNS_VERSION,
                 "report_schema_version": REPORT_SCHEMA_VERSION,
-                "date":             date.today().isoformat(),
+                # Date of the attempt (not of the rebuild): a regenerated report must
+                # not look as if the student took the test today.
+                "date":             _attempt_date(db, session_id, answers_orm),
+                "generated_on":     _local_today().isoformat(),
+                "error_free":       error_free,
                 # "solved N of M": adaptive-test items only (same as level.*).
                 "total_questions":  total,
                 "questions_correct": correct,
@@ -1588,10 +1862,8 @@ def generate_and_save_report(
                 "status":           computed_status,   # legacy code, from level_policy
                 "status_label_ru":  computed_label_ru, # from level_policy
                 "student_summary":  overall_block.get("student_summary") or deterministic_summary,
-                "class_equivalent": class_equivalent,  # from level_policy
                 "category":         level["category"],
                 "provisional":      level["provisional"],
-                "confidence_of_diagnosis": reliability,
             },
             # The single level object (N02).  The legacy ``overall`` fields above
             # are filled from it.
@@ -1605,8 +1877,12 @@ def generate_and_save_report(
             "weak_skills":     weak_skills_block,
             "critical_gaps":   critical_gaps,
             "error_patterns":  error_patterns,
-            # ── AI-generated ──
-            "action_plan":     action_plan_cleaned,
+            # Topics solved without a single wrong attempt (journal-verified).
+            "achievements":    achievements,
+            # ── Plan: narrative wording over deterministic targets ──
+            # ``recommended_start`` is the first step of ``action_plan`` (or None).
+            "recommended_start": recommended_start,
+            "action_plan":     action_plan,
         }
 
     except Exception as exc:
@@ -1644,6 +1920,8 @@ def generate_and_save_report(
     try:
         if existing:
             existing.report_json = report_json
+            # One recommended start - the same skill as the first plan step.
+            existing.recommended_start = (recommended_start or {}).get("skill_id")
             existing.narrative_generated = bool(ai_data)
             current = bool(report_json) and not degraded
             existing.report_schema_version = REPORT_SCHEMA_VERSION if current else 0
@@ -1668,7 +1946,7 @@ def generate_and_save_report(
             confidence_interval_hi=ci_hi,
             topic_breakdown=topic_breakdown,
             weak_skills=weak_skills,
-            recommended_start=weak_skills[0] if weak_skills else None,
+            recommended_start=(recommended_start or {}).get("skill_id"),
             report_json=report_json,
             narrative_ru=None,
             narrative_generated=bool(ai_data),

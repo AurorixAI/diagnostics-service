@@ -37,7 +37,7 @@ from src.core.exceptions import (
 )
 from src.domain.auth_sync_jobs import enqueue_auth_completion_sync, process_next_auth_completion_sync
 from src.domain.report_jobs import enqueue_report_generation, process_next_report_job
-from src.domain.report_generator import REPORT_SCHEMA_VERSION
+from src.domain.report_generator import REPORT_SCHEMA_VERSION, strip_retired_report_fields
 from src.domain.level_policy import classify, count_solved, is_correct
 from src.domain.alpha_engine import (
     AlphaTracker,
@@ -445,7 +445,8 @@ class SessionService:
         report_json: dict = {}
         error_patterns: list = []
         if report and report.report_json and isinstance(report.report_json, dict):
-            report_json = report.report_json
+            # Retired claims (O4) of pre-schema-5 reports are never exposed.
+            report_json = strip_retired_report_fields(report.report_json)
             error_patterns = report_json.get("error_patterns", [])
 
         report_generation = {
@@ -475,8 +476,12 @@ class SessionService:
             "confidence_interval": [theta - 2 * se, theta + 2 * se],
             "topic_breakdown": db_session.topic_breakdown or {},
             "weak_skills": db_session.weak_skills or [],
+            # One recommended start: the first plan step of the report.  Only a
+            # report that predates it falls back to the first confirmed gap.
             "recommended_start": (
-                db_session.weak_skills[0] if db_session.weak_skills else None
+                (report_json.get("recommended_start") or {}).get("skill_id")
+                if "recommended_start" in report_json
+                else (db_session.weak_skills[0] if db_session.weak_skills else None)
             ),
             "items_total": len(answers),
             "total_time_ms": sum(answer.time_ms or 0 for answer in answers),

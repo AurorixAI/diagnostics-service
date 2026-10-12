@@ -36,33 +36,17 @@ def test_category_agrees_with_cat_theta_to_level_on_the_whole_grid():
         assert lp.CATEGORY_OF_STATUS[lp.classify(theta, 0.3, 8)["status"]] == theta_to_level(theta)
 
 
-@pytest.mark.parametrize("grade", range(5, 12))
-def test_class_equivalent_is_monotonic_in_theta_and_capped(grade):
-    parts = {"начало": 0, "середина": 1, "конец": 2}
-    previous = -1
-    for theta in GRID:
-        text = lp.classify(theta, 0.3, grade)["class_equivalent"]
-        part, number = re.fullmatch(r"(начало|середина|конец) (\d+) класса", text).groups()
-        assert 5 <= int(number) <= 11
-        ordinal = int(number) * 3 + parts[part]
-        assert ordinal >= previous, (theta, text)
-        previous = ordinal
-
-
-def test_class_equivalent_depends_only_on_theta_and_grade_not_on_se():
+def test_no_class_equivalent_is_computed_or_stored():
+    """N03a (O4): "beginning/middle/end of grade N" has no norming behind it."""
+    assert not hasattr(lp, "class_equivalent")
+    for theta in GRID[::25]:
+        for grade in (5, 8, 11):
+            level = lp.classify(theta, 0.3, grade)
+            assert "class_equivalent" not in level
+            assert not re.search(r"(начал|середин|конец|конц)", str(level))
+    # the level band itself is untouched and does not depend on the declared grade
     for theta in (-2.5, -0.7, 0.3, 1.2):
-        assert (lp.classify(theta, 0.1, 9)["class_equivalent"]
-                == lp.classify(theta, 0.9, 9)["class_equivalent"]
-                == lp.classify(theta, None, 9)["class_equivalent"])
-
-
-def test_class_equivalent_examples_documented_in_the_module():
-    assert lp.class_equivalent(0.48, 8) == "начало 8 класса"       # stage session 2ab4c0de
-    assert lp.class_equivalent(0.7, 8) == "середина 8 класса"
-    assert lp.class_equivalent(-1.5, 9) == "начало 7 класса"
-    assert lp.class_equivalent(-0.1, 9) == "конец 8 класса"
-    assert lp.class_equivalent(3.0, 11) == "конец 11 класса"
-    assert lp.class_equivalent(-3.0, 5) == "начало 5 класса"
+        assert lp.classify(theta, 0.3, 6) == lp.classify(theta, 0.3, 10)
 
 
 def test_provisional_flag():
@@ -73,7 +57,7 @@ def test_provisional_flag():
 
 def test_no_theta_concludes_nothing():
     result = lp.classify(None, 0.2, 9)
-    assert result["category"] is result["status"] is result["class_equivalent"] is None
+    assert result["category"] is result["status"] is None
     assert result["provisional"] is True
 
 
@@ -82,7 +66,7 @@ def test_percent_correct_cannot_change_the_level():
     level = lp.build_level(0.48, 0.25, 8, solved=2, total=10)
     assert level["status"] == "on_level" and level["category"] == "at_grade"
     assert (level["solved"], level["total"]) == (2, 10)
-    assert set(level) == {"category", "status", "class_equivalent", "provisional",
+    assert set(level) == {"category", "status", "provisional",
                           "theta", "se", "solved", "total"}
 
 

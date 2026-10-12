@@ -1,0 +1,1164 @@
+"""N03a (owner decision O4): what a diagnostic report must NOT claim, and the plan contract.
+
+No database and no model call: the generator runs against a fake session.
+Covers: no reliability percentage / class equivalent / invented durations, one
+``recommended_start`` equal to the first plan step, the error-free scenario,
+attempt date vs build date, and stripping of retired fields from stored reports.
+"""
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace as NS
+import uuid
+
+import pytest
+
+from src.domain import report_generator as rg
+from src.models.diag_models import DiagAnswer
+
+T0 = datetime(2026, 10, 1, 10, 0, 0)
+
+NODES = {
+    "G8_T1": NS(id="G8_T1", level="L2", parent_id="G8_S", name_ru="Дроби"),
+    "G8_T2": NS(id="G8_T2", level="L2", parent_id="G8_S", name_ru="Степени"),
+    "G8_T3": NS(id="G8_T3", level="L2", parent_id="G8_S", name_ru="Уравнения"),
+    "G8_T1_K1": NS(id="G8_T1_K1", level="L4", parent_id="G8_T1", name_ru="Сложение дробей"),
+    "G8_T2_K1": NS(id="G8_T2_K1", level="L4", parent_id="G8_T2", name_ru="Свойства степеней"),
+    "G8_T3_K1": NS(id="G8_T3_K1", level="L4", parent_id="G8_T3", name_ru="Линейные уравнения"),
+    "G7_T9_K1": NS(id="G7_T9_K1", level="L4", parent_id=None, name_ru="Сравнение дробей"),
+    "G8_S": NS(id="G8_S", level="L1", parent_id=None, name_ru="Алгебра"),
+}
+
+
+def ans(skill, topic, outcome, minute, *, deep=False, origin=None, step=None):
+    return NS(
+        id=f"a{minute:03d}", session_id=None, task_id=f"T{minute}", skill_id=skill, topic_id=topic,
+        outcome=outcome, is_deep_scan=deep, phase="deep_scan" if deep else "navigation",
+        eval_category="correct" if outcome else "wrong", student_answer="1" if outcome else "0",
+        answered_at=T0 + timedelta(minutes=minute), time_ms=1000,
+        deep_scan_origin_skill_id=origin, deep_scan_step=step, task_snapshot=None, ai_evaluated=False,
+    )
+
+
+class FakeQuery:
+    def __init__(self, rows=(), value=None):
+        self.rows, self.value = list(rows), value
+
+    def filter(self, *_a, **_k):
+        return self
+
+    def order_by(self, *_a, **_k):
+        return self
+
+    def all(self):
+        return list(self.rows)
+
+    def scalar(self):
+        return self.value
+
+
+class FakeDB:
+    def __init__(self, answers, completed_at=None):
+        self.answers, self.completed_at, self.added = answers, completed_at, []
+
+    def query(self, entity):
+        return FakeQuery(self.answers) if entity is DiagAnswer else FakeQuery(value=self.completed_at)
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    def commit(self):
+        pass
+
+    def refresh(self, _obj):
+        pass
+
+    def rollback(self):
+        pass
+
+
+@pytest.fixture
+def gen(monkeypatch):
+    calls = []
+
+    class FakeKnowledge:
+        def get_by_id(self, node_id):
+            return NODES.get(node_id)
+
+    class FakeReports:
+        def __init__(self, _db):
+            pass
+
+        def get_by_session(self, _sid):
+            return None
+
+    monkeypatch.setattr(rg, "KnowledgeRepository", FakeKnowledge)
+    monkeypatch.setattr(rg, "DiagReportRepository", FakeReports)
+    monkeypatch.setattr(rg, "_load_task_context", lambda answer: (None, "unavailable"))
+
+    def run(answers, *, narrative=None, weak=(), breakdown=None, completed_at=None, theta=0.3, se=0.3, **kw):
+        def fake_llm(prompt, **_k):
+            calls.append(prompt)
+            return narrative(prompt) if callable(narrative) else narrative
+
+        monkeypatch.setattr(rg, "call_gemini", fake_llm)
+        topics = breakdown if breakdown is not None else {
+            "G8_T1": {"alpha": 0.2, "observations": 3},
+            "G8_T2": {"alpha": 0.8, "observations": 3},
+            "G8_T3": {"alpha": 0.4, "observations": 3},
+        }
+        db = FakeDB(answers, completed_at)
+        report = rg.generate_and_save_report(
+            db, session_id=uuid.uuid4(), student_id=uuid.uuid4(), grade_level=8, theta=theta,
+            theta_se=se, overall_level="at_grade", topic_breakdown=topics, weak_skills=list(weak),
+            items_total=len(answers), student_name="Ученик", test_code="T", **kw,
+        )
+        assert report is not None and report.report_json, "report was not built"
+        return report
+
+    run.llm_calls = calls
+    return run
+
+
+def _gap_answers():
+    """T1: wrong twice (Deep Scan confirms a prerequisite); T2: correct; T3: wrong."""
+    return [
+        ans("G8_T1_K1", "G8_T1", 0, 1),
+        ans("G7_T9_K1", "G8_T1", 0, 2, deep=True, origin="G8_T1_K1", step=1),
+        ans("G8_T2_K1", "G8_T2", 1, 3),
+        ans("G8_T3_K1", "G8_T3", 0, 4),
+        ans("G8_T1_K1", "G8_T1", 0, 5),
+    ]
+
+
+# ── O4: retired claims never appear ───────────────────────────────────────────
+
+def test_schema_version_is_bumped_for_the_contract_change():
+    assert rg.REPORT_SCHEMA_VERSION == 5
+
+
+def test_report_has_no_reliability_percent_no_class_equivalent_no_hours(gen):
+    report = gen(_gap_answers(), weak=["G7_T9_K1"])
+    rj = report.report_json
+    assert "confidence_of_diagnosis" not in rj["overall"]
+    assert "class_equivalent" not in rj["overall"] and "class_equivalent" not in rj["level"]
+    assert rj["action_plan"] and all("estimated_hours" not in step for step in rj["action_plan"])
+    text = str(rj).lower()
+    assert not rg._CLASS_EQUIVALENT_RE.search(text)
+    assert "надёжност" not in text and "reliab" not in text
+    # the level band itself is kept
+    assert rj["overall"]["status_label_ru"] and rj["level"]["status"] and rj["level"]["category"]
+    assert "Результат измерения: «" in rj["overall"]["student_summary"]
+
+
+def test_narrative_hours_are_dropped_and_the_plan_starts_at_the_recommended_start(gen):
+    answers = _gap_answers()
+    first = gen(answers, weak=["G7_T9_K1"], narrative=None).report_json
+    candidates = [step["skill_id"] for step in first["action_plan"]]
+    assert len(candidates) >= 3, candidates
+
+    # the narrative puts the first target LAST and adds hours: both must be corrected
+    shuffled = candidates[1:] + candidates[:1]
+    # status/score must match the deterministic values for the narrative to validate
+    status, score = first["overall"]["status"], first["overall"]["score_percent"]
+
+    def narrative(_prompt):
+        import json
+        names = {step["skill_id"]: step["skill_name_ru"] for step in first["action_plan"]}
+        return json.dumps({
+            "overall": {"status": status, "score_percent": score, "student_summary": "Текст."},
+            "action_plan": [
+                {"priority": i, "skill_id": sid, "skill_name_ru": names[sid], "action_title": "Тема",
+                 "full_description": "Практика. Рекомендуемое количество часов: 4 часа.", "estimated_hours": 4}
+                for i, sid in enumerate(shuffled, 1)
+            ],
+        }, ensure_ascii=False)
+
+    rj = gen(answers, weak=["G7_T9_K1"], narrative=narrative).report_json
+    plan = rj["action_plan"]
+    assert rj["report_meta"]["narrative_status"] == "ready"
+    assert [step["skill_id"] for step in plan][0] == candidates[0]
+    assert [step["priority"] for step in plan] == list(range(1, len(plan) + 1))
+    assert all("estimated_hours" not in step for step in plan)
+    assert all("часов" not in step["full_description"] for step in plan)
+
+
+def test_finalize_inserts_the_first_target_when_the_narrative_plan_lacks_it():
+    candidates = [{"skill_id": f"S{i}", "skill_name_ru": f"Навык {i}", "evidence": "observed_error"}
+                  for i in range(1, 6)]
+
+    def step(i, sid):
+        return {"priority": i, "skill_id": sid, "skill_name_ru": f"Навык {sid[1:]}", "action_title": "Тема",
+                "full_description": "Практика.", "estimated_hours": 2}
+
+    plan = rg._finalize_action_plan([step(1, "S3"), step(2, "S4"), step(3, "S5")], candidates)
+    assert [s["skill_id"] for s in plan] == ["S1", "S3", "S4", "S5"]
+    assert [s["priority"] for s in plan] == [1, 2, 3, 4]
+    assert plan[0]["source"] == "deterministic_fallback" and "estimated_hours" not in plan[1]
+
+    full = rg._finalize_action_plan([step(i, f"S{i}") for i in (2, 3, 4, 5, 6)], candidates)
+    assert len(full) == 5 and full[0]["skill_id"] == "S1"            # the compact plan stays compact
+
+    assert rg._finalize_action_plan([], []) == []
+
+
+def test_one_recommended_start_equals_first_plan_step_and_column(gen):
+    report = gen(_gap_answers(), weak=["G7_T9_K1"])
+    rj = report.report_json
+    start, first = rj["recommended_start"], rj["action_plan"][0]
+    assert start["skill_id"] == first["skill_id"] == report.recommended_start
+    assert start["skill_name_ru"] == first["skill_name_ru"]
+    assert start["evidence"] == "confirmed_prerequisite"
+    # a confirmed prerequisite outranks the first Deep Scan id in session.weak_skills order
+    assert first["skill_id"] == "G7_T9_K1"
+
+
+def test_recommended_start_is_not_the_session_weak_skills_head_when_the_plan_ranks_otherwise(gen):
+    # weak_skills lists an id that is NOT the best-ranked plan target
+    report = gen(_gap_answers(), weak=["G8_T3_K1", "G7_T9_K1"])
+    rj = report.report_json
+    assert report.recommended_start == rj["action_plan"][0]["skill_id"] == rj["recommended_start"]["skill_id"]
+
+
+def test_validator_rejects_class_equivalent_and_reliability_in_the_narrative():
+    allowed = {"G8_T1": "Дроби"}
+
+    def check(summary):
+        data = {
+            "overall": {"status": "below_level", "score_percent": 30, "student_summary": summary},
+            "action_plan": [{"priority": 1, "skill_id": "G8_T1", "skill_name_ru": "Дроби",
+                             "action_title": "Тема", "full_description": "Практика."}],
+        }
+        return rg._validate_ai_output(data, computed_status="below_level", score_pct=30, allowed_plan_skills=allowed)
+
+    assert check("Ученик работает на уровне, ниже заявленного.")[0]
+    for bad in ("Уровень — середина 7 класса.", "Это начало 8 класса.", "В конце 9 класса.",
+                "Надёжность диагноза 84%."):
+        valid, errors = check(bad)
+        assert not valid and errors, bad
+
+
+def _narrative(summary, *, description="Практика.", label="Ниже уровня класса"):
+    return {
+        "overall": {"status": "below_level", "score_percent": 30, "status_label_ru": label,
+                    "student_summary": summary},
+        "action_plan": [{"priority": 1, "skill_id": "G8_T1", "skill_name_ru": "Дроби",
+                         "action_title": "Тема", "full_description": description}],
+    }
+
+
+def _validate(data):
+    return rg._validate_ai_output(data, computed_status="below_level", score_pct=30,
+                                  allowed_plan_skills={"G8_T1": "Дроби"})
+
+
+@pytest.mark.parametrize("bad", [
+    "Уровень — конец седьмого класса.",                    # number word (was missed)
+    "Соответствует концу седьмого класса.",
+    "Это НАЧАЛО ВОСЬМОГО КЛАССА.",                         # case-insensitive
+    "Ориентир: середина девятого класса.",
+    "Уровень на конец 10-го класса.",
+    "Надёжность 83%.",                                     # without «диагноза» (was missed)
+    "Надежность результата составляет 83 %.",
+    "Надёжность диагностики — 0,83.",
+    "Диагноз с надёжностью 83 процента.",
+    "Надёжность диагноза высокая.",
+    "Результат подтверждён с 83% надёжностью.",
+])
+def test_validator_catches_class_equivalent_and_reliability_variants(bad):
+    valid, errors = _validate(_narrative(bad))
+    assert not valid and errors, bad
+
+
+@pytest.mark.parametrize("bad_label", ["Конец 7 класса", "Надёжность 83%"])
+def test_validator_checks_the_level_label_too(bad_label):
+    assert not _validate(_narrative("Текст.", label=bad_label))[0]
+
+
+@pytest.mark.parametrize("good", [
+    "Решено верно 3 из 10 заданий (30%), затруднения в дробях.",
+    "Ученик уверенно решает задания на сложение дробей.",
+    "Тему изучают в седьмом классе, ученику доступен материал 8 класса.",
+    "Уровень диагностики подтверждён тремя заданиями из 10 (30%).",
+])
+def test_validator_accepts_ordinary_level_prose(good):
+    assert _validate(_narrative(good))[0], good
+
+
+def test_validator_does_not_reject_class_references_in_the_plan():
+    # «в конце 7 класса изучают …» is a legitimate curriculum reference outside the level statement
+    data = _narrative("Ученик допускает ошибки в сложении дробей.",
+                      description="Повторите правило: в конце 7 класса изучают сложение дробей.")
+    assert _validate(data) == (True, [])
+    data["action_plan"][0]["action_title"] = "Тема 7 класса"
+    assert _validate(data)[0]
+
+
+# Reliability / confidence of the diagnosis is rejected in EVERY field, the plan included
+# (595bcce had narrowed the check to overall/level so that «надёжность прибора 0,95» in a
+# probability task would pass - the subject of the sentence now tells the two apart).
+@pytest.mark.parametrize("bad", [
+    "Надёжность диагноза 83%.",
+    "Повторите правило; надёжность метода 100%.",
+    "Диагностика завершена, надёжность 83 %.",
+    "Надёжность диагностики высокая.",
+    "Достоверность отчёта подтверждена.",
+    "Результат подтверждён с 83% надёжностью.",
+    "Надёжность — 0,83.",
+])
+@pytest.mark.parametrize("field", ["full_description", "action_title"])
+def test_validator_rejects_reliability_claims_anywhere_in_the_plan(bad, field):
+    data = _narrative("Ученик допускает ошибки в сложении дробей.")
+    data["action_plan"][0][field] = f"Тема. {bad}"
+    valid, errors = _validate(data)
+    assert not valid and any("Reliability" in e for e in errors), bad
+
+
+@pytest.mark.parametrize("good", [
+    "Решите задачи на вероятность: надёжность прибора равна 0,95, найдите вероятность отказа.",
+    "Надёжность системы из двух независимых элементов равна произведению их надёжностей.",
+    "Вероятность безотказной работы (надёжность узла) равна 0,99; найдите вероятность отказа.",
+    "Прибор работает с 95% надёжностью; сколько приборов из 200 откажет?",
+    "Найдите надёжность устройства 0,9 · 0,8.",
+    "Повторите правило: в конце 7 класса изучают сложение дробей.",
+])
+def test_validator_accepts_math_curriculum_wording_in_the_plan(good):
+    data = _narrative("Ученик допускает ошибки в сложении дробей.", description=good)
+    assert _validate(data) == (True, []), good
+
+
+def test_validator_reliability_claim_is_rejected_in_any_other_field_too():
+    data = _narrative("Ученик допускает ошибки в сложении дробей.")
+    data["extra"] = {"note": ["без претензий", "Надёжность диагноза 83%"]}
+    assert not _validate(data)[0]
+
+
+# Statements about (not) confirming a single root cause are retired too (O4).
+ROOT_CAUSE_CLAIMS = [
+    "Углублённая проверка не подтвердила единую первопричину.",
+    "Углубленная проверка не подтвердила единую первопричину.",          # е instead of ё
+    "Проверка не подтвердил единую первопричину",
+    "Результаты не подтвердили единую первопричину",
+    "Единая первопричина не подтверждена",
+    "ЕДИНАЯ ПЕРВОПРИЧИНА НЕ УСТАНОВЛЕНА",
+    "Единая первопричина — не подтверждена",                              # em dash
+    "Единая первопричина – не установлена",                               # en dash
+    "Единая перво\u2011причина не подтверждена",                           # non-breaking hyphen
+    "Единая первопричина не\u2011подтверждена",
+    "Единая первопричина\u00a0не\u00a0подтверждена",                         # no-break spaces
+    "Единую первопричину не удалось установить.",
+    "Единой первопричины нет.",
+    "Единая первопричина отсутствует.",
+    "Первопричина не была подтверждена.",
+    "Первопричина пока не определена.",
+    "Проверка не позволила установить первопричину.",
+    "Тест не нашёл первопричину.",
+    "Общая причина ошибок не установлена.",
+    "Нет единой первопричины.",
+    "Первопричина отсутствует.",
+    "Первопричину установить не удалось.",
+    "Первопричина, к сожалению, не установлена.",
+    "Нельзя установить единую первопричину.",
+    "Единая первопричина не прослеживается.",
+]
+
+
+@pytest.mark.parametrize("bad", ROOT_CAUSE_CLAIMS)
+def test_root_cause_claim_variants_are_retired(bad):
+    assert rg.contains_retired_claim(bad), bad
+    for field in ("summary", "plan"):
+        data = _narrative(bad if field == "summary" else "Ученик допускает ошибки.",
+                          description=bad if field == "plan" else "Практика.")
+        valid, errors = _validate(data)
+        assert not valid and any("root cause" in e for e in errors), (field, bad)
+
+
+@pytest.mark.parametrize("good", [
+    "Углублённая проверка подтвердила первопричину: «Сложение дробей».",
+    "Углублённая проверка подтвердила первопричину: «Неопределённый интеграл».",
+    "Зафиксированы ключевые затруднения: Дроби, Степени.",
+    "Зафиксированы ключевые затруднения: Дроби.",
+    "Ученик не подтвердил знание дробей в трёх заданиях.",
+    "Тема не изучена, причины ошибок разнообразны.",
+])
+def test_neutral_root_cause_wording_is_not_a_retired_claim(good):
+    assert not rg.contains_retired_claim(good), good
+    assert _validate(_narrative(good))[0], good
+
+
+@pytest.mark.parametrize("text, expected", [
+    # the negation directly governs the root-cause noun phrase -> retired claim
+    ("Единая первопричина не подтверждена.", True),
+    ("Углублённая проверка не подтвердила единую первопричину.", True),
+    ("Первопричину установить не удалось.", True),
+    ("Первопричина не выявлена", True),
+    ("единой первопричины нет", True),
+    ("Первопричина, к сожалению, не установлена", True),               # a plain comma is not a break
+    ("Первопричина не была подтверждена", True),
+    ("Первопричина пока не определена", True),
+    ("Проверка не позволила установить первопричину", True),
+    ("Тест не нашёл первопричину", True),
+    ("Общая причина ошибок не установлена", True),
+    ("Нет единой первопричины", True),
+    ("Первопричина отсутствует", True),
+    ("Единая первопричина — не подтверждена", True),                  # dash + negated participle
+    ("В теме «Дроби» первопричина, по данным проверки, не подтверждена.", True),
+    ("Ошибки в теме «Степени» есть; единая первопричина не подтверждена.", True),   # claim in the second clause
+    # the negation or «нет/отсутствует» belongs to something else -> not a claim
+    ("Углублённая проверка подтвердила первопричину: «Рациональное неравенство с невыделенным нулем».", False),
+    ("Первопричина — незафиксированный знак", False),
+    ("Первопричина — нет навыка раскрытия скобок", False),
+    ("Первопричина: нет понимания дроби", False),
+    ("Первопричина ошибок: отсутствует навык приведения к общему знаменателю", False),
+    ("Первопричина — «Дроби»: ученик не выделил целую часть", False),
+    ("Ошибок в теме «Степени» не выявлено, первопричина — дроби", False),
+    ("Первопричина затруднений — дроби (не удалось решить 3 задачи)", False),
+    ("Первопричина затруднений — тема «Дроби»; в теме «Уравнения» ошибок не выявлено.", False),
+    ("Первопричина — «Дроби», а в теме «Уравнения» ошибок нет.", False),
+    ("Первопричина — «Дроби», но в теме «Уравнения» ошибок нет.", False),
+    ("Первопричина — «Дроби», при этом в теме «Уравнения» ошибок не найдено.", False),
+    ("Углублённая проверка подтвердила первопричину: «Дроби». Ошибок в теме «Степени» нет.", False),
+    ("Первопричина — «Дроби». Других затруднений нет.", False),
+    ("Углублённая проверка подтвердила первопричину: «Дроби»; в теме «Степени» ошибок не выявлено.", False),
+    ("Первопричина — Неопределённый интеграл", False),
+    ("Первопричина — не вычисления, а дроби", False),
+    ("В теме «Уравнения» ошибок не выявлено, а первопричина — «Дроби».", False),
+    ("Причина ошибки не установлена", False),                           # a bare «причина» is not a root cause
+    ("Углублённая проверка подтвердила первопричину: «Неопределённый интеграл».", False),
+])
+def test_root_cause_negation_must_govern_the_root_cause(text, expected):
+    assert rg.contains_retired_claim(text) is expected, text
+    assert rg._has_root_cause_claim(text) is expected, text
+    assert _validate(_narrative(text))[0] is (not expected), text
+
+
+# Reliability: the subject decides, not a word such as «ученик» in the sentence.
+@pytest.mark.parametrize("good", [
+    "Предложите ученику задачи, где надёжность прибора равна 0,95.",
+    "Покажите ученику, как надёжность системы зависит от надёжности элементов (0,9 и 0,8).",
+    "Надёжность работы лампы 0,9 — ученик решил неверно.",
+    "Достоверное событие имеет вероятность 1.",
+    "Ученик надёжен в вычислениях.",
+])
+def test_math_wording_with_the_word_student_is_not_a_reliability_claim(good):
+    assert not rg.contains_retired_claim(good), good
+    assert _validate(_narrative("Текст.", description=good)) == (True, []), good
+
+
+@pytest.mark.parametrize("bad", [
+    "надёжность диагноза 83%",
+    "Надёжность результатов диагностики высокая",
+    "Диагноз достоверен",
+    "Результаты диагностики достоверны",
+    "С высокой степенью достоверности диагностика показала затруднения в дробях.",
+    "Диагностика надёжна.",
+    "Отчёт весьма надёжен.",
+    "Результаты теста надёжны.",
+    "Надёжность результатов теста — 90%.",
+])
+def test_reliability_of_the_diagnosis_is_rejected_by_subject(bad):
+    assert rg.contains_retired_claim(bad), bad
+    for field in ("summary", "plan"):
+        data = _narrative(bad if field == "summary" else "Текст.", description=bad if field == "plan" else "Практика.")
+        valid, errors = _validate(data)
+        assert not valid and any("Reliability" in e for e in errors), (field, bad)
+
+
+def _kh_skill_names():
+    from pathlib import Path
+    path = Path(__file__).parent / "fixtures" / "kh_skill_names.txt"
+    return [line.rstrip("\n") for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_no_knowledge_hierarchy_name_turns_the_deterministic_wording_into_a_retired_claim():
+    """Every real skill/topic name (content DB knowledge_hierarchy, distinct name_ru) goes through the templates."""
+    names = _kh_skill_names()
+    assert len(names) > 1000
+    flagged = []
+    for name in names:
+        for sentence in (
+            f"Углублённая проверка подтвердила первопричину: «{name}».",
+            f"Зафиксированы ключевые затруднения: {name}.",
+            f"Зафиксированы ключевые затруднения: Дроби, {name}.",
+            f"Зафиксированы ключевые затруднения: {name}, {name}.",
+        ):
+            if rg.contains_retired_claim(sentence):
+                flagged.append((name, sentence))
+    assert not flagged, flagged[:5]
+
+
+def test_deterministic_summary_over_real_names_is_never_withheld():
+    names = _kh_skill_names()
+    stored = {"overall": {"student_summary": None}}
+    for name in names[::7]:                                              # a sample through the real builder
+        summary = rg._build_deterministic_summary(
+            status_label="Соответствует уровню", grade_level=8, score_pct=40,
+            boundary={"breakpoint_skills": [name]}, strong_skills=[{"skill_name_ru": name}],
+            chains=[{"root_gap_skill_name": name}],
+        )
+        stored["overall"]["student_summary"] = summary
+        assert rg.strip_retired_report_fields(stored)["overall"]["student_summary"] == summary, name
+        summary = rg._build_deterministic_summary(
+            status_label="Соответствует уровню", grade_level=8, score_pct=40,
+            boundary={"breakpoint_skills": [name]}, strong_skills=[{"skill_name_ru": name}], chains=[],
+        )
+        assert not rg.contains_retired_claim(summary), name
+
+
+def test_dash_variants_do_not_hide_a_class_equivalent_or_reliability_figure():
+    assert rg.contains_retired_claim("Уровень на конец 10\u2011го класса.")
+    assert rg.contains_retired_claim("Надёжность\u00a0диагноза\u00a083%")
+    assert rg.contains_retired_claim("Надёжность диагноза\u200b 83%")
+
+
+def test_retired_claim_detector_on_plain_text():
+    assert rg.contains_retired_claim("конец 7 класса (заявлен 8)")
+    assert rg.contains_retired_claim("Надёжность диагноза 83%")
+    assert rg.contains_retired_claim("Единая первопричина не подтверждена")
+    assert not rg.contains_retired_claim("Надёжность прибора равна 0,95.")
+    assert not rg.contains_retired_claim("Результат измерения: «ниже уровня класса».")
+    assert not rg.contains_retired_claim(None) and not rg.contains_retired_claim(5)
+
+
+# ── Zero-error student ────────────────────────────────────────────────────────
+
+def _clean_answers():
+    return [
+        ans("G8_T1_K1", "G8_T1", 1, 1), ans("G8_T2_K1", "G8_T2", 1, 2),
+        ans("G8_T3_K1", "G8_T3", 1, 3), ans("G8_T2_K1", "G8_T2", 1, 4),
+    ]
+
+
+def test_error_free_report_shows_achievements_and_a_development_step_without_deficit(gen):
+    report = gen(_clean_answers(), theta=1.2, se=0.25, narrative="{}")
+    rj = report.report_json
+    assert rj["report_meta"]["error_free"] is True
+    # the correction prompt is never sent for a student with nothing to correct
+    assert gen.llm_calls == []
+    assert rj["report_meta"]["narrative_status"] == "deterministic_fallback"
+
+    achieved = {a["skill_id"] for a in rj["achievements"]}
+    assert achieved == {"G8_T1", "G8_T2", "G8_T3"}
+    assert rj["achievements"][0]["skill_id"] == "G8_T2"          # most correct answers first
+
+    # no invented deficit
+    assert rj["error_patterns"] == [] and rj["critical_gaps"] == [] and rj["weak_skills"] == []
+    assert rj["root_cause_chains"] == []
+    assert rj["diagnostic_boundary"]["breakpoint_skills"] == []
+    summary = rj["overall"]["student_summary"]
+    assert "затруднения не зафиксированы" in summary and "Подтверждены навыки" in summary
+    assert "Следующий шаг — развитие" in summary
+    assert "коррекц" not in summary.lower() and "первопричин" not in summary.lower()
+
+    # ... but a next development step, which is also the one recommended start
+    plan = rj["action_plan"]
+    assert len(plan) == 1 and plan[0]["kind"] == "development" and "estimated_hours" not in plan[0]
+    assert "дефицит не выявлен" in plan[0]["full_description"]
+    assert plan[0]["skill_id"] == "G8_T1"                        # lowest mastery among the verified topics
+    assert rj["recommended_start"]["skill_id"] == plan[0]["skill_id"] == report.recommended_start
+    assert rj["recommended_start"]["evidence"] == "error_free_development"
+
+
+def test_an_attempt_with_a_wrong_answer_is_not_error_free(gen):
+    answers = _clean_answers() + [ans("G8_T1_K1", "G8_T1", 0, 5)]
+    rj = gen(answers).report_json
+    assert rj["report_meta"]["error_free"] is False
+    assert all(step.get("kind") != "development" for step in rj["action_plan"])
+    assert gen.llm_calls, "a student with errors still gets the narrative provider"
+
+
+def test_topic_with_one_wrong_answer_is_not_an_achievement():
+    achievements = rg._build_achievements(
+        {"A": {"alpha": 0.4}, "B": {"alpha": 0.4}},
+        {"A": {"name_ru": "Тема A"}, "B": {"name_ru": "Тема B"}},
+        [NS(topic_id="A", outcome=1), NS(topic_id="A", outcome=0), NS(topic_id="B", outcome=1)],
+    )
+    assert [a["skill_id"] for a in achievements] == ["B"]
+
+
+def test_no_answers_means_no_plan_and_no_start(gen):
+    rj = gen([], theta=0.0, se=1.0).report_json
+    assert rj["action_plan"] == [] and rj["recommended_start"] is None
+    assert rj["report_meta"]["error_free"] is False
+
+
+# ── Authorship / date ─────────────────────────────────────────────────────────
+
+def test_report_date_is_the_attempt_date_and_build_date_is_separate(gen):
+    rj = gen(_gap_answers(), completed_at=datetime(2026, 9, 3, 12, 0), weak=["G7_T9_K1"]).report_json
+    assert rj["report_meta"]["date"] == "2026-09-03"
+    assert rj["report_meta"]["generated_on"] != "2026-09-03"
+
+
+def test_attempt_date_falls_back_to_the_last_answer(gen):
+    rj = gen(_gap_answers(), completed_at=None, weak=["G7_T9_K1"]).report_json
+    assert rj["report_meta"]["date"] == "2026-10-01"
+
+
+@pytest.mark.parametrize("completed_utc, local_date", [
+    (datetime(2026, 9, 3, 18, 59), "2026-09-03"),   # 23:59 in Tashkent
+    (datetime(2026, 9, 3, 19, 0), "2026-09-04"),    # 00:00 in Tashkent
+    (datetime(2026, 9, 3, 20, 30), "2026-09-04"),   # 01:30
+    (datetime(2026, 9, 3, 23, 59), "2026-09-04"),   # 04:59
+    (datetime(2026, 9, 4, 0, 0), "2026-09-04"),     # 05:00
+    (datetime(2026, 9, 4, 12, 0), "2026-09-04"),    # 17:00
+])
+def test_attempt_date_is_the_tashkent_calendar_day(completed_utc, local_date):
+    db = FakeDB([], completed_at=completed_utc)
+    assert rg._attempt_date(db, uuid.uuid4(), []) == local_date
+
+
+def test_attempt_date_of_a_night_attempt_reaches_the_report(gen):
+    rj = gen(_gap_answers(), completed_at=datetime(2026, 9, 3, 21, 0), weak=["G7_T9_K1"]).report_json
+    assert rj["report_meta"]["date"] == "2026-09-04"
+
+
+def test_attempt_date_last_answer_fallback_is_also_tashkent_local():
+    late = ans("G8_T1_K1", "G8_T1", 1, 0)
+    late.answered_at = datetime(2026, 10, 1, 22, 15)           # 03:15 on Oct 2 in Tashkent
+    assert rg._attempt_date(FakeDB([late]), uuid.uuid4(), [late]) == "2026-10-02"
+
+
+def test_failed_completion_query_rolls_back_and_falls_back_to_the_last_answer():
+    class BrokenDB(FakeDB):
+        rolled_back = 0
+
+        def query(self, entity):
+            raise RuntimeError("current transaction is aborted")
+
+        def rollback(self):
+            self.rolled_back += 1
+
+    last = ans("G8_T1_K1", "G8_T1", 1, 5)
+    db = BrokenDB([last])
+    assert rg._attempt_date(db, uuid.uuid4(), [last]) == "2026-10-01"
+    assert db.rolled_back == 1                                  # the session stays usable for saving the report
+
+
+def test_a_failing_rollback_never_fails_the_report_date():
+    class WorseDB(FakeDB):
+        def query(self, entity):
+            raise RuntimeError("boom")
+
+        def rollback(self):
+            raise RuntimeError("connection lost")
+
+    last = ans("G8_T1_K1", "G8_T1", 1, 5)
+    assert rg._attempt_date(WorseDB([last]), uuid.uuid4(), [last]) == "2026-10-01"
+
+
+def test_narrative_prompt_forbids_authorship_of_a_teacher_and_class_equivalent(gen):
+    gen(_gap_answers(), weak=["G7_T9_K1"], narrative=None)
+    prompt = gen.llm_calls[0]
+    assert "не от имени педагога" in prompt
+    assert "ПЕДАГОГА-ДИАГНОСТА" not in prompt and "ЭКСПЕРТНОЕ ПЕДАГОГИЧЕСКОЕ" not in prompt
+    assert "estimated_hours" not in prompt
+    assert "ПЕРВАЯ цель списка" in prompt
+    assert not rg._CLASS_EQUIVALENT_RE.search(prompt.lower())
+
+
+# ── Already stored reports ────────────────────────────────────────────────────
+
+def test_stored_pre_schema5_reports_lose_the_retired_fields_when_read():
+    stored = {
+        "overall": {"status": "on_level", "confidence_of_diagnosis": 0.84, "class_equivalent": "начало 8 класса"},
+        "level": {"status": "on_level", "class_equivalent": "начало 8 класса", "solved": 3, "total": 10},
+        "action_plan": [{"priority": 1, "skill_id": "A", "estimated_hours": 2}],
+    }
+    cleaned = rg.strip_retired_report_fields(stored)
+    assert cleaned["overall"] == {"status": "on_level"}
+    assert cleaned["level"] == {"status": "on_level", "solved": 3, "total": 10}
+    assert cleaned["action_plan"] == [{"priority": 1, "skill_id": "A"}]
+    assert stored["overall"]["confidence_of_diagnosis"] == 0.84          # the stored row is not mutated
+    assert rg.strip_retired_report_fields(None) is None
+
+
+@pytest.mark.parametrize("prose", [
+    "Уровень по результатам измерения — конец 7 класса (заявлен 8 класс). Затруднения в дробях.",
+    "Ученик решает на уровне НАЧАЛА 8 КЛАССА.",
+    "Надёжность диагноза 83%. Рекомендуется повторить дроби.",
+    "Диагностика проведена, надёжность 83%.",
+    "Уровень — середина седьмого класса.",
+    "Зафиксированы ключевые затруднения: Дроби; углублённая проверка не подтвердила единую первопричину.",
+    "Единая первопричина не подтверждена. Решено верно 3 из 10 заданий.",
+    "Единая первопричина — не установлена.",
+])
+def test_stored_schema4_summary_with_retired_prose_is_withheld(prose):
+    stored = {"report_meta": {"report_schema_version": 4},
+              "overall": {"status": "on_level", "student_summary": prose, "score_percent": 40}}
+    cleaned = rg.strip_retired_report_fields(stored)
+    assert cleaned["overall"]["student_summary"] is None            # the front hides the block
+    assert cleaned["overall"]["status"] == "on_level" and cleaned["overall"]["score_percent"] == 40
+    assert stored["overall"]["student_summary"] == prose            # the stored row is not mutated
+
+
+@pytest.mark.parametrize("prose", [
+    "Решено верно 3 из 10 заданий. Основные затруднения — сложение дробей и степени.",
+    "Тему изучают в седьмом классе; ученик допускает вычислительные ошибки.",
+    "Углублённая проверка подтвердила первопричину: «Сложение дробей».",
+    "Зафиксированы ключевые затруднения: Дроби.",
+    "",
+    None,
+])
+def test_stored_summary_without_retired_claims_is_unchanged(prose):
+    stored = {"overall": {"status": "on_level", "student_summary": prose}}
+    assert rg.strip_retired_report_fields(stored)["overall"]["student_summary"] == prose
+
+
+def test_stored_report_without_overall_block_is_still_handled():
+    assert rg.strip_retired_report_fields({"action_plan": []}) == {"action_plan": []}
+    assert rg.strip_retired_report_fields({"overall": None}) == {"overall": None}
+
+
+# ── Deep scan without a chain: facts only, no (non-)confirmation of a root cause ──
+
+def _scan_without_chain_answers():
+    """The prerequisite check ran, every prerequisite answer was correct: no chain is built."""
+    return [
+        ans("G8_T1_K1", "G8_T1", 0, 1),
+        ans("G7_T9_K1", "G8_T1", 1, 2, deep=True, origin="G8_T1_K1", step=1),
+        ans("G8_T2_K1", "G8_T2", 1, 3),
+        ans("G8_T3_K1", "G8_T3", 0, 4),
+    ]
+
+
+def test_scan_without_chain_summary_and_prompt_state_facts_only(gen):
+    rj = gen(_scan_without_chain_answers(), weak=["G8_T1_K1"], narrative=None).report_json
+    assert rj["root_cause_chains"] == []
+    summary = rj["overall"]["student_summary"]
+    assert "Зафиксированы ключевые затруднения:" in summary
+    assert "первопричин" not in summary and not rg.contains_retired_claim(summary)
+    prompt = gen.llm_calls[0]
+    assert "не подтвердила единую первопричину" not in prompt
+    assert "углублённая проверка проведена; цепочек для разбора в данных нет" in prompt
+    # the model is told explicitly not to make the statement itself
+    assert "НИКОГДА не пиши, что первопричина не подтверждена, не установлена, не найдена или отсутствует" in prompt
+    assert "надёжности/достоверности диагноза" in prompt
+
+
+def test_prompt_rule_is_consistent_with_and_without_a_confirmed_chain(gen):
+    gen(_gap_answers(), weak=["G7_T9_K1"], narrative=None)
+    with_chain = gen.llm_calls[-1]
+    assert "можно назвать первопричиной" in with_chain               # a confirmed root cause may be named
+    assert "НИКОГДА не пиши, что первопричина не подтверждена" in with_chain
+    assert "Не называй наблюдаемый дефицит «первопричиной»" not in with_chain
+    gen(_scan_without_chain_answers(), weak=["G8_T1_K1"], narrative=None)
+    without_chain = gen.llm_calls[-1]
+    assert "Не называй наблюдаемый дефицит «первопричиной»" in without_chain
+    assert "можно назвать первопричиной" not in without_chain
+    assert "НИКОГДА не пиши, что первопричина не подтверждена" in without_chain
+
+
+def test_model_echoing_the_retired_root_cause_claim_is_rejected_then_replaced(gen):
+    import json
+
+    answers = _scan_without_chain_answers()
+    first = gen(answers, weak=["G8_T1_K1"], narrative=None).report_json
+    status, score = first["overall"]["status"], first["overall"]["score_percent"]
+    steps = [(s_["skill_id"], s_["skill_name_ru"]) for s_ in first["action_plan"]]
+
+    def narrative_with(summary):
+        # a structurally valid narrative: the summary is the only thing that can make it fail
+        return lambda _prompt: json.dumps({
+            "overall": {"status": status, "score_percent": score, "student_summary": summary},
+            "action_plan": [
+                {"priority": i, "skill_id": sid, "skill_name_ru": name, "action_title": "Тема", "full_description": "Практика."}
+                for i, (sid, name) in enumerate(steps, 1)
+            ],
+        }, ensure_ascii=False)
+
+    before = len(gen.llm_calls)
+    clean = gen(answers, weak=["G8_T1_K1"], narrative=narrative_with("Ученик допускает ошибки в сложении дробей.")).report_json
+    assert clean["report_meta"]["narrative_status"] == "ready" and len(gen.llm_calls) == before + 1
+
+    before = len(gen.llm_calls)
+    echoed = gen(answers, weak=["G8_T1_K1"],
+                 narrative=narrative_with("Углублённая проверка не подтвердила единую первопричину.")).report_json
+    assert len(gen.llm_calls) == before + 2                         # both attempts rejected by the validator
+    assert echoed["report_meta"]["narrative_status"] == "deterministic_fallback"
+    assert not rg.contains_retired_claim(echoed["overall"]["student_summary"])
+    assert "root cause" in gen.llm_calls[-1]                         # the second prompt carries the rejection reason
+
+
+# ── Calendar day of the build date ────────────────────────────────────────────
+
+def test_generated_on_is_the_tashkent_day_not_the_container_utc_day(gen, monkeypatch):
+    """21:30 UTC on Oct 1 is 02:30 on Oct 2 in Tashkent."""
+    frozen = datetime(2026, 10, 1, 21, 30, tzinfo=timezone.utc)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen.astimezone(tz) if tz is not None else frozen.replace(tzinfo=None)
+
+    monkeypatch.setattr(rg, "datetime", FrozenDatetime)
+    assert frozen.date().isoformat() == "2026-10-01"                 # what date.today() would print in a UTC container
+    rj = gen(_gap_answers(), completed_at=datetime(2026, 9, 3, 12, 0), weak=["G7_T9_K1"]).report_json
+    assert rj["report_meta"]["generated_on"] == "2026-10-02"
+    assert rj["report_meta"]["date"] == "2026-09-03"                 # attempt date unaffected
+
+
+def test_attempt_date_without_any_timestamp_falls_back_to_the_tashkent_today(monkeypatch):
+    frozen = datetime(2026, 10, 1, 21, 30, tzinfo=timezone.utc)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen.astimezone(tz) if tz is not None else frozen.replace(tzinfo=None)
+
+    monkeypatch.setattr(rg, "datetime", FrozenDatetime)
+    assert rg._attempt_date(FakeDB([], completed_at=None), uuid.uuid4(), []) == "2026-10-02"
+
+
+# ── Round 4: recall, precision and subject-based reliability (token grammar) ──
+
+ROOT_CAUSE_MUST_BE_CLAIMS = [
+    # stem подтверж-/подтверд-, present passive
+    "Результаты не подтверждают единую первопричину.",
+    "Данные не подтверждают единую первопричину.",
+    "Не подтверждена единая первопричина.",
+    "Единая первопричина не подтверждается.",
+    "Наличие единой первопричины не подтверждается.",
+    # recall
+    "Проверка не подтвердила наличие единой первопричины",
+    "Единая первопричина не подтвердилась",
+    "Первопричину не удаётся установить",
+    "Первопричина не может быть установлена",
+    "Первопричина выявлена не была",
+    "Единая первопричина, по-видимому, не установлена",
+    "Единая первопричина по результатам углублённой проверки не подтверждена",
+    "Единой первопричины у ученика нет",
+    "Общей причины ошибок нет",
+    "Единый корень ошибок не выявлен",
+    # inside «» and ( )
+    "Проверка не подтвердила «единую первопричину».",
+    "«Единая первопричина» не подтверждена.",
+    "Проверка не подтвердила (единую первопричину).",
+    "(Единая первопричина) не подтверждена.",
+]
+ROOT_CAUSE_MUST_NOT_BE_CLAIMS = [
+    # an affirmed root cause + a negation about OTHER things
+    "Первопричина подтверждена, остальные затруднения не выявлены.",
+    "Единая первопричина подтверждена, других пробелов не выявлено.",
+    "Углублённая проверка подтвердила первопричину, более ранние пробелы не обнаружены.",
+    "Первопричина подтверждена\nДругие темы не выявлены",
+    "Первопричина найдена, но исправить не удалось.",
+    # infinitive / imperative / negation of something else
+    "Нельзя определять первопричину по одной задаче",
+    "Если не определить первопричину, ошибки повторятся",
+    "Не выявляйте первопричину самостоятельно",
+    "Основная причина ошибки — не определены знаки",
+    "Первопричина — не определены знаки",
+]
+
+
+@pytest.mark.parametrize("text", ROOT_CAUSE_MUST_BE_CLAIMS)
+def test_round4_root_cause_recall(text):
+    assert rg.contains_retired_claim(text), text
+    assert not _validate(_narrative(text))[0], text
+    assert not _validate(_narrative("Текст.", description=text))[0], text
+
+
+@pytest.mark.parametrize("text", ROOT_CAUSE_MUST_NOT_BE_CLAIMS)
+def test_round4_root_cause_precision(text):
+    assert not rg.contains_retired_claim(text), text
+    assert _validate(_narrative(text))[0], text
+
+
+@pytest.mark.parametrize("text", [
+    "Надёжность результата составляет 83% (автоматическое резюме).",
+    "Надёжность составляет 83%; уровень определён автоматически.",
+    "Уровень определён системой, надёжность 83%.",
+    "Достоверность вывода 90% — ученик решил элементарные задачи.",
+    "Тест системы имеет надёжность 83%.",
+    "Отчёт: надёжность 0,83 (система).",
+    "Диагноз поставлен с высокой достоверностью",
+    "Диагностика проведена с высокой надёжностью",
+    "Диагноз является достоверным",
+    "Результаты можно считать надёжными",
+    "Результат достоверен на 90%",
+    "Уверенность в диагностике 85%",
+    "Диагноз недостоверен.",
+    "Результаты диагностики ненадёжны.",
+    "Надёжность\nдиагноза 83%",
+])
+def test_round4_reliability_bypasses_are_rejected(text):
+    assert rg.contains_retired_claim(text), text
+    for field in ("summary", "plan"):
+        data = _narrative(text if field == "summary" else "Текст.", description=text if field == "plan" else "Практика.")
+        valid, errors = _validate(data)
+        assert not valid and any("Reliability" in e for e in errors), (field, text)
+
+
+@pytest.mark.parametrize("text", [
+    "В ходе диагностики ученик не справился с задачей о надёжности системы из двух элементов (0,9 и 0,8)",
+    "По результатам диагностики предложите задачи на надёжность прибора с вероятностью 0,95",
+    "Предложите ученику задачи, где надёжность прибора равна 0,95.",
+    "Покажите ученику, как надёжность системы зависит от надёжности элементов (0,9 и 0,8).",
+    "Надёжность работы лампы 0,9 — ученик решил неверно.",
+    "Прибор работает с 95% надёжностью; сколько приборов из 200 откажет?",
+    "Прибор надёжен на 95%, найдите вероятность отказа.",
+    "Решите задачи на вероятность: надёжность прибора равна 0,95, найдите вероятность отказа.",
+    "Надёжность системы из двух независимых элементов равна произведению их надёжностей.",
+    "Вероятность безотказной работы (надёжность узла) равна 0,99; найдите вероятность отказа.",
+    "Найдите надёжность устройства 0,9 · 0,8.",
+    # start-anchored subjects: «тест» inside «естественных», «аттестация»
+    "В естественных науках результаты надёжны",
+    "Аттестация ученика надёжна",
+    "Ученик надёжен в вычислениях.",
+    "Достоверное событие имеет вероятность 1.",
+])
+def test_round4_probability_wording_and_look_alikes_pass(text):
+    assert not rg.contains_retired_claim(text), text
+    assert _validate(_narrative("Текст.", description=text)) == (True, []), text
+
+
+@pytest.mark.parametrize("token", ["надежность", "первопричина", "Надёжность", "не", "диагноз"])
+def test_detectors_are_linear_on_a_long_single_token(token):
+    import time
+    unit = 20_000 // len(token) + 1                                  # about 20 KB of text
+    for text in (token * unit, (token + " ") * unit, (token + ", ") * unit, ("не подтвердила " + token + " ") * (unit // 2)):
+        assert len(text) >= 10_000
+        started = time.perf_counter()
+        rg.contains_retired_claim(text)
+        rg._has_reliability_claim(text)
+        rg._has_root_cause_claim(text)
+        assert time.perf_counter() - started < 0.2, (token, len(text))
+
+
+def test_stored_plan_prose_loses_only_the_offending_sentences():
+    stored = {
+        "overall": {"status": "on_level"},
+        "action_plan": [
+            {"priority": 1, "skill_id": "G8_T1", "skill_name_ru": "Дроби", "evidence": "observed_error",
+             "action_title": "Дроби: надёжность диагноза 83%",
+             "full_description": "Повторите правило сложения дробей. Надёжность диагноза 83%. "
+                                 "Единая первопричина не подтверждена. Решите пять примеров."},
+            {"priority": 2, "skill_id": "G8_T2", "skill_name_ru": "Степени",
+             "full_description": "В конце 7 класса изучают степени. Надёжность прибора равна 0,95.",
+             "steps": ["Шаг один.", "Результат достоверен на 90%.", "Шаг три."]},
+            {"priority": 3, "skill_id": "G8_T3", "skill_name_ru": "Уравнения", "full_description": "Практика."},
+        ],
+    }
+    cleaned = rg.strip_retired_report_fields(stored)
+    first, second, third = cleaned["action_plan"]
+    assert first["full_description"] == "Повторите правило сложения дробей. Решите пять примеров."
+    assert first["action_title"] == ""                              # the whole title was the claim
+    assert first["skill_id"] == "G8_T1" and first["skill_name_ru"] == "Дроби" and first["priority"] == 1
+    assert first["evidence"] == "observed_error"
+    # a class reference and a probability task stay; the nested list loses the claim only
+    assert second["full_description"] == "В конце 7 класса изучают степени. Надёжность прибора равна 0,95."
+    assert second["steps"] == ["Шаг один.", "", "Шаг три."]
+    assert third["full_description"] == "Практика."
+    assert "83%" in stored["action_plan"][0]["full_description"]    # the stored row is not mutated
+
+
+@pytest.mark.parametrize("text", [
+    "Точность диагностики — 87%",
+    "Точность оценки уровня высокая",
+    "Уверенность в результате диагностики 85%",
+    "Уверенность в диагностике 85%",
+    "Точность диагноза составляет 0,9.",
+    "Точность теста 90 процентов.",
+])
+def test_accuracy_and_confidence_of_the_diagnosis_are_retired_claims(text):
+    assert rg.contains_retired_claim(text), text
+    assert not _validate(_narrative("Текст.", description=text))[0], text
+
+
+@pytest.mark.parametrize("text", [
+    "Вычислите с точностью до 0,01",
+    "Найдите значение с точностью до десятых",
+    "Ученик уверенно решает уравнения",
+    "Точность измерения прибора 0,1 мм",
+    "Округлите результат с точностью до сотых; оценка за тест не учитывается.",
+    "Оценка погрешности: точность вычислений 0,01.",
+])
+def test_accuracy_and_confidence_in_ordinary_mathematics_pass(text):
+    assert not rg.contains_retired_claim(text), text
+    assert _validate(_narrative("Текст.", description=text)) == (True, []), text
+
+
+# ── Final fixes: probability term, everyday words, conditional subjects, sweep, recall ──
+
+@pytest.mark.parametrize("text", [
+    "Повторить: вероятность достоверного события равна 100%.",
+    "Повторить: вероятность достоверного события равна 1,0.",
+    "Событие достоверно",
+    "Достоверное и невозможное события",
+    "Достоверное событие имеет вероятность 1.",
+    # «точность / уверенность» in ordinary study prose: «тест» alone is not a diagnostic subject
+    "Следите за точностью вычислений в тесте.",
+    "Развивайте уверенность при решении тестов.",
+    "Повысить уверенность при решении заданий теста.",
+    # «метод / оценка / вывод» are subjects only when about the diagnosis
+    "Метод подстановки надёжен.",
+    "Оценка достоверности корня: подставьте найденное значение.",
+])
+def test_final_probability_term_everyday_words_and_conditional_subjects_pass(text):
+    assert not rg.contains_retired_claim(text), text
+    assert _validate(_narrative("Текст.", description=text)) == (True, []), text
+
+
+@pytest.mark.parametrize("text", [
+    "Точность диагностики — 87%",
+    "Уверенность в результатах теста 85%",
+    "Точность теста 90%",
+    "Результат достоверен на 90%",
+    "Метод диагностики надёжен.",
+    "Оценка уровня надёжна.",
+])
+def test_final_diagnostic_subjects_still_rejected(text):
+    assert rg.contains_retired_claim(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "Единую первопричину подтвердить невозможно",
+    "Первопричина осталась неустановленной",
+    "Первопричина осталась невыясненной",
+    "Невозможно установить единую первопричину",
+    "Первопричину невозможно установить",
+    "Не удалось выяснить единую первопричину",
+])
+def test_final_root_cause_recall(text):
+    assert rg.contains_retired_claim(text), text
+    assert not _validate(_narrative("Текст.", description=text))[0], text
+
+
+@pytest.mark.parametrize("prose, expected", [
+    ("Шаг 1.\n- Надёжность диагноза 83%.\n- Решите пример.\nГотово.", "Шаг 1.\n- Решите пример.\nГотово."),
+    ("Повторите дроби. Единая первопричина не подтверждена. Решите пример.", "Повторите дроби. Решите пример."),
+    ("Строка один\nЕдиная первопричина не подтверждена\nСтрока три", "Строка один\nСтрока три"),
+    ("Повторите. Надёжность\nдиагноза 83%. Решите.", "Повторите. Решите."),        # claim wrapped over a line break
+    ("Только плохое. Надёжность диагноза 83%.", "Только плохое."),
+    ("В конце 7 класса изучают степени.\nНадёжность прибора равна 0,95.", "В конце 7 класса изучают степени.\nНадёжность прибора равна 0,95."),
+])
+def test_plan_sweep_drops_only_the_offending_line_and_keeps_separators(prose, expected):
+    assert rg.drop_retired_sentences(prose) == expected
+    stored = {"action_plan": [{"priority": 1, "skill_id": "G8_T1", "full_description": prose}]}
+    assert rg.strip_retired_report_fields(stored)["action_plan"][0]["full_description"] == expected
+
+
+# ── Final-final: regressions M1/M2 and the low items ──────────────────────────
+
+@pytest.mark.parametrize("text", [
+    # M1: «результат…» anywhere before the credibility adjective
+    "Результат по теме «Дроби» достоверен на 90%.",
+    "Результат ученика по дробям достоверен на 90%.",
+    "Результат по разделу дроби достоверен на 90%.",
+    # M2: the event exemption never applies when a result / diagnostic subject precedes
+    "Результат по теме «Случайные события» надёжен на 85%.",
+    "Диагноз достоверен, событие не влияет.",
+    # root cause, infinitive first and «остался»
+    "Подтвердить единую первопричину невозможно",
+    "Подтвердить единую первопричину нельзя.",
+    "Установить первопричину нельзя",
+    "Единый корень остался неустановленным",
+    "Точность диагностики — 87%",
+])
+def test_final_final_regressions_are_rejected_again(text):
+    assert rg.contains_retired_claim(text), text
+    assert not _validate(_narrative("Текст.", description=text))[0], text
+
+
+@pytest.mark.parametrize("text", [
+    "Уверенность при решении тестов повысилась на 15%",
+    "Повторить: вероятность достоверного события равна 100%.",
+    "Событие достоверно",
+    "Достоверное и невозможное события",
+    "Определить первопричину можно, но исправить нельзя.",
+    "Нельзя определять первопричину по одной задаче",
+    "Если не определить первопричину, ошибки повторятся",
+])
+def test_final_final_look_alikes_still_pass(text):
+    assert not rg.contains_retired_claim(text), text
+    assert _validate(_narrative("Текст.", description=text)) == (True, []), text
+
+
+@pytest.mark.parametrize("prose, expected", [
+    ("Надёжность диагноза\n— 83%. Решите.", "Решите."),
+    ("Надёжность диагноза\n83%. Решите.", "Решите."),
+    ("Надёжность диагноза\n- 0,83. Решите.", "Решите."),
+    ("- Надёжность диагноза 83%\n- Решите пример.", "- Решите пример."),            # a bullet is not a continuation
+    ("1. Надёжность диагноза высокая\n2. Решите пример.", "2. Решите пример."),
+    ("Чистый текст. Без претензий.", "Чистый текст. Без претензий."),
+])
+def test_plan_sweep_handles_wrapped_claims_and_list_markers(prose, expected):
+    assert rg.drop_retired_sentences(prose) == expected
+
+
+# ── Last change: linear time on 100 KB, noun window, figure-only continuation ──
+
+def _best_time(text, runs=3):
+    import time
+    best = None
+    for _ in range(runs):
+        started = time.perf_counter()
+        rg.contains_retired_claim(text)
+        elapsed = time.perf_counter() - started
+        best = elapsed if best is None else min(best, elapsed)
+    return best
+
+
+@pytest.mark.parametrize("unit", [
+    "достоверен 5 % ", "достоверен и ", "достоверен событие ", "надежность ", "первопричина ",
+    "диагноз достоверен ", "первопричина не ", "не подтвердила первопричину ", "результат достоверен на 5 % ",
+    "точность ", "уверенность в тесте ",
+])
+def test_detectors_are_linear_on_100_kb_of_repeated_units(unit):
+    small = unit * (25_000 // len(unit))
+    large = unit * (100_000 // len(unit))
+    assert len(large) >= 99_000
+    t_small, t_large = _best_time(small), _best_time(large)
+    assert t_large < 0.2, (unit, t_large)
+    assert t_large / max(t_small, 1e-3) < 6, (unit, t_small, t_large)          # 4x the text, not 16x the time
+
+
+@pytest.mark.parametrize("text", [
+    "Надёжность результата по теме «Дроби» — 83%",
+    "Надёжность результатов по теме «Дроби» составляет 85%",
+    "Достоверность результатов по теме «Дроби» около 85%",
+    "Надёжность на данный момент составляет около 83%",
+    "Надёжность этой оценки по текущим данным составляет 83%",
+    "Оценка надёжности — около 83 процентов",
+    "Достоверность результатов по теме событий 85%",
+    "Точность диагностики — 87%",
+])
+def test_reliability_noun_keeps_the_wide_figure_window(text):
+    assert rg.contains_retired_claim(text), text
+    assert not _validate(_narrative("Текст.", description=text))[0], text
+
+
+def test_the_narrow_window_applies_only_to_the_weak_diagnostic_subjects():
+    assert not rg.contains_retired_claim("Уверенность при решении тестов повысилась на 15%")
+
+
+@pytest.mark.parametrize("prose, expected", [
+    ("Надёжность диагноза\n15% задач решите повторно.", "15% задач решите повторно."),
+    ("Диагноз достоверен\n90% ошибок — в дробях.", "90% ошибок — в дробях."),
+    ("Надёжность диагноза\n— 83%. Решите.", "Решите."),
+    ("Надёжность диагноза\n83 процента.\nРешите.", "Решите."),
+    ("Надёжность диагноза\n- 0,83. Решите.", "Решите."),
+])
+def test_wrapped_claim_takes_only_a_figure_only_line(prose, expected):
+    assert rg.drop_retired_sentences(prose) == expected
+
+
+def test_continuation_sweep_is_linear_on_a_long_whitespace_run():
+    # A flagged line without closing punctuation followed by a huge whitespace run used to
+    # backtrack quadratically in _CONTINUATION_RE (two adjacent \s*): 100 KB took ~15 s.
+    import time
+    from src.domain.retired_claims import drop_retired_sentences
+    for filler in (" ", " "):
+        text = "Надёжность диагноза\n83%" + filler * 100_000 + "x"
+        t = time.perf_counter()
+        drop_retired_sentences(text)
+        assert time.perf_counter() - t < 0.5
+
+
+@pytest.mark.parametrize("text,kept", [
+    ("Надёжность диагноза\n— 83%.\nРешите пример.", "Решите пример."),
+    ("Надёжность диагноза\n83% .\nРешите пример.", "Решите пример."),
+    ("Надёжность диагноза\n15% задач решите повторно.", "15% задач решите повторно."),
+])
+def test_continuation_figure_line_goes_with_its_claim(text, kept):
+    from src.domain.retired_claims import drop_retired_sentences
+    assert drop_retired_sentences(text).strip() == kept

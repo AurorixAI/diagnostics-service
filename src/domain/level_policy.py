@@ -21,8 +21,11 @@ Rules (approved plan N02, decision 1)
        0.1 <= theta <  1.0   on_level       (category at_grade)
       theta >=  1.0          above          (category above_grade)
 
-* ``class_equivalent`` is a monotonic (non-decreasing) function of theta and the
-  declared grade only.  See ``_CLASS_BANDS``.
+* The level is stated only as the band above (``category`` / ``status`` and
+  their Russian labels).  The former "beginning / middle / end of grade N"
+  equivalent (N03a, decision O4) was removed: that scale has no norming
+  behind it, so it is neither computed, stored nor shown until a scale is
+  justified.
 * ``provisional`` is True when the measurement is not precise yet
   (``se`` unknown or > 0.40, the same value the classification stop rule uses).
 
@@ -79,33 +82,6 @@ CATEGORY_OF_STATUS: Dict[str, str] = {
     "above": "above_grade",
 }
 
-# Class equivalent.  Each band is (theta upper bound exclusive, part, offset)
-# meaning "<part> of grade (declared + offset)".  Bands are ordered by theta, so
-# the ordinal grade*3+part never decreases as theta grows; the result is clamped
-# to grades 5..11 (the range the bank covers), which preserves monotonicity.
-#
-#   critical  (<-1.4):  below -2.2 -> start of g-3, otherwise start of g-2
-#   below     [-1.4,-0.5):   [-1.4,-0.95) end of g-2,  [-0.95,-0.5) middle of g-1
-#   partial   [-0.5, 0.1):   end of g-1
-#   on_level  [ 0.1, 1.0):   [0.1,0.55) start of g,    [0.55,1.0) middle of g
-#   above     >= 1.0:        [1.0,1.5) end of g, [1.5,2.2) start of g+1, else middle of g+1
-_PARTS = ("начало", "середина", "конец")
-_CLASS_BANDS = (
-    (-2.2, 0, -3),
-    (THETA_CRITICAL, 0, -2),
-    (-0.95, 2, -2),
-    (THETA_AT, 1, -1),
-    (THETA_ON_LEVEL, 2, -1),
-    (0.55, 0, 0),
-    (THETA_ABOVE, 1, 0),
-    (1.5, 2, 0),
-    (2.2, 0, 1),
-    (float("inf"), 1, 1),
-)
-MIN_GRADE = 5
-MAX_GRADE = 11
-
-
 def is_correct(outcome: Any) -> bool:
     """The only definition of a correct answer for counting/reporting.
 
@@ -151,34 +127,23 @@ def theta_status(theta: float) -> str:
     return "above"
 
 
-def class_equivalent(theta: float, grade: int) -> str:
-    """Human-readable class equivalent, monotonic in theta (see _CLASS_BANDS)."""
-    part, offset = 1, 1
-    for upper, band_part, band_offset in _CLASS_BANDS:
-        if theta < upper:
-            part, offset = band_part, band_offset
-            break
-    ordinal = (int(grade) + offset) * 3 + part
-    ordinal = max(MIN_GRADE * 3, min(MAX_GRADE * 3 + 2, ordinal))
-    return f"{_PARTS[ordinal % 3]} {ordinal // 3} класса"
-
-
 def classify(theta: Optional[float], se: Optional[float], grade: int) -> Dict[str, Any]:
     """Level of a student from the CAT estimate.  Pure function of its inputs.
 
-    Returns ``{"category", "status", "class_equivalent", "provisional"}``.
-    With no theta at all nothing can be concluded: the three level fields are
-    ``None`` and the result is provisional.
+    ``grade`` no longer influences the result (it only fed the removed class
+    equivalent); the parameter is kept so that call sites need not change.
+
+    Returns ``{"category", "status", "provisional"}``.
+    With no theta at all nothing can be concluded: ``category`` and ``status``
+    are ``None`` and the result is provisional.
     """
     provisional = se is None or float(se) > PROVISIONAL_SE
     if theta is None:
-        return {"category": None, "status": None, "class_equivalent": None,
-                "provisional": True}
+        return {"category": None, "status": None, "provisional": True}
     value = float(theta)
     return {
         "category": theta_category(value),
         "status": theta_status(value),
-        "class_equivalent": class_equivalent(value, grade),
         "provisional": provisional,
     }
 

@@ -2,7 +2,7 @@
 """Re-send the auth completion sync of already-completed sessions (N02 backfill).
 
 New completions carry the ready-made level (``overall_level``, ``level_status``,
-``class_equivalent``, ``level_provisional``) in the auth completion payload.  Old
+``level_provisional``) in the auth completion payload.  Old
 results in auth-service lack those fields.  This script re-queues the EXISTING
 durable outbox (``diag_sessions.auth_sync_*`` + ``enqueue_auth_completion_sync``);
 the normal lifespan worker then delivers the callback (retries, stale-claim
