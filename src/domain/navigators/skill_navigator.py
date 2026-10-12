@@ -10,7 +10,11 @@ DeepScanState:
   Prerequisite traversal for a failing skill.
   Keeps a queue of prerequisite skill_ids to test.
   Max items: deep_scan_max_items (default 6).
-  Stops when: queue empty, max reached, or student answers correctly.
+  A correct answer closes only that skill's branch; the scan stops when the
+  queue is empty or max items / the session budget is reached.
+  A wrong answer makes the skill a gap once deep_scan_confirm_probes wrong
+  answers on different items of it are seen (default 1), then its own
+  prerequisites are queued first.
 """
 from __future__ import annotations
 
@@ -160,7 +164,11 @@ class DeepScanState:
 
     Queue holds prerequisite skill_ids to test next.
     Gaps holds confirmed gap skill_ids.
-    Stops when: queue empty | items_used >= max_items | correct answer seen.
+    Stops when: queue empty | items_used >= max_items | session budget spent.
+    A correct answer closes the current skill's branch only; it does not stop
+    the scan.  ``wrong_counts`` is the number of wrong answers per probed skill
+    (confirmation needs deep_scan_confirm_probes of them); ``unconfirmed`` holds
+    skills that never reached it (out of items or budget) - they are not gaps.
     """
     origin_skill_id: str
     queue: List[str] = field(default_factory=list)    # next prereqs to test
@@ -170,6 +178,8 @@ class DeepScanState:
     max_items: int = 6
     items_used: int = 0
     completed: bool = False
+    wrong_counts: Dict[str, int] = field(default_factory=dict)   # wrong answers per probed skill
+    unconfirmed: List[str] = field(default_factory=list)         # probed, gap not confirmed
 
     def to_dict(self) -> dict:
         return {
@@ -181,6 +191,8 @@ class DeepScanState:
             "max_items": self.max_items,
             "items_used": self.items_used,
             "completed": self.completed,
+            "wrong_counts": self.wrong_counts,
+            "unconfirmed": self.unconfirmed,
         }
 
     @classmethod
@@ -194,4 +206,6 @@ class DeepScanState:
             max_items=data.get("max_items", 6),
             items_used=data.get("items_used", 0),
             completed=data.get("completed", False),
+            wrong_counts=dict(data.get("wrong_counts", {})),
+            unconfirmed=list(data.get("unconfirmed", [])),
         )

@@ -316,7 +316,8 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
         detected = gap in root_l3                       # strict: injected L3 is the report's root gap
         for c in chains:
             for st in c["steps"]:
-                if l3_of(nodes, st.get("skill_id") or "") != gap or lp.is_correct(st["outcome"]):
+                if (l3_of(nodes, st.get("skill_id") or "") != gap or lp.is_correct(st["outcome"])
+                        or st.get("gap_confirmed") is False):   # DEEP_SCAN_CONFIRM_PROBES > 1: wrong but not confirmed
                     continue
                 named = True                            # failed step under the L3 anywhere (incl. scan origin)
                 if st.get("is_deep_scan"):

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import List
+from typing import List, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -63,6 +63,26 @@ class Settings(BaseSettings):
     # accuracy.  A scan cannot start, and a running one stops, once the session's
     # total reaches this value.  The per-scan cap (deep_scan_max_items) still applies.
     deep_scan_session_budget: int = Field(default=6, ge=0)  # sweep 2026-10-07: largest value with accuracy within noise and +0.3 items
+    # ── Deep Scan variants (DIAG-1 stage 2) ──────────────────────────────────
+    # Three independent switches; the defaults reproduce the behaviour from before
+    # they existed, item for item.  All are overridable from the environment.
+    #
+    # DEEP_SCAN_PROBE_DIFFICULTY_OFFSET: a Deep Scan probe is the unused item whose
+    # IRT difficulty is nearest to b = theta - offset (1.0 -> easier probes).  Only
+    # Deep Scan probes are affected; measurement items still target theta.
+    deep_scan_probe_difficulty_offset: float = Field(default=0.0, allow_inf_nan=False)
+    # DEEP_SCAN_CONFIRM_PROBES: a probed skill is declared a gap only after this many
+    # wrong answers on different items of that skill.  A correct answer at any point
+    # closes the branch (skill mastered).  A skill that runs out of unused items (or
+    # of budget) before confirmation is NOT a gap; it is recorded as unconfirmed.
+    # Every extra item counts toward deep_scan_max_items, the session budget and
+    # max_items exactly like a first probe.
+    deep_scan_confirm_probes: int = Field(default=1, ge=1)
+    # DEEP_SCAN_TRIGGER_MODE: which failed L3 starts a scan.
+    #   "importance"  - L3 importance >= deep_scan_importance_threshold (current rule);
+    #   "hard_prereq" - the failed L3 has at least one HARD prerequisite edge,
+    #                   whatever its importance.
+    deep_scan_trigger_mode: Literal["importance", "hard_prereq"] = "importance"
     mastery_threshold: float = 0.6   # min fraction correct to move UP a topic
 
     # CORS

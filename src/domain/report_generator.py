@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
+from src.core.config import get_settings
 from src.core.gemini_client import call_gemini
 from src.models.diag_models import DiagReport
 from src.repositories.diag_repo import DiagReportRepository
@@ -633,11 +634,49 @@ def _chain_step(a, skill_map, ep_by_task, grade_level) -> Dict[str, Any]:
     return step_data
 
 
+def _probe_steps(scan_answers: list, step: Callable[[Any], Dict[str, Any]], required: int) -> List[Dict[str, Any]]:
+    """Chain steps for the answers of ONE Deep Scan: one step per probed skill.
+
+    With DEEP_SCAN_CONFIRM_PROBES = 1 (``required``) every answer is its own skill
+    probe and the result is the plain per-answer list (nothing changes).  With
+    N > 1 the consecutive answers on the same skill (ordered by ``deep_scan_step``;
+    retries of a skill are always adjacent) are ONE probed skill:
+      * a correct answer among them -> the skill is mastered (step = that answer);
+      * otherwise it is a confirmed gap only with at least N wrong answers;
+        fewer (the scan ran out of items or budget) is NOT confirmed: the step keeps
+        the wrong answer but is marked ``gap_confirmed=False`` and never counts as a
+        failure in ``_finalize_chain``.
+    """
+    if required <= 1:
+        return [step(a) for a in scan_answers]
+    blocks: List[list] = []
+    for a in scan_answers:
+        prev = blocks[-1][-1] if blocks else None
+        same_skill = (
+            prev is not None and (a.skill_id or "") == (prev.skill_id or "")
+            and getattr(a, "deep_scan_step", None) is not None
+            and getattr(prev, "deep_scan_step", None) is not None
+        )
+        if same_skill:
+            blocks[-1].append(a)
+        else:
+            blocks.append([a])
+    steps: List[Dict[str, Any]] = []
+    for block in blocks:
+        right = [a for a in block if is_correct(a.outcome)]
+        data = step(right[-1] if right else block[-1])
+        data["probe_attempts"] = len(block)
+        data["gap_confirmed"] = (not right) and len(block) >= required
+        steps.append(data)
+    return steps
+
+
 def _reconstruct_root_cause_chains(
     answers_orm: list,
     skill_map: Dict[str, Dict[str, str]],
     error_patterns: List[Dict[str, Any]],
     grade_level: int,
+    confirm_probes: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Reconstruct Deep Scan prerequisite descent trajectories from session answers.
@@ -652,8 +691,13 @@ def _reconstruct_root_cause_chains(
     does not depend on the order of the input rows.  Older deep-scan answers
     without the link keep the previous inference (a run of consecutive deep-scan
     answers is attached to the preceding wrong navigation answer).
+
+    ``confirm_probes`` (default: DEEP_SCAN_CONFIRM_PROBES) is the number of wrong
+    answers on different items that made a probed skill a gap; see ``_probe_steps``.
+    A chain step is a probed skill, failed only if its gap was confirmed.
     """
     ep_by_task = {ep.get("task_id"): ep for ep in error_patterns if ep.get("task_id")}
+    required = int(confirm_probes if confirm_probes is not None else get_settings().deep_scan_confirm_probes)
     ordered = _ordered_answers(answers_orm)
     has_timestamps = bool(ordered) and all(
         getattr(a, "answered_at", None) is not None for a in ordered
@@ -713,7 +757,7 @@ def _reconstruct_root_cause_chains(
                     "correct_answer_latex": None, "distractor_explanation": None,
                     "is_scan_origin": True,
                 }
-            chain = _finalize_chain([source] + [step(x) for x in scan_answers], grade_level)
+            chain = _finalize_chain([source] + _probe_steps(scan_answers, step, required), grade_level)
             chain["evidence_source"] = "stored_link"
             chains.append(chain)
 
@@ -780,7 +824,9 @@ def _finalize_chain(steps: List[Dict[str, Any]], grade_level: int) -> Dict[str, 
     The breakpoint is the deepest FAILED Deep Scan step: the lowest grade, and on
     equal grades the one reached last (furthest from the source).  A same-grade
     prerequisite is therefore a legitimate breakpoint.  When no deep-scan step
-    failed, the chain has no prerequisite gap and is not reported as a cause.
+    failed, the chain has no prerequisite gap and is not reported as a cause.  A
+    wrong step whose gap was not confirmed (``gap_confirmed`` is False, see
+    ``_probe_steps``) is not a failure.
     """
     source = steps[0] if steps else {}
     passed_steps = [s for s in steps if is_correct(s["outcome"])]
@@ -788,6 +834,7 @@ def _finalize_chain(steps: List[Dict[str, Any]], grade_level: int) -> Dict[str, 
         (i, s) for i, s in enumerate(steps)
         if s.get("is_deep_scan") and not is_correct(s["outcome"])
         and s.get("skill_id") != source.get("skill_id")
+        and s.get("gap_confirmed") is not False
     ]
     has_gap = bool(deep_failed)
     if has_gap:

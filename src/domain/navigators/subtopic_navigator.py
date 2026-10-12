@@ -5,9 +5,11 @@ Within an L2 topic, navigates L3 subtopics using binary search.
 Tracks the last-failed subtopic (boundary_subtopic_id) so the
 SessionService can decide whether to trigger a deep scan.
 
-Deep scan is triggered when:
-  importance >= deep_scan_importance_threshold (default 8)
-  AND a subtopic was failed (boundary_subtopic_id is set)
+Deep scan is triggered (DEEP_SCAN_TRIGGER_MODE) when a subtopic was failed
+(boundary_subtopic_id is set) AND
+  mode "importance" (default): its importance >= deep_scan_importance_threshold (8)
+  mode "hard_prereq":          it has a hard prerequisite edge (importance ignored;
+                               the edge lookup is SessionService's, not the navigator's)
 """
 from __future__ import annotations
 
@@ -76,14 +78,19 @@ class SubtopicNavigator:
     def is_exhausted(self) -> bool:
         return self.state.exhausted
 
-    def needs_deep_scan(self, threshold: int) -> bool:
-        """True if the failed subtopic itself is important enough to warrant deep scan."""
+    def failed_subtopic(self) -> Optional[SubtopicEntry]:
+        """The last failed subtopic (boundary), or None if nothing failed yet."""
         if self.state.boundary_subtopic_id is None:
-            return False
+            return None
         for sub in self.state.subtopics:
             if sub.subtopic_id == self.state.boundary_subtopic_id:
-                return sub.importance >= threshold
-        return False
+                return sub
+        return None
+
+    def needs_deep_scan(self, threshold: int) -> bool:
+        """True if the failed subtopic itself is important enough to warrant deep scan."""
+        failed = self.failed_subtopic()
+        return failed is not None and failed.importance >= threshold
 
     def record_score(self, score: float) -> None:
         """Store the skill-aggregated score [0.0–1.0] for the current subtopic.

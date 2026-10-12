@@ -6,7 +6,8 @@ Implements the T-Shape adaptive diagnostic algorithm:
   Phase 0  INIT        Build topic grid from knowledge_hierarchy (L2 nodes)
   Phase 1  WARMUP      Cross-section tasks around prior_theta (IRT-matched)
   Phase 2  NAVIGATION  Binary search L2 (topic) → L3 (subtopic) → L4 (skill)
-  Phase 3  DEEP_SCAN   Prerequisite traversal on fail for high-importance topics
+  Phase 3  DEEP_SCAN   Prerequisite traversal on a failed L3 (trigger: DEEP_SCAN_TRIGGER_MODE;
+                       gap confirmation: DEEP_SCAN_CONFIRM_PROBES; probe difficulty offset)
   Phase 4  COMPLETED   Persist, build breakdown, delete from Redis
 
 Stopping criteria:
@@ -646,6 +647,18 @@ class SessionService:
         """True once the session's Deep Scan items reached DEEP_SCAN_SESSION_BUDGET."""
         return state.deep_scan_items_total >= settings.deep_scan_session_budget
 
+    def _l3_warrants_deep_scan(self, subtopic) -> bool:
+        """Trigger rule for a failed L3 (DEEP_SCAN_TRIGGER_MODE).
+
+        "importance" (default): the L3's importance reaches the threshold (8).
+        "hard_prereq": the L3 has at least one HARD prerequisite edge, whatever
+        its importance.  The trigger and ``_has_pending_critical_probe`` both ask
+        this one question, so an early stop can never skip a scan that would start.
+        """
+        if settings.deep_scan_trigger_mode == "hard_prereq":
+            return bool(self.prereq_repo.get_prerequisites(subtopic.subtopic_id, hard_only=True))
+        return subtopic.importance >= settings.deep_scan_importance_threshold
+
     def _has_pending_critical_probe(self, state: SessionState, correct: bool) -> bool:
         """Preview the current L4 answer without mutating persisted navigation."""
         if state.phase != "navigation" or not state.current_skill_nav or not state.current_subtopic_nav:
@@ -653,12 +666,14 @@ class SessionService:
         skills = SkillNavigator.from_dict(copy.deepcopy(state.current_skill_nav))
         subtopics = SubtopicNavigator.from_dict(state.current_subtopic_nav)
         current = subtopics.peek_current()
-        if current is None or current.importance < settings.deep_scan_importance_threshold:
+        if current is None:
             return False
         if self._deep_scan_budget_spent(state):
             return False   # no scan can start, so there is nothing pending
         next_skill = skills.move(correct)
         if not skills.get_failing_skill():
+            return False
+        if not self._l3_warrants_deep_scan(current):
             return False
         if next_skill is not None:
             # Finish measuring this important failed subtopic before deciding
@@ -757,19 +772,22 @@ class SessionService:
                 state.current_subtopic_nav = sub_nav.to_dict()
 
                 # Check Deep Scan AFTER sub_nav.move() so boundary_subtopic_id is populated.
-                # needs_deep_scan() reads the FAILED L3 subtopic's own importance (8–10).
+                # The rule (_l3_warrants_deep_scan) reads the FAILED L3 itself: its own
+                # importance (8–10), or in "hard_prereq" mode its hard prerequisite edges.
+                failed_sub = sub_nav.failed_subtopic()
                 if (
                     not subtopic_pass
                     and not self._deep_scan_budget_spent(state)
-                    and sub_nav.needs_deep_scan(settings.deep_scan_importance_threshold)
                     and skill_nav.get_failing_skill()
+                    and failed_sub is not None
+                    and self._l3_warrants_deep_scan(failed_sub)
                 ):
                     failing_skill = skill_nav.get_failing_skill()
                     log.info(
-                        "Deep scan triggered for skill %s (failed subtopic %s, importance >= %d)",
+                        "Deep scan triggered for skill %s (failed subtopic %s, trigger mode %s)",
                         failing_skill,
                         sub_nav.state.boundary_subtopic_id,
-                        settings.deep_scan_importance_threshold,
+                        settings.deep_scan_trigger_mode,
                     )
                     state.phase = "deep_scan"
                     state.is_in_deep_scan = True
@@ -1174,7 +1192,13 @@ class SessionService:
     def _advance_deep_scan(
         self, state: SessionState, correct: bool
     ) -> Optional[TaskOut]:
-        """Process one step of the deep scan prerequisite traversal."""
+        """Process one step of the deep scan prerequisite traversal.
+
+        Correct: the branch is closed (the skill is mastered), the other queued
+        branches are still probed.  Wrong: a gap once DEEP_SCAN_CONFIRM_PROBES wrong
+        answers on different items of the skill are in (default 1), then its own
+        prerequisites are tested first; otherwise the same skill is probed again.
+        The scan is bounded by max items, the session budget and the queue only."""
         if state.deep_scan is None:
             state.phase = "navigation"
             state.is_in_deep_scan = False
@@ -1192,7 +1216,7 @@ class SessionService:
         scan.items_used += 1
         state.deep_scan_items_total += 1
 
-        if scan.current_skill_id:
+        if scan.current_skill_id and scan.current_skill_id not in scan.tested:
             scan.tested.append(scan.current_skill_id)
 
         budget_exceeded = (
@@ -1210,8 +1234,21 @@ class SessionService:
                 return self._advance_topic(state, False)
             return self._next_deep_scan_task(state, scan)
 
-        # Incorrect: this skill is a gap
+        # Incorrect.  With DEEP_SCAN_CONFIRM_PROBES = 1 (default) one wrong answer makes
+        # the skill a gap.  With N > 1 it must be wrong on N different items first: until
+        # then the same skill is probed again (another unused item, same target
+        # difficulty); a correct answer on any of them closes the branch above.  When the
+        # scan budget ends the skill first, it stays unconfirmed - not a gap.
         if scan.current_skill_id:
+            wrong = scan.wrong_counts.get(scan.current_skill_id, 0) + 1
+            scan.wrong_counts[scan.current_skill_id] = wrong
+            if wrong < settings.deep_scan_confirm_probes:
+                if budget_exceeded:
+                    scan.unconfirmed.append(scan.current_skill_id)
+                    self._finish_deep_scan(state, scan)
+                    return self._advance_topic(state, False)
+                scan.queue.insert(0, scan.current_skill_id)
+                return self._next_deep_scan_task(state, scan)
             scan.gaps.append(scan.current_skill_id)
 
         if budget_exceeded:
@@ -1252,8 +1289,14 @@ class SessionService:
             if task is not None:
                 state.deep_scan = scan.to_dict()
                 return task
-            log.warning("Deep scan: no unused task for %s, skipping to next branch", next_skill_id)
-            scan.tested.append(next_skill_id)
+            if scan.wrong_counts.get(next_skill_id):
+                # Answered wrong but the gap cannot be confirmed: no unused item left.
+                log.info("Deep scan: no unused task to confirm %s, gap not confirmed", next_skill_id)
+                scan.unconfirmed.append(next_skill_id)
+            else:
+                log.warning("Deep scan: no unused task for %s, skipping to next branch", next_skill_id)
+            if next_skill_id not in scan.tested:
+                scan.tested.append(next_skill_id)
         scan.current_skill_id = None
         self._finish_deep_scan(state, scan)
         return self._advance_topic(state, False)
@@ -1264,6 +1307,9 @@ class SessionService:
         for skill in scan.tested:
             if skill not in state.deep_scan_tested:
                 state.deep_scan_tested.append(skill)
+        for skill in scan.unconfirmed:
+            if skill not in state.deep_scan_unconfirmed:
+                state.deep_scan_unconfirmed.append(skill)
         if scan.origin_skill_id not in state.confirmed_gaps:
             state.confirmed_gaps.append(scan.origin_skill_id)
         state.deep_scan = None
@@ -1283,9 +1329,16 @@ class SessionService:
     # ── Task selection ─────────────────────────────────────────────────────
 
     def _select_task_for_skill(self, state: SessionState, skill_id: str):
-        """IRT-nearest unused task for a skill, any unused task, or None."""
+        """IRT-nearest unused task for a skill, any unused task, or None.
+
+        Measurement items target theta.  A Deep Scan probe targets
+        theta - DEEP_SCAN_PROBE_DIFFICULTY_OFFSET (default 0: theta), i.e. easier items
+        for a positive offset; this is the only place the offset applies."""
+        target_b = state.theta.theta
+        if state.is_in_deep_scan:
+            target_b = target_b - settings.deep_scan_probe_difficulty_offset
         task = self.task_repo.get_task_by_difficulty_target(
-            skill_id, target_b=state.theta.theta, exclude_ids=state.used_task_ids
+            skill_id, target_b=target_b, exclude_ids=state.used_task_ids
         )
         if task is None:
             tasks = self.task_repo.get_tasks_for_skill(
