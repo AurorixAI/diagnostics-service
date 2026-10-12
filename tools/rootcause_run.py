@@ -7,6 +7,11 @@
   python tools/rootcause_run.py run --tag base
   python tools/rootcause_run.py run --tag budget8 --setting DEEP_SCAN_SESSION_BUDGET=8 --grades 7 8
   python tools/rootcause_run.py run --tag base_ref --stand-set reference --grades 7 8 9 11   # earlier gap sets
+  python tools/rootcause_run.py run --tag A0 --stand-set stand --workers 8     # stand A (default)
+  python tools/rootcause_run.py run --tag B0 --stand-set B                     # stand B: 8 seeded gap L3 per grade (rootcause_stand_b.py)
+
+Stage-3a instrumentation (l3_visits, shadow_triggers, scan_log, ...) is written into every per-student record; metrics:
+  python tools/rootcause_diag.py --tag A0 --stage stage3a
 
   # one-arm table / paired comparison variant vs base (JSON + compact text table)
   python tools/rootcause_run.py table --tag base
@@ -66,6 +71,8 @@ def cmd_run(a):
             gap = stand["reference_sets"].get(str(g))
             if not gap:
                 print(f"G{g}: no reference set, skipped"); continue
+        elif a.stand_set == "B":
+            gap = stand["stand_b"]["grades"][str(g)]["gap_l3"]
         else:
             gap = stand["grades"][str(g)]["gap_l3"]
         out = out_path(a.tag, g)
@@ -112,7 +119,11 @@ def cmd_table(a):
         if not d:
             continue
         s = d["arms"]["A"]["summary"]
-        cls = {k: v["class"] for k, v in stand["grades"][str(g)]["detail"].items()}
+        if (d.get("rootcause") or {}).get("stand_set") == "B":
+            detail = stand["stand_b"]["grades"][str(g)]["detail"]
+            cls = {k: ("dependant" if v["in_grade_hard_dependants"] else "typical") for k, v in detail.items()}
+        else:
+            cls = {k: v["class"] for k, v in stand["grades"][str(g)]["detail"].items() if "class" in v}
         by = {}
         for c in ("typical", "dependant"):
             st = [r for r in d["arms"]["A"]["students"] if r["gap"] and cls.get(r["gap"]) == c]
@@ -185,7 +196,7 @@ def main():
     r = sp.add_parser("run"); r.add_argument("--tag", required=True)
     r.add_argument("--setting", action="append", default=[], help="KEY=VAL override passed to cat_sim --setting")
     r.add_argument("--grades", type=int, nargs="*", default=GRADES)
-    r.add_argument("--stand-set", choices=["stand", "reference"], default="stand")
+    r.add_argument("--stand-set", choices=["stand", "reference", "B"], default="stand")
     r.add_argument("--n-students", type=int, default=None); r.add_argument("--workers", type=int, default=8)
     r.add_argument("--content-db-url")
     t = sp.add_parser("table"); t.add_argument("--tag", required=True); t.add_argument("--out")

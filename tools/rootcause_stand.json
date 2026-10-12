@@ -619,5 +619,1142 @@
    "G11_P46"
   ]
  },
- "reference_sets_note": "gap sets of the earlier audit (f1g5 S1, f1g6 S1, f1g7, f1g8, f1g9, f1g11 requested arms); use rootcause_run.py --stand-set reference to reproduce those baselines."
+ "reference_sets_note": "gap sets of the earlier audit (f1g5 S1, f1g6 S1, f1g7, f1g8, f1g9, f1g11 requested arms); use rootcause_run.py --stand-set reference to reproduce those baselines.",
+ "stand_b": {
+  "description": "Stand B: 8 gap L3 per grade drawn by a deterministic seeded rule from the content graph (tools/rootcause_stand_b.py): 3 eligible-dependant (a direct in-grade hard dependant with importance >= 8), 3 non-eligible-dependant (dependants exist, all importance < 8), 2 typical (no dependant).  Same params as stand A.  G10 has no non-eligible class: its 3 slots are 'eligible_fill'.",
+  "rule": "Stand A (the hand-picked \"grades\" section) stays untouched.  Stand B is a deterministic, seeded draw of 8 gap L3 per grade\nthat separates the three situations the Deep Scan trigger meets (rule, applied per grade 5..11, read-only on the content DB):\n\n  visitable L3  = active L3 with >=1 active L4 that has an active task.\n  dependant     = visitable L3 of the SAME grade with a HARD prerequisite edge to the gap L3 (in-grade, direct): the L3s\n                  that gap students fail together with the gap in the simulation (cat_sim --dependant-depth 1) and\n                  the only ones a grade-g session can visit.\n  class (of a candidate gap L3 G):\n     eligible      : G has a dependant with importance >= IMPORTANCE_THRESHOLD (8)  -> a failed dependant can start a scan\n                     that reaches G through its prerequisite queue          (3 per grade)\n     non_eligible  : G has dependants, all with importance < 8: a failed dependant never starts a scan   (3 per grade)\n     typical       : G has no dependant at all                                                       (2 per grade)\n  candidate quality tiers (stand-A rule first, relaxed only when a class cannot be filled):\n     T1 >=3 active L4 with tasks and >=80 active tasks; T2 >=2 L4 and >=40 tasks; T3 >=1 L4 and >=20 tasks.\n  draw: for each class in the order eligible, non_eligible, typical and each tier T1..T3, the candidates (sorted by id) are\n     shuffled with random.Random(f\"{SEED}:{grade}:{class}:{tier}\") and taken in that order while the class has free slots and\n     the candidate is neither a dependant nor a prerequisite (hard, in-grade) of an already chosen L3.\n  shortfall: a class that no tier can fill (G10 has no non_eligible candidate: every in-grade dependant has importance >= 8)\n     hands its free slots to the eligible class (label \"eligible_fill\", drawn by the same seeded rule, tier order unchanged).\n  gap_l3 order: eligible, eligible_fill, non_eligible, typical (the simulation draws G uniformly from this list).",
+  "seed": 20261012,
+  "importance_threshold": 8,
+  "quota": {
+   "eligible": 3,
+   "non_eligible": 3,
+   "typical": 2
+  },
+  "tiers": {
+   "T1": [
+    3,
+    80
+   ],
+   "T2": [
+    2,
+    40
+   ],
+   "T3": [
+    1,
+    20
+   ]
+  },
+  "grades": {
+   "5": {
+    "gap_l3": [
+     "G5_P26",
+     "G5_P20",
+     "G5_P07",
+     "G5_P04",
+     "G5_P43",
+     "G5_P44",
+     "G5_P40",
+     "G5_P22"
+    ],
+    "classes": {
+     "eligible": [
+      "G5_P26",
+      "G5_P20",
+      "G5_P07"
+     ],
+     "eligible_fill": [],
+     "non_eligible": [
+      "G5_P04",
+      "G5_P43",
+      "G5_P44"
+     ],
+     "typical": [
+      "G5_P40",
+      "G5_P22"
+     ]
+    },
+    "candidates_per_class": {
+     "eligible": 19,
+     "non_eligible": 10,
+     "typical": 18
+    },
+    "detail": {
+     "G5_P26": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 84,
+      "importance": 8,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G5_P27",
+        "importance": 7
+       },
+       {
+        "id": "G5_P28",
+        "importance": 9
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G5_P20": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 113,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G5_P21",
+        "importance": 6
+       },
+       {
+        "id": "G5_P24",
+        "importance": 8
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G5_P07": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 290,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G5_P08",
+        "importance": 9
+       },
+       {
+        "id": "G5_P12",
+        "importance": 7
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G5_P04": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 102,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G5_P05",
+        "importance": 5
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G5_P43": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 154,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G5_P46",
+        "importance": 5
+       },
+       {
+        "id": "G5_P47",
+        "importance": 5
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G5_P44": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 152,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G5_P45",
+        "importance": 6
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G5_P40": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 5,
+      "n_active_tasks": 305,
+      "importance": 9,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     },
+     "G5_P22": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 82,
+      "importance": 7,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     }
+    }
+   },
+   "6": {
+    "gap_l3": [
+     "G6_P26",
+     "G6_P41",
+     "G6_P32",
+     "G6_P35",
+     "G6_P37",
+     "G6_P11",
+     "G6_P15",
+     "G6_P24"
+    ],
+    "classes": {
+     "eligible": [
+      "G6_P26",
+      "G6_P41",
+      "G6_P32"
+     ],
+     "eligible_fill": [],
+     "non_eligible": [
+      "G6_P35",
+      "G6_P37",
+      "G6_P11"
+     ],
+     "typical": [
+      "G6_P15",
+      "G6_P24"
+     ]
+    },
+    "candidates_per_class": {
+     "eligible": 20,
+     "non_eligible": 8,
+     "typical": 19
+    },
+    "detail": {
+     "G6_P26": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 7,
+      "n_active_tasks": 130,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G6_P27",
+        "importance": 7
+       },
+       {
+        "id": "G6_P28",
+        "importance": 7
+       },
+       {
+        "id": "G6_P29",
+        "importance": 7
+       },
+       {
+        "id": "G6_P30",
+        "importance": 5
+       },
+       {
+        "id": "G6_P31",
+        "importance": 6
+       },
+       {
+        "id": "G6_P45",
+        "importance": 10
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G6_P41": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 104,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G6_P42",
+        "importance": 10
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G6_P32": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 119,
+      "importance": 8,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G6_P34",
+        "importance": 9
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G6_P35": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 5,
+      "n_active_tasks": 250,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G6_P36",
+        "importance": 7
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G6_P37": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 5,
+      "n_active_tasks": 90,
+      "importance": 10,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G6_P38",
+        "importance": 6
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G6_P11": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 301,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G6_P12",
+        "importance": 6
+       },
+       {
+        "id": "G6_P19",
+        "importance": 6
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G6_P15": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 99,
+      "importance": 5,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     },
+     "G6_P24": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 100,
+      "importance": 8,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     }
+    }
+   },
+   "7": {
+    "gap_l3": [
+     "G7_P12",
+     "G7_P02",
+     "G7_P33",
+     "G7_P15",
+     "G7_P07",
+     "G7_P17",
+     "G7_P28",
+     "G7_P32"
+    ],
+    "classes": {
+     "eligible": [
+      "G7_P12",
+      "G7_P02",
+      "G7_P33"
+     ],
+     "eligible_fill": [],
+     "non_eligible": [
+      "G7_P15",
+      "G7_P07",
+      "G7_P17"
+     ],
+     "typical": [
+      "G7_P28",
+      "G7_P32"
+     ]
+    },
+    "candidates_per_class": {
+     "eligible": 14,
+     "non_eligible": 14,
+     "typical": 10
+    },
+    "detail": {
+     "G7_P12": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 129,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G7_P14",
+        "importance": 7
+       },
+       {
+        "id": "G7_P27",
+        "importance": 9
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G7_P02": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 128,
+      "importance": 10,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G7_P03",
+        "importance": 6
+       },
+       {
+        "id": "G7_P04",
+        "importance": 9
+       },
+       {
+        "id": "G7_P05",
+        "importance": 7
+       },
+       {
+        "id": "G7_P06",
+        "importance": 8
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G7_P33": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 126,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G7_P34",
+        "importance": 9
+       },
+       {
+        "id": "G7_P35",
+        "importance": 7
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G7_P15": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 260,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G7_P20",
+        "importance": 7
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G7_P07": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 412,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G7_P09",
+        "importance": 7
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G7_P17": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 283,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G7_P20",
+        "importance": 7
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G7_P28": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 81,
+      "importance": 2,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     },
+     "G7_P32": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 7,
+      "n_active_tasks": 176,
+      "importance": 9,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     }
+    }
+   },
+   "8": {
+    "gap_l3": [
+     "G8_P11",
+     "G8_P01",
+     "G8_P15",
+     "G8_P05",
+     "G8_P09",
+     "G8_P13",
+     "G8_P07",
+     "G8_P26"
+    ],
+    "classes": {
+     "eligible": [
+      "G8_P11",
+      "G8_P01",
+      "G8_P15"
+     ],
+     "eligible_fill": [],
+     "non_eligible": [
+      "G8_P05",
+      "G8_P09",
+      "G8_P13"
+     ],
+     "typical": [
+      "G8_P07",
+      "G8_P26"
+     ]
+    },
+    "candidates_per_class": {
+     "eligible": 9,
+     "non_eligible": 8,
+     "typical": 14
+    },
+    "detail": {
+     "G8_P11": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 150,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G8_P12",
+        "importance": 9
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G8_P01": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 95,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G8_P02",
+        "importance": 9
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G8_P15": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 11,
+      "n_active_tasks": 232,
+      "importance": 8,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G8_P16",
+        "importance": 7
+       },
+       {
+        "id": "G8_P17",
+        "importance": 9
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G8_P05": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 170,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G8_P06",
+        "importance": 6
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G8_P09": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 302,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G8_P10",
+        "importance": 6
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G8_P13": {
+      "class": "non_eligible",
+      "tier": "T2",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 64,
+      "importance": 5,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G8_P14",
+        "importance": 3
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G8_P07": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 86,
+      "importance": 8,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     },
+     "G8_P26": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 7,
+      "n_active_tasks": 307,
+      "importance": 7,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     }
+    }
+   },
+   "9": {
+    "gap_l3": [
+     "G9_P24",
+     "G9_P04",
+     "G9_P06",
+     "G9_P13",
+     "G9_P32",
+     "G9_P29",
+     "G9_P20",
+     "G9_P12"
+    ],
+    "classes": {
+     "eligible": [
+      "G9_P24",
+      "G9_P04",
+      "G9_P06"
+     ],
+     "eligible_fill": [],
+     "non_eligible": [
+      "G9_P13",
+      "G9_P32",
+      "G9_P29"
+     ],
+     "typical": [
+      "G9_P20",
+      "G9_P12"
+     ]
+    },
+    "candidates_per_class": {
+     "eligible": 10,
+     "non_eligible": 12,
+     "typical": 16
+    },
+    "detail": {
+     "G9_P24": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 6,
+      "n_active_tasks": 119,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G9_P25",
+        "importance": 9
+       },
+       {
+        "id": "G9_P26",
+        "importance": 8
+       },
+       {
+        "id": "G9_P27",
+        "importance": 6
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G9_P04": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 6,
+      "n_active_tasks": 113,
+      "importance": 6,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G9_P05",
+        "importance": 9
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G9_P06": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 145,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G9_P07",
+        "importance": 7
+       },
+       {
+        "id": "G9_P08",
+        "importance": 9
+       },
+       {
+        "id": "G9_P15",
+        "importance": 8
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G9_P13": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 6,
+      "n_active_tasks": 164,
+      "importance": 8,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G9_P14",
+        "importance": 7
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G9_P32": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 87,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G9_P33",
+        "importance": 6
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G9_P29": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 5,
+      "n_active_tasks": 160,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G9_P30",
+        "importance": 7
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G9_P20": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 5,
+      "n_active_tasks": 109,
+      "importance": 7,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     },
+     "G9_P12": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 114,
+      "importance": 7,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     }
+    }
+   },
+   "10": {
+    "gap_l3": [
+     "G10_P13",
+     "G10_P09",
+     "G10_P24",
+     "G10_P16",
+     "G10_P11",
+     "G10_P28",
+     "G10_P08",
+     "G10_P23"
+    ],
+    "classes": {
+     "eligible": [
+      "G10_P13",
+      "G10_P09",
+      "G10_P24"
+     ],
+     "eligible_fill": [
+      "G10_P16",
+      "G10_P11",
+      "G10_P28"
+     ],
+     "non_eligible": [],
+     "typical": [
+      "G10_P08",
+      "G10_P23"
+     ]
+    },
+    "candidates_per_class": {
+     "eligible": 17,
+     "non_eligible": 0,
+     "typical": 16
+    },
+    "detail": {
+     "G10_P13": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 5,
+      "n_active_tasks": 111,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G10_P14",
+        "importance": 10
+       },
+       {
+        "id": "G10_P15",
+        "importance": 9
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G10_P09": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 5,
+      "n_active_tasks": 170,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G10_P10",
+        "importance": 8
+       },
+       {
+        "id": "G10_P32",
+        "importance": 9
+       },
+       {
+        "id": "G10_P33",
+        "importance": 8
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G10_P24": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 5,
+      "n_active_tasks": 123,
+      "importance": 10,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G10_P25",
+        "importance": 10
+       },
+       {
+        "id": "G10_P26",
+        "importance": 8
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G10_P16": {
+      "class": "eligible_fill",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 165,
+      "importance": 10,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G10_P17",
+        "importance": 9
+       },
+       {
+        "id": "G10_P18",
+        "importance": 10
+       },
+       {
+        "id": "G10_P20",
+        "importance": 9
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G10_P11": {
+      "class": "eligible_fill",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 6,
+      "n_active_tasks": 314,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G10_P12",
+        "importance": 6
+       },
+       {
+        "id": "G10_P33",
+        "importance": 8
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G10_P28": {
+      "class": "eligible_fill",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 5,
+      "n_active_tasks": 92,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G10_P29",
+        "importance": 8
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G10_P08": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 10,
+      "n_active_tasks": 96,
+      "importance": 8,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     },
+     "G10_P23": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 8,
+      "n_active_tasks": 169,
+      "importance": 8,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     }
+    }
+   },
+   "11": {
+    "gap_l3": [
+     "G11_P46",
+     "G11_P27",
+     "G11_P09",
+     "G11_P24",
+     "G11_P05",
+     "G11_P28",
+     "G11_P37",
+     "G11_P36"
+    ],
+    "classes": {
+     "eligible": [
+      "G11_P46",
+      "G11_P27",
+      "G11_P09"
+     ],
+     "eligible_fill": [],
+     "non_eligible": [
+      "G11_P24",
+      "G11_P05",
+      "G11_P28"
+     ],
+     "typical": [
+      "G11_P37",
+      "G11_P36"
+     ]
+    },
+    "candidates_per_class": {
+     "eligible": 14,
+     "non_eligible": 11,
+     "typical": 23
+    },
+    "detail": {
+     "G11_P46": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 90,
+      "importance": 8,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G11_P45",
+        "importance": 8
+       },
+       {
+        "id": "G11_P47",
+        "importance": 6
+       },
+       {
+        "id": "G11_P48",
+        "importance": 8
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G11_P27": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 191,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G11_P23",
+        "importance": 10
+       },
+       {
+        "id": "G11_P31",
+        "importance": 10
+       },
+       {
+        "id": "G11_P33",
+        "importance": 9
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G11_P09": {
+      "class": "eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 105,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G11_P10",
+        "importance": 7
+       },
+       {
+        "id": "G11_P11",
+        "importance": 8
+       },
+       {
+        "id": "G11_P12",
+        "importance": 9
+       },
+       {
+        "id": "G11_P16",
+        "importance": 10
+       },
+       {
+        "id": "G11_P32",
+        "importance": 7
+       }
+      ],
+      "trigger_eligible": true
+     },
+     "G11_P24": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 205,
+      "importance": 9,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G11_P25",
+        "importance": 4
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G11_P05": {
+      "class": "non_eligible",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 4,
+      "n_active_tasks": 199,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G11_P08",
+        "importance": 5
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G11_P28": {
+      "class": "non_eligible",
+      "tier": "T2",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 44,
+      "importance": 7,
+      "in_grade_hard_dependants": [
+       {
+        "id": "G11_P29",
+        "importance": 7
+       },
+       {
+        "id": "G11_P34",
+        "importance": 3
+       }
+      ],
+      "trigger_eligible": false
+     },
+     "G11_P37": {
+      "class": "typical",
+      "tier": "T1",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 108,
+      "importance": 7,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     },
+     "G11_P36": {
+      "class": "typical",
+      "tier": "T2",
+      "n_active_l4_with_tasks": 3,
+      "n_active_tasks": 48,
+      "importance": 10,
+      "in_grade_hard_dependants": [],
+      "trigger_eligible": false
+     }
+    }
+   }
+  }
+ }
 }
