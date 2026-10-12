@@ -1035,3 +1035,51 @@ def test_plan_sweep_drops_only_the_offending_line_and_keeps_separators(prose, ex
     assert rg.drop_retired_sentences(prose) == expected
     stored = {"action_plan": [{"priority": 1, "skill_id": "G8_T1", "full_description": prose}]}
     assert rg.strip_retired_report_fields(stored)["action_plan"][0]["full_description"] == expected
+
+
+# ── Final-final: regressions M1/M2 and the low items ──────────────────────────
+
+@pytest.mark.parametrize("text", [
+    # M1: «результат…» anywhere before the credibility adjective
+    "Результат по теме «Дроби» достоверен на 90%.",
+    "Результат ученика по дробям достоверен на 90%.",
+    "Результат по разделу дроби достоверен на 90%.",
+    # M2: the event exemption never applies when a result / diagnostic subject precedes
+    "Результат по теме «Случайные события» надёжен на 85%.",
+    "Диагноз достоверен, событие не влияет.",
+    # root cause, infinitive first and «остался»
+    "Подтвердить единую первопричину невозможно",
+    "Подтвердить единую первопричину нельзя.",
+    "Установить первопричину нельзя",
+    "Единый корень остался неустановленным",
+    "Точность диагностики — 87%",
+])
+def test_final_final_regressions_are_rejected_again(text):
+    assert rg.contains_retired_claim(text), text
+    assert not _validate(_narrative("Текст.", description=text))[0], text
+
+
+@pytest.mark.parametrize("text", [
+    "Уверенность при решении тестов повысилась на 15%",
+    "Повторить: вероятность достоверного события равна 100%.",
+    "Событие достоверно",
+    "Достоверное и невозможное события",
+    "Определить первопричину можно, но исправить нельзя.",
+    "Нельзя определять первопричину по одной задаче",
+    "Если не определить первопричину, ошибки повторятся",
+])
+def test_final_final_look_alikes_still_pass(text):
+    assert not rg.contains_retired_claim(text), text
+    assert _validate(_narrative("Текст.", description=text)) == (True, []), text
+
+
+@pytest.mark.parametrize("prose, expected", [
+    ("Надёжность диагноза\n— 83%. Решите.", "Решите."),
+    ("Надёжность диагноза\n83%. Решите.", "Решите."),
+    ("Надёжность диагноза\n- 0,83. Решите.", "Решите."),
+    ("- Надёжность диагноза 83%\n- Решите пример.", "- Решите пример."),            # a bullet is not a continuation
+    ("1. Надёжность диагноза высокая\n2. Решите пример.", "2. Решите пример."),
+    ("Чистый текст. Без претензий.", "Чистый текст. Без претензий."),
+])
+def test_plan_sweep_handles_wrapped_claims_and_list_markers(prose, expected):
+    assert rg.drop_retired_sentences(prose) == expected

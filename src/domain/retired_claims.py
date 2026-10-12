@@ -103,7 +103,7 @@ _MODAL = frozenset({
 })
 _INFINITIVE = frozenset({"установить", "определить", "подтвердить", "выявить", "найти", "обнаружить", "выделить", "выяснить"})
 _IMPOSSIBLE = ("нельзя", "невозможно")
-_REMAINED = frozenset({"осталась", "осталось", "остались", "остается", "остаются", "останется"})
+_REMAINED = frozenset({"остался", "осталась", "осталось", "остались", "остается", "остаются", "останется"})
 _UNESTABLISHED = re.compile(
     r"(?:неустановлен|невыяснен|неопределен|неподтвержден|невыявлен|необнаружен|ненайден)(?:н?ой|н?ым|н?ыми|н?ые|н?ая|н?ое|н?ую|н?ых)?"
 )
@@ -228,6 +228,24 @@ def _claim_negation_before(tokens: Sequence[str], starts: Set[int]) -> bool:
     return False
 
 
+def _infinitive_before(tokens: Sequence[str], start: int) -> bool:
+    """An infinitive of «установить / подтвердить …» stands within two words before the noun phrase."""
+    seen = 0
+    pos = start - 1
+    while pos >= 0 and seen < 3:
+        token = tokens[pos]
+        if token in _OPEN:
+            pos -= 1
+            continue
+        if not _is_word(token):
+            return False
+        if token in _INFINITIVE:
+            return True
+        seen += 1
+        pos -= 1
+    return False
+
+
 def _claim_negation_after(tokens: Sequence[str], nps: Sequence[tuple]) -> bool:
     """B: «Единая первопричина не подтверждена», «Первопричину установить не удалось», «… нет»."""
     n = len(tokens)
@@ -258,6 +276,8 @@ def _claim_negation_after(tokens: Sequence[str], nps: Sequence[tuple]) -> bool:
                 break                                          # : ; ( ) « » - % and numbers
             if _negated_predicate_at(tokens, i):
                 return True
+            if token in _IMPOSSIBLE and _infinitive_before(tokens, start):
+                return True                                    # «Подтвердить единую первопричину невозможно»
             if words <= _MAX_NEAR_WORDS and (token == "нет" or _ABSENT.fullmatch(token)):
                 return True
             if _matches_any(token, _FINITE_FORMS):
@@ -344,7 +364,7 @@ _TECH = re.compile(
     r"|лифт|насос|самолет)" + _TECH_ENDINGS
     + r"|узел|станок|реле|издели(?:е|я|ю|ем|й)|оборудован(?:ие|ия|ию|ием)|батаре(?:я|и|й|ю|ей)"
 )
-_WINDOW_FIGURE = 8          # tokens after the reliability noun searched for a figure
+_WINDOW_FIGURE = 4          # tokens after the reliability noun searched for a figure
 
 
 def _tech_follows(tokens: Sequence[str], i: int) -> bool:
@@ -459,7 +479,13 @@ def _result_judged_before(tokens: Sequence[str], i: int) -> bool:
 
 
 def _event_nearby(tokens: Sequence[str], i: int) -> bool:
-    """«Достоверное событие» / «событие достоверно» is the probability term, not a claim."""
+    """«Достоверное событие» / «событие достоверно» is the probability term, not a claim.
+
+    Never when a result / diagnostic subject precedes the adjective in the sentence
+    («Результат по теме «Случайные события» надёжен на 85%», «Диагноз достоверен, событие не влияет»).
+    """
+    if any(_RESULT.fullmatch(t) or _SUBJECT.fullmatch(t) for t in tokens[:i]):
+        return False
     return any(re.fullmatch(r"событ[а-я]{1,4}", t) for t in tokens[max(0, i - 3):i + 4])
 
 
@@ -484,7 +510,7 @@ def _reliability_in_sentence(tokens: Sequence[str]) -> bool:
             tech_subject = i >= 1 and _TECH.fullmatch(tokens[i - 1])
             credibility = token.startswith(("достовер", "недостовер"))
             if _figure_after(tokens, i, limit=4) and not tech_subject and (
-                not credibility or any(_RESULT.fullmatch(t) for t in tokens[max(0, i - 2):i])
+                not credibility or any(_RESULT.fullmatch(t) for t in tokens[:i])
             ):                                                 # «Результат достоверен на 90%»
                 return True
         elif _SOFT_NOUN.fullmatch(token) and _diagnostic_subject_after(tokens, i):
@@ -513,15 +539,39 @@ _SEGMENT_RE = re.compile(r"((?<=[.!?])\s+|\n+)")
 _SENTENCE_ONLY_RE = re.compile(r"((?<=[.!?])\s+)")
 
 
+# the figure of a claim that wrapped onto the next line: «— 83%», «83%», «- 0,83» (a bullet «- Решите» is not)
+_LIST_MARKER_RE = re.compile(r"\s*\d{1,2}[.)]")
+_CONTINUATION_RE = re.compile(
+    r"\s*(?:[-\u2010-\u2015\u2212]\s*)?(?:\d{1,3}(?:[.,]\d+)?\s*(?:%|процент)|[-\u2010-\u2015\u2212]\s*[01][.,]\d+)"
+)
+
+
 def _drop_flagged_segments(text: str, splitter: "re.Pattern[str]") -> str:
     parts = splitter.split(text)                       # segment, separator, segment, ...
     segments, separators = parts[0::2], parts[1::2] + [""]
-    kept = [
-        segment + separator
-        for segment, separator in zip(segments, separators)
-        if not (_has_reliability_claim(segment) or _has_root_cause_claim(segment))
-    ]
-    return text if len(kept) == len(segments) else "".join(kept).rstrip()
+    merged: List[tuple] = []                           # a bare list marker («1.») belongs to its line
+    k = 0
+    while k < len(segments):
+        segment, separator = segments[k], separators[k]
+        while _LIST_MARKER_RE.fullmatch(segment) and k + 1 < len(segments):
+            k += 1
+            segment, separator = segment + separator + segments[k], separators[k]
+        merged.append((segment, separator))
+        k += 1
+    segments, separators = [m[0] for m in merged], [m[1] for m in merged]
+    kept: List[str] = []
+    dropped = False
+    previous_open = False                              # the previous segment was dropped without a closing .!?
+    for segment, separator in zip(segments, separators):
+        flagged = _has_reliability_claim(segment) or _has_root_cause_claim(segment)
+        continuation = previous_open and _CONTINUATION_RE.match(segment) is not None
+        if flagged or continuation:                    # «Надёжность диагноза\n— 83%.» goes as a whole
+            dropped = True
+            previous_open = flagged and not segment.rstrip().endswith((".", "!", "?"))
+            continue
+        previous_open = False
+        kept.append(segment + separator)
+    return "".join(kept).rstrip() if dropped else text
 
 
 def drop_retired_sentences(text: Any) -> Any:
