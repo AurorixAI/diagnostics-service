@@ -121,7 +121,9 @@ def test_payload_and_report_use_the_same_numbers_and_rule(db):
     # level fields agree everywhere and come from theta only (18% correct, theta +0.48)
     assert level["category"] == payload["overall_level"] == "at_grade"
     assert level["status"] == payload["level_status"] == "on_level"
-    assert level["class_equivalent"] == payload["class_equivalent"] == rj["overall"]["class_equivalent"]
+    # N03a: no class equivalent anywhere, no reliability percentage
+    assert "class_equivalent" not in level and "class_equivalent" not in payload
+    assert "class_equivalent" not in rj["overall"] and "confidence_of_diagnosis" not in rj["overall"]
     assert level["provisional"] is payload["level_provisional"] is False
     assert rj["overall"]["status"] == "on_level" and rj["overall"]["status_label_ru"] == "Соответствует уровню"
     assert report.report_schema_version == REPORT_SCHEMA_VERSION
@@ -198,7 +200,7 @@ def test_resync_script_is_dry_run_by_default_and_idempotent(db, monkeypatch):
     monkeypatch.setattr(sync_jobs.auth_client, "notify_complete", lambda code, sid, payload: sent.append(payload) or True)
     assert sync_jobs.process_next_auth_completion_sync() is True
     assert sent and sent[0]["level_status"] == "on_level" and sent[0]["overall_level"] == "at_grade"
-    assert sent[0]["class_equivalent"] and sent[0]["level_provisional"] is False
+    assert "class_equivalent" not in sent[0] and sent[0]["level_provisional"] is False
 
     # after delivery a re-run is a no-op (idempotent)
     assert script.run(execute=True, limit=None, session_ids=None, allow_stale_report=False, db=db)["selected"] == 0

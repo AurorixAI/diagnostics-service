@@ -108,3 +108,24 @@ def test_ai_plan_must_be_compact_and_use_only_evidence_backed_skills():
     )
     assert not valid
     assert any("not evidence-backed" in error for error in errors)
+
+
+def test_n03a_contract_no_reliability_equivalent_or_duration_in_the_report_contract():
+    """Owner decision O4 + N03a: retired claims are not part of the contract (schema 5)."""
+    assert report_generator.REPORT_SCHEMA_VERSION >= 5
+    assert "estimated_hours" not in report_generator._AI_SCHEMA
+    assert "confidence_of_diagnosis" not in report_generator._AI_SCHEMA
+    fallback = report_generator._build_fallback_action_plan([
+        {"skill_id": "G7_A", "skill_name_ru": "Навык A", "evidence": "confirmed_prerequisite"},
+        {"skill_id": "G7_B", "skill_name_ru": "Навык B", "evidence": "observed_error"},
+    ])
+    assert [step["priority"] for step in fallback] == [1, 2]
+    assert all("estimated_hours" not in step for step in fallback)
+    assert fallback[0]["skill_id"] == "G7_A"
+
+    summary = report_generator._build_deterministic_summary(
+        status_label="Ниже уровня класса", grade_level=8, score_pct=30, solved=3, total=10,
+        boundary={"breakpoint_skills": ["Навык A"]}, strong_skills=[], chains=[],
+    )
+    assert not report_generator._CLASS_EQUIVALENT_RE.search(summary.lower())
+    assert "Ниже уровня класса" in summary

@@ -7,6 +7,7 @@ import pytest
 
 from src.domain import report_generator as rg
 from src.domain.navigators.skill_navigator import DeepScanState  # noqa: F401  (re-exported from the same module)
+from src.domain.level_policy import STATUS_LABEL_RU
 from src.domain.session_service import SessionService
 from src.domain.session_state import SessionState
 
@@ -118,7 +119,7 @@ def test_legacy_answers_without_link_keep_the_inference_but_keep_same_grade_link
 
 
 def test_summary_sentence_depends_on_whether_a_deep_scan_ran():
-    args = dict(class_equivalent="начало 8 класса", grade_level=8, score_pct=40,
+    args = dict(status_label="Соответствует уровню", grade_level=8, score_pct=40,
                 boundary={"breakpoint_skills": ["Дроби"]}, strong_skills=[], chains=[])
     without = rg._build_deterministic_summary(**args)
     ran = rg._build_deterministic_summary(**args, deep_scan_run=True)
@@ -128,15 +129,16 @@ def test_summary_sentence_depends_on_whether_a_deep_scan_ran():
     assert "Deep Scan" not in without + ran
 
 
-@pytest.mark.parametrize("equivalent", ["начало 5 класса", "середина 8 класса", "конец 9 класса", "начало 11 класса"])
-def test_conclusion_is_grammatical_for_every_class_equivalent(equivalent):
+@pytest.mark.parametrize("label", list(STATUS_LABEL_RU.values()))
+def test_conclusion_states_the_level_band_only_and_is_grammatical_for_every_label(label):
     text = rg._build_deterministic_summary(
-        class_equivalent=equivalent, grade_level=11, score_pct=40, solved=10, total=25,
+        status_label=label, grade_level=11, score_pct=40, solved=10, total=25,
         boundary={"breakpoint_skills": ["Дроби"]}, strong_skills=[], chains=[{"root_gap_skill_name": "Дроби"}],
     )
-    assert f"Уровень по результатам измерения — {equivalent} (заявлен 11 класс)." in text
+    assert f"Результат измерения: «{label}» (заявленный класс — 11)." in text
     assert "соответствует" not in text and "Deep Scan" not in text
     assert "Углублённая проверка подтвердила первопричину: «Дроби»." in text
+    assert not rg._CLASS_EQUIVALENT_RE.search(text.lower())
 
 # ── ordering / importance ─────────────────────────────────────────────────────
 

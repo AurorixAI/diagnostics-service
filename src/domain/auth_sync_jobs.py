@@ -85,7 +85,6 @@ def _completion_payload(db: Session, session: DiagSession) -> dict:
         # (the stored session value is the fallback when theta is missing).
         "overall_level": level["category"] or session.overall_level,
         "level_status": level["status"],
-        "class_equivalent": level["class_equivalent"],
         "level_provisional": level["provisional"],
     }
 

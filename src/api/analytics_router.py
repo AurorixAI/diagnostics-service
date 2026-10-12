@@ -69,7 +69,6 @@ def _level_fields(session) -> dict:
     return {
         "category": level["category"] or (session.overall_level if session is not None else None),
         "level_status": level["status"],
-        "class_equivalent": level["class_equivalent"],
         "level_provisional": level["provisional"],
     }
 
@@ -392,6 +391,10 @@ async def student_report(
     trajectory = _build_diagnostic_trajectory(session, db, knowledge_repo)
 
     out_report_json = report.report_json if report else None
+    if isinstance(out_report_json, dict):
+        # Reports older than schema 5 still hold retired claims (O4): never expose them.
+        from src.domain.report_generator import strip_retired_report_fields
+        out_report_json = strip_retired_report_fields(out_report_json)
     if out_report_json and isinstance(out_report_json, dict) and "error_patterns" in out_report_json:
         try:
             from src.domain.report_generator import refresh_error_patterns_live
