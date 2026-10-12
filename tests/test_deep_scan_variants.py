@@ -331,16 +331,18 @@ EDGE = NS(prerequisite_id="P")
 def test_importance_mode_ignores_hard_edges(monkeypatch):
     monkeypatch.setattr(ss.settings, "deep_scan_trigger_mode", "importance", raising=False)
     service = service_with_edges({"L3_5": [EDGE], "L3_8": []})
-    assert not service._l3_warrants_deep_scan(NS(subtopic_id="L3_5", importance=5))
-    assert service._l3_warrants_deep_scan(NS(subtopic_id="L3_8", importance=8))
+    state = state_with_theta(0.0, scanning=False)
+    assert not service._l3_warrants_deep_scan(state, NS(subtopic_id="L3_5", importance=5))
+    assert service._l3_warrants_deep_scan(state, NS(subtopic_id="L3_8", importance=8))
     assert service.calls == []                                         # the current rule does not even look up edges
 
 
 def test_hard_prereq_mode_fires_for_unimportant_l3_with_a_hard_edge_and_not_without(monkeypatch):
     monkeypatch.setattr(ss.settings, "deep_scan_trigger_mode", "hard_prereq", raising=False)
     service = service_with_edges({"L3_5": [EDGE]})
-    assert service._l3_warrants_deep_scan(NS(subtopic_id="L3_5", importance=5))
-    assert not service._l3_warrants_deep_scan(NS(subtopic_id="L3_9", importance=9))   # no edges: importance is ignored
+    state = state_with_theta(0.0, scanning=False)
+    assert service._l3_warrants_deep_scan(state, NS(subtopic_id="L3_5", importance=5))
+    assert not service._l3_warrants_deep_scan(state, NS(subtopic_id="L3_9", importance=9))   # no edges: importance is ignored
     assert ("L3_5", True) in service.calls                              # HARD edges only
 
 
@@ -583,3 +585,36 @@ def test_probe_target_is_clamped_to_the_content_api_range(monkeypatch):
     state = state_with_theta(-2.52, scanning=True)
     assert service_with_bank(bank)._select_task_for_skill(state, "S").irt_difficulty == -3.9
     assert bank.targets == [-4.0]
+
+
+def test_trigger_mode_is_frozen_at_session_start_not_read_live(monkeypatch):
+    """Review #3: the trigger is evaluated before any scan, so the mode must come from the
+    session's frozen flags, not the live setting (a mid-session config change must not flip it)."""
+    monkeypatch.setattr(ss.settings, "deep_scan_trigger_mode", "importance", raising=False)
+    service = service_with_edges({"L3_5": [EDGE]})
+    state = state_with_theta(0.0, scanning=False)
+    SessionService._scan_params(state)                                 # what create_session does
+    monkeypatch.setattr(ss.settings, "deep_scan_trigger_mode", "hard_prereq", raising=False)
+    assert not service._l3_warrants_deep_scan(state, NS(subtopic_id="L3_5", importance=5))
+    assert state.deep_scan_params["trigger_mode"] == "importance"
+
+
+def test_create_session_freezes_the_flags_before_any_navigation(monkeypatch):
+    monkeypatch.setattr(ss.settings, "deep_scan_trigger_mode", "hard_prereq", raising=False)
+    monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", 2, raising=False)
+    service = object.__new__(SessionService)
+    service.session_repo = NS(get_by_invite_code=lambda _code: None)
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def build_grid(state):
+        seen.append(dict(state.deep_scan_params or {}))
+        raise Stop
+
+    service._build_topic_grid = build_grid
+    with pytest.raises(Stop):
+        service.create_session(student_id="u", grade_level=8)
+    assert seen == [{"confirm_probes": 2, "probe_difficulty_offset": ss.settings.deep_scan_probe_difficulty_offset,
+                     "trigger_mode": "hard_prereq"}]

@@ -129,6 +129,7 @@ class SessionService:
             grade_level=grade_level,
         )
         state.theta = ThetaState(theta=prior_theta)
+        self._scan_params(state)   # freeze the session's Deep Scan flags (trigger mode included) at creation
 
         # 2. Load topic grid → build TopicNavigator states per L1 section
         self._build_topic_grid(state)
@@ -654,27 +655,37 @@ class SessionService:
     def _scan_params(state: SessionState) -> dict:
         """Deep Scan flags of THIS session, frozen from the settings at first use.
 
-        The first scan of a session stores them in the state; every later scan,
+        ``create_session`` stores them in the state, so the trigger rule, every scan,
         probe selection and the report read the stored values, never the live
-        settings.  ``trigger_mode`` is stored for traceability only (the trigger is
-        evaluated before the first scan exists)."""
+        settings.  Sessions created before the flags existed freeze them at their
+        first use instead."""
         if state.deep_scan_params is None:
-            state.deep_scan_params = {
-                "confirm_probes": int(settings.deep_scan_confirm_probes),
-                "probe_difficulty_offset": float(settings.deep_scan_probe_difficulty_offset),
-                "trigger_mode": str(settings.deep_scan_trigger_mode),
-            }
+            state.deep_scan_params = SessionService._peek_scan_params(state)
         return state.deep_scan_params
 
-    def _l3_warrants_deep_scan(self, subtopic) -> bool:
+    @staticmethod
+    def _peek_scan_params(state: SessionState) -> dict:
+        """The session's frozen flags, or (pre-flag session not frozen yet) the live
+        settings, WITHOUT storing anything: for read-only previews."""
+        if state.deep_scan_params is not None:
+            return state.deep_scan_params
+        return {
+            "confirm_probes": int(settings.deep_scan_confirm_probes),
+            "probe_difficulty_offset": float(settings.deep_scan_probe_difficulty_offset),
+            "trigger_mode": str(settings.deep_scan_trigger_mode),
+        }
+
+    def _l3_warrants_deep_scan(self, state: SessionState, subtopic) -> bool:
         """Trigger rule for a failed L3 (DEEP_SCAN_TRIGGER_MODE).
 
         "importance" (default): the L3's importance reaches the threshold (8).
         "hard_prereq": the L3 has at least one HARD prerequisite edge, whatever
         its importance.  The trigger and ``_has_pending_critical_probe`` both ask
         this one question, so an early stop can never skip a scan that would start.
+        The mode is the session's frozen one, read without storing anything
+        (``_peek_scan_params``) because the preview must not mutate the state.
         """
-        if settings.deep_scan_trigger_mode == "hard_prereq":
+        if self._peek_scan_params(state)["trigger_mode"] == "hard_prereq":
             return bool(self.prereq_repo.get_prerequisites(subtopic.subtopic_id, hard_only=True))
         return subtopic.importance >= settings.deep_scan_importance_threshold
 
@@ -692,7 +703,7 @@ class SessionService:
         next_skill = skills.move(correct)
         if not skills.get_failing_skill():
             return False
-        if not self._l3_warrants_deep_scan(current):
+        if not self._l3_warrants_deep_scan(state, current):
             return False
         if next_skill is not None:
             # Finish measuring this important failed subtopic before deciding
@@ -799,14 +810,14 @@ class SessionService:
                     and not self._deep_scan_budget_spent(state)
                     and skill_nav.get_failing_skill()
                     and failed_sub is not None
-                    and self._l3_warrants_deep_scan(failed_sub)
+                    and self._l3_warrants_deep_scan(state, failed_sub)
                 ):
                     failing_skill = skill_nav.get_failing_skill()
                     log.info(
                         "Deep scan triggered for skill %s (failed subtopic %s, trigger mode %s)",
                         failing_skill,
                         sub_nav.state.boundary_subtopic_id,
-                        settings.deep_scan_trigger_mode,
+                        self._peek_scan_params(state)["trigger_mode"],
                     )
                     state.phase = "deep_scan"
                     state.is_in_deep_scan = True
@@ -1177,7 +1188,7 @@ class SessionService:
         self, state: SessionState, failing_skill_id: str
     ) -> Optional[TaskOut]:
         """Build a DeepScanState from the prerequisite graph of the failing skill."""
-        self._scan_params(state)   # freeze the session's Deep Scan flags at the first scan
+        self._scan_params(state)   # no-op since create_session; freezes flags of pre-flag sessions
         prereq_ids = [
             pid for pid in self._prereq_l4_ids(failing_skill_id)
             if pid not in state.deep_scan_tested and pid != failing_skill_id
