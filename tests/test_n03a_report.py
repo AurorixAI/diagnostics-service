@@ -949,3 +949,29 @@ def test_stored_plan_prose_loses_only_the_offending_sentences():
     assert second["steps"] == ["Шаг один.", "", "Шаг три."]
     assert third["full_description"] == "Практика."
     assert "83%" in stored["action_plan"][0]["full_description"]    # the stored row is not mutated
+
+
+@pytest.mark.parametrize("text", [
+    "Точность диагностики — 87%",
+    "Точность оценки уровня высокая",
+    "Уверенность в результате диагностики 85%",
+    "Уверенность в диагностике 85%",
+    "Точность диагноза составляет 0,9.",
+    "Точность теста 90 процентов.",
+])
+def test_accuracy_and_confidence_of_the_diagnosis_are_retired_claims(text):
+    assert rg.contains_retired_claim(text), text
+    assert not _validate(_narrative("Текст.", description=text))[0], text
+
+
+@pytest.mark.parametrize("text", [
+    "Вычислите с точностью до 0,01",
+    "Найдите значение с точностью до десятых",
+    "Ученик уверенно решает уравнения",
+    "Точность измерения прибора 0,1 мм",
+    "Округлите результат с точностью до сотых; оценка за тест не учитывается.",
+    "Оценка погрешности: точность вычислений 0,01.",
+])
+def test_accuracy_and_confidence_in_ordinary_mathematics_pass(text):
+    assert not rg.contains_retired_claim(text), text
+    assert _validate(_narrative("Текст.", description=text)) == (True, []), text

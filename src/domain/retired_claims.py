@@ -297,7 +297,9 @@ _REL_NOUN = re.compile(r"(?:не)?(?:надежност|достоверност
 _REL_ADJ = re.compile(
     r"(?:не)?(?:достовер|надеж)(?:ен|н(?:а|ы|ый|ая|ые|ое|ого|ой|ому|ым|ом|ую|ых|ыми))"
 )
-_CONFIDENCE = re.compile(r"уверенност(?:ь|и|ью)")
+# «точность» / «уверенность» are claims only when the subject is the diagnosis («Точность диагностики 87%»);
+# «с точностью до 0,01», «уверенно решает», «точность измерения прибора» are ordinary mathematics.
+_SOFT_NOUN = re.compile(r"(?:точност|уверенност)(?:ь|и|ью)")
 _NUMBER = re.compile(r"\d{1,6}(?:[.,]\d{1,6})?")
 _PROBABILITY = re.compile(r"[01][.,]\d{1,6}")
 _PERCENT_WORD = re.compile(r"процент[а-я]{0,4}")
@@ -308,7 +310,11 @@ _SUBJECT = re.compile(
     r"(?:а|ы|у|е|и|ом|ой|ию|ие|ия|ии|ов|ам|ами|ах|ем)?"
     r"|(?:диагностическ|оценочн)(?:ий|ая|ое|ие|ого|ой|ому|им|ом|ую|их|ими|ые)"
 )
-_DIAGNOSIS_ONLY = re.compile(r"(?:диагноз|диагностик)(?:а|ы|у|е|и|ом|ой|ию|ов)?")
+_DIAGNOSIS_ONLY = re.compile(
+    r"(?:диагноз|диагностик|тест|тестирован|отчет|заключен)(?:а|ы|у|е|и|ом|ой|ию|ие|ия|ии|ов|ам|ами|ах|ем)?"
+    r"|диагностическ(?:ий|ая|ое|ие|ого|ой|ому|им|ом|ую|их|ими|ые)"
+)
+_LEVEL_OBJECT = frozenset({"уровня", "знаний", "ученика", "подготовки"})
 _RESULT = re.compile(r"результат(?:а|ы|у|е|ом|ов|ам|ами|ах)?")
 _EVALUATE = re.compile(
     r"счита(?:ть|ется|ются|ем|йте)|являет(?:ся)|являются|признан(?:ы|а|о)?|призна(?:ть|ются)|оценива(?:ется|ются)"
@@ -339,6 +345,19 @@ def _subject_after(tokens: Sequence[str], i: int, max_words: int = 3) -> bool:
         if not (_is_word(token) or _NUMBER.fullmatch(token)):
             return False
         if _SUBJECT.fullmatch(token):
+            return True
+    return False
+
+
+def _diagnostic_subject_after(tokens: Sequence[str], i: int, max_words: int = 4) -> bool:
+    """«Точность диагностики», «Точность оценки уровня», «Уверенность в результате диагностики»."""
+    for j in range(i + 1, min(len(tokens), i + 1 + max_words)):
+        token = tokens[j]
+        if not (_is_word(token) or _NUMBER.fullmatch(token)):
+            return False
+        if _DIAGNOSIS_ONLY.fullmatch(token):
+            return True
+        if re.fullmatch(r"оценк[а-я]{1,3}", token) and tokens[j + 1:j + 2] and tokens[j + 1] in _LEVEL_OBJECT:
             return True
     return False
 
@@ -421,10 +440,8 @@ def _reliability_in_sentence(tokens: Sequence[str]) -> bool:
             tech_subject = i >= 1 and _TECH.fullmatch(tokens[i - 1])
             if _figure_after(tokens, i, limit=4) and not tech_subject:      # «Результат достоверен на 90%»
                 return True
-        elif _CONFIDENCE.fullmatch(token):                     # «Уверенность в диагностике 85%»
-            j = i + 2 if tokens[i + 1:i + 2] == ["в"] else i + 1
-            if j < len(tokens) and _DIAGNOSIS_ONLY.fullmatch(tokens[j]):
-                return True
+        elif _SOFT_NOUN.fullmatch(token) and _diagnostic_subject_after(tokens, i):
+            return True                                        # «Точность диагностики — 87%», «Уверенность в диагностике 85%»
     return False
 
 
@@ -433,7 +450,7 @@ def _has_reliability_claim(text: Any) -> bool:
     if not isinstance(text, str):
         return False
     normalized = _normalize_claim_text(text).replace("\n", " ")
-    if "надеж" not in normalized and "достовер" not in normalized and "уверенност" not in normalized:
+    if not any(stem in normalized for stem in ("надеж", "достовер", "уверенност", "точност")):
         return False
     return any(_reliability_in_sentence(_tokens(s)) for s in _SENTENCE_RE.split(normalized))
 
