@@ -73,7 +73,11 @@ def canonical_answer_key(val: str | None) -> str:
     s = re.sub(r"\\?pi\b|π", "pi", s)
     s = re.sub(r"\^?\\?circ\b|°", "", s)
     s = s.replace("{,}", ".").replace(",", ".")
-    
+
+    # 6b. A braced group of SEVERAL characters in a power / index is not a single token: keep it distinct
+    # (x^{13} != x^13), while x^{3} == x^3 loses its braces below like any other invisible brace.
+    s = re.sub(r"([\^_])\{([^{}]{2,})\}", "\\1\u27e6\\2\u27e7", s)
+
     # 7. Strip remaining latex command backslashes, curly braces, and whitespace
     s = re.sub(r"\\[a-zA-Z]+", "", s)
     s = re.sub(r"[{}]", "", s)

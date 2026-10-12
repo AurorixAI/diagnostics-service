@@ -31,7 +31,7 @@ from src.core.gemini_client import call_gemini
 from src.models.diag_models import DiagReport
 from src.repositories.diag_repo import DiagReportRepository
 from src.repositories.knowledge_repo import KnowledgeRepository
-from .answer_value import answer_value_key, display_student_answer
+from .answer_value import display_student_answer, report_answer_key
 from .level_policy import (
     LEGACY_STATUS,
     STATUS_LABEL_RU,
@@ -181,11 +181,11 @@ def _find_matching_distractor(distractors: Any, student_answer: object) -> Optio
     explanation only after an exact canonical-value match; it must not infer a
     misconception from a merely incorrect answer.
     """
-    answer_key = answer_value_key(student_answer)
+    answer_key = report_answer_key(student_answer)
     if not answer_key or not isinstance(distractors, list):
         return None
     for distractor in distractors:
-        if answer_value_key(_distractor_value(distractor)) == answer_key:
+        if report_answer_key(_distractor_value(distractor)) == answer_key:
             return distractor if isinstance(distractor, dict) else None
     return None
 
@@ -222,13 +222,13 @@ def _task_option_pairs(task_data: Dict[str, Any], correct_answer: Optional[str],
         explainable_pairs.append((str(correct_answer), str(correct_latex or correct_answer)))
     for distractor in task_data.get("distractor_meta") or []:
         value = _distractor_value(distractor)
-        if value and not any(answer_value_key(value) == answer_value_key(existing) for existing, _ in explainable_pairs):
+        if value and not any(report_answer_key(value) == report_answer_key(existing) for existing, _ in explainable_pairs):
             explainable_pairs.append((value, _distractor_value_latex(distractor, value)))
     stored = task_data.get("answer_options")
     parallel_latex = task_data.get("answer_options_latex")
     if isinstance(stored, list) and stored:
         distractor_latex = {
-            answer_value_key(_distractor_value(distractor)): _distractor_value_latex(
+            report_answer_key(_distractor_value(distractor)): _distractor_value_latex(
                 distractor, _distractor_value(distractor),
             )
             for distractor in task_data.get("distractor_meta") or []
@@ -239,13 +239,13 @@ def _task_option_pairs(task_data: Dict[str, Any], correct_answer: Optional[str],
             value = _option_value(option)
             if value:
                 display = _option_latex(option, parallel_latex, index, "")
-                if not display and answer_value_key(value) == answer_value_key(correct_answer or ""):
+                if not display and report_answer_key(value) == report_answer_key(correct_answer or ""):
                     display = str(correct_latex or value)
                 if not display:
-                    display = distractor_latex.get(answer_value_key(value), value)
+                    display = distractor_latex.get(report_answer_key(value), value)
                 pairs.append((value, display))
-        correct_key = answer_value_key(correct_answer or "")
-        has_correct = any(answer_value_key(value) == correct_key for value, _ in pairs)
+        correct_key = report_answer_key(correct_answer or "")
+        has_correct = any(report_answer_key(value) == correct_key for value, _ in pairs)
         if len(pairs) >= 2 and correct_answer and correct_key and not has_correct:
             pairs.append((str(correct_answer), str(correct_latex or correct_answer)))
         if len(pairs) >= 2:
@@ -256,11 +256,11 @@ def _task_option_pairs(task_data: Dict[str, Any], correct_answer: Optional[str],
 
 def _student_answer_latex(student_answer: Optional[str], option_pairs: List[Tuple[str, str]]) -> Optional[str]:
     """Only map a student answer to already stored display content, never LLM-rewrite it."""
-    key = answer_value_key(student_answer or "")
+    key = report_answer_key(student_answer or "")
     if not key:
         return None
     for value, display in option_pairs:
-        if answer_value_key(value) == key:
+        if report_answer_key(value) == key:
             return display or value
     return None
 
