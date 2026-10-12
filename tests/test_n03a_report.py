@@ -1282,3 +1282,22 @@ def test_chain_helpers_mirror_the_front_rule():
     assert rg._chains_at_breakpoint([stored, inferred], []) == [inferred]           # lowest grade
     assert rg._chains_at_breakpoint([stored], ["Z"]) == [stored]                     # fallback: all chains
     assert rg._confirmed_chains([{"root_gap_grade": 7}]) == [{"root_gap_grade": 7}]  # no source: not inferred
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Основные причины ошибок — вычислительные недочёты.", False),
+    ("Главные причины затруднений: знаки и скобки.", False),
+    ("Общие причины ошибок связаны с вниманием.", False),
+    ("Основной причиной ошибок стала невнимательность.", False),
+    ("Найдите единый корень уравнения.", False),
+    ("Первопричина — тема «Дроби»", True),
+    ("Главная причина ошибок — дроби", True),
+    ("Основную причину сбоя составляют дроби.", True),
+    ("Затруднение объясняется первопричиной в дробях.", True),
+])
+def test_root_cause_guard_is_narrow(text, expected):
+    assert rg.mentions_root_cause(text) is expected, text
+    data = _narrative(text)
+    valid, errors = rg._validate_ai_output(data, computed_status="below_level", score_pct=30,
+                                           allowed_plan_skills={"G8_T1": "Дроби"}, root_cause_confirmed=False)
+    assert any("No root cause is confirmed" in e for e in errors) is expected, (text, errors)

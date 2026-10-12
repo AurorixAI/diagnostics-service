@@ -320,14 +320,30 @@ def _has_root_cause_claim(text: Any) -> bool:
     return False
 
 
+_GUARD_ADJ = frozenset({"корневая", "корневую", "главная", "главную", "основная", "основную", "единая", "единую", "общая", "общую"})
+_GUARD_CAUSE = frozenset({"причина", "причину"})
+
+
 def mentions_root_cause(text: Any) -> bool:
-    """«первопричина» or «основная / главная / корневая / единая / общая причина» anywhere in the text."""
+    """Guard for narratives written when no root cause is confirmed.
+
+    Matches «первопричина» in any case and the singular nominative / accusative of «корневая /
+    главная / основная / единая / общая причина».  Plurals («основные причины ошибок»), other cases
+    («основной причиной стала невнимательность») and the math term «единый корень» are ordinary prose.
+    """
     if not isinstance(text, str):
         return False
     normalized = _normalize_claim_text(text)
-    if "причин" not in normalized and "корен" not in normalized and "корн" not in normalized:
+    if "причин" not in normalized:
         return False
-    return any(_noun_phrases(_tokens(sentence)) for sentence in _SENTENCE_RE.split(normalized.replace("\n", " ")))
+    for sentence in _SENTENCE_RE.split(normalized.replace("\n", " ")):
+        tokens = _tokens(sentence)
+        for i, token in enumerate(tokens):
+            if _RC_HEAD.fullmatch(token):
+                return True
+            if token in _GUARD_CAUSE and i and tokens[i - 1] in _GUARD_ADJ:
+                return True
+    return False
 
 
 # ── Reliability / credibility of the diagnosis ────────────────────────────────
