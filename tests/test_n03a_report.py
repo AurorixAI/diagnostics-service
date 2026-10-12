@@ -918,11 +918,11 @@ def test_detectors_are_linear_on_a_long_single_token(token):
     unit = 20_000 // len(token) + 1                                  # about 20 KB of text
     for text in (token * unit, (token + " ") * unit, (token + ", ") * unit, ("не подтвердила " + token + " ") * (unit // 2)):
         assert len(text) >= 10_000
-        started = time.perf_counter()
+        started = time.process_time()
         rg.contains_retired_claim(text)
         rg._has_reliability_claim(text)
         rg._has_root_cause_claim(text)
-        assert time.perf_counter() - started < 0.2, (token, len(text))
+        assert time.process_time() - started < 0.2, (token, len(text))
 
 
 def test_stored_plan_prose_loses_only_the_offending_sentences():
@@ -1092,9 +1092,9 @@ def _best_time(text, runs=3):
     import time
     best = None
     for _ in range(runs):
-        started = time.perf_counter()
+        started = time.process_time()
         rg.contains_retired_claim(text)
-        elapsed = time.perf_counter() - started
+        elapsed = time.process_time() - started
         best = elapsed if best is None else min(best, elapsed)
     return best
 
@@ -1150,9 +1150,9 @@ def test_continuation_sweep_is_linear_on_a_long_whitespace_run():
     from src.domain.retired_claims import drop_retired_sentences
     for filler in (" ", " "):
         text = "Надёжность диагноза\n83%" + filler * 100_000 + "x"
-        t = time.perf_counter()
+        t = time.process_time()
         drop_retired_sentences(text)
-        assert time.perf_counter() - t < 0.5
+        assert time.process_time() - t < 0.5
 
 
 @pytest.mark.parametrize("text,kept", [
