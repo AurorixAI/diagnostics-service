@@ -574,3 +574,12 @@ def test_report_job_passes_the_sessions_stored_params_to_the_generator(monkeypat
                         lambda db, **kw: captured.update(kw) or NS(generation_status="ready"))
     assert report_jobs.process_next_report_job() is True
     assert captured["deep_scan_params"] == expected
+
+
+def test_probe_target_is_clamped_to_the_content_api_range(monkeypatch):
+    # theta -2.52 with offset 1.5 used to request target_b=-4.02 -> content-service 422 (ge=-4)
+    monkeypatch.setattr(ss.settings, "deep_scan_probe_difficulty_offset", 1.5, raising=False)
+    bank = FakeTasks([-3.9, -2.0, 0.4])
+    state = state_with_theta(-2.52, scanning=True)
+    assert service_with_bank(bank)._select_task_for_skill(state, "S").irt_difficulty == -3.9
+    assert bank.targets == [-4.0]

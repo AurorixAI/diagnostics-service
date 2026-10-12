@@ -401,7 +401,17 @@ def _worker(args):
     fail_cache: Dict[str, set] = ctx.setdefault("_fail_cache", {})
     out = []
     for i in idxs:
-        out.append(simulate_student(ctx, i, seed, grade, gap_list, gap_fraction, gap_fail_p, fail_cache, depth))
+        try:
+            out.append(simulate_student(ctx, i, seed, grade, gap_list, gap_fraction, gap_fail_p, fail_cache, depth))
+        except Exception as e:
+            # Re-raise as a plain RuntimeError: some exceptions (httpx.HTTPStatusError) cannot be
+            # unpickled in the parent, which kills Pool's result thread and hangs the run forever.
+            import traceback
+            detail = repr(e)
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                detail += f" | {resp.request.method} {resp.request.url} -> {resp.status_code}: {resp.text[:300]}"
+            raise RuntimeError(f"student {i} (grade {grade}, seed {seed}): {detail}\n{traceback.format_exc()[-1500:]}") from None
     return out, _effective_settings(ctx, extra)
 
 

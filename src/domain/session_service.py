@@ -75,6 +75,9 @@ from src.state.redis_state import RedisStateManager
 from src.core import auth_client
 
 log = logging.getLogger(__name__)
+
+# content-service GET /tasks accepts target_b in [-4, 4] (Query ge/le); keep requests inside it.
+_TARGET_B_MIN, _TARGET_B_MAX = -4.0, 4.0
 settings = get_settings()
 
 
@@ -1351,10 +1354,13 @@ class SessionService:
         Measurement items target theta.  A Deep Scan probe targets
         theta - DEEP_SCAN_PROBE_DIFFICULTY_OFFSET (default 0: theta), i.e. easier items
         for a positive offset (the session's frozen value, see ``_scan_params``);
-        this is the only place the offset applies."""
+        this is the only place the offset applies.  The target is clamped to the
+        content API's target_b range ([-4, 4], same as the theta grid): theta near
+        -4 minus a positive offset would otherwise get a 422 and break the session."""
         target_b = state.theta.theta
         if state.is_in_deep_scan:
             target_b = target_b - self._scan_params(state)["probe_difficulty_offset"]
+        target_b = min(_TARGET_B_MAX, max(_TARGET_B_MIN, target_b))
         task = self.task_repo.get_task_by_difficulty_target(
             skill_id, target_b=target_b, exclude_ids=state.used_task_ids
         )
