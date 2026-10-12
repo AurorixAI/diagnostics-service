@@ -1140,3 +1140,25 @@ def test_the_narrow_window_applies_only_to_the_weak_diagnostic_subjects():
 ])
 def test_wrapped_claim_takes_only_a_figure_only_line(prose, expected):
     assert rg.drop_retired_sentences(prose) == expected
+
+
+def test_continuation_sweep_is_linear_on_a_long_whitespace_run():
+    # A flagged line without closing punctuation followed by a huge whitespace run used to
+    # backtrack quadratically in _CONTINUATION_RE (two adjacent \s*): 100 KB took ~15 s.
+    import time
+    from src.domain.retired_claims import drop_retired_sentences
+    for filler in (" ", " "):
+        text = "Надёжность диагноза\n83%" + filler * 100_000 + "x"
+        t = time.perf_counter()
+        drop_retired_sentences(text)
+        assert time.perf_counter() - t < 0.5
+
+
+@pytest.mark.parametrize("text,kept", [
+    ("Надёжность диагноза\n— 83%.\nРешите пример.", "Решите пример."),
+    ("Надёжность диагноза\n83% .\nРешите пример.", "Решите пример."),
+    ("Надёжность диагноза\n15% задач решите повторно.", "15% задач решите повторно."),
+])
+def test_continuation_figure_line_goes_with_its_claim(text, kept):
+    from src.domain.retired_claims import drop_retired_sentences
+    assert drop_retired_sentences(text).strip() == kept

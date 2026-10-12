@@ -547,9 +547,11 @@ _SENTENCE_ONLY_RE = re.compile(r"((?<=[.!?])\s+)")
 # the figure of a claim that wrapped onto the next line: «— 83%», «83%», «- 0,83» (a bullet «- Решите» is not)
 _LIST_MARKER_RE = re.compile(r"\s*\d{1,2}[.)]")
 _DASH_CLASS = "[-\u2010-\u2015\u2212]"
+# Matched against ``segment.strip()``: no leading/trailing ``\s*`` (two adjacent
+# ``\s*`` around ``[.;]?`` backtrack quadratically on a long whitespace run).
 _CONTINUATION_RE = re.compile(
-    r"\s*(?:" + _DASH_CLASS + r"\s*)?"
-    r"(?:\d{1,3}(?:[.,]\d+)?\s*(?:%|процент[а-я]{0,4})|[01][.,]\d+)\s*[.;]?\s*"
+    r"(?:" + _DASH_CLASS + r"\s*)?"
+    r"(?:\d{1,3}(?:[.,]\d+)?\s*(?:%|процент[а-я]{0,4})|[01][.,]\d+)\s*[.;]?"
 )
 
 
@@ -571,7 +573,7 @@ def _drop_flagged_segments(text: str, splitter: "re.Pattern[str]") -> str:
     previous_open = False                              # the previous segment was dropped without a closing .!?
     for segment, separator in zip(segments, separators):
         flagged = _has_reliability_claim(segment) or _has_root_cause_claim(segment)
-        continuation = previous_open and _CONTINUATION_RE.fullmatch(segment) is not None
+        continuation = previous_open and _CONTINUATION_RE.fullmatch(segment.strip()) is not None
         if flagged or continuation:                    # «Надёжность диагноза\n— 83%.» goes as a whole
             dropped = True
             previous_open = flagged and not segment.rstrip().endswith((".", "!", "?"))
