@@ -38,6 +38,9 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
             min_section_coverage=5,
             deep_scan_max_items=4,
             deep_scan_importance_threshold=8,
+            deep_scan_confirm_probes=1,
+            deep_scan_probe_difficulty_offset=0.0,
+            deep_scan_trigger_mode="importance",
             mastery_threshold=0.6,
         )
         self.settings_patch = patch.object(

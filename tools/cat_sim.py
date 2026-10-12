@@ -308,7 +308,8 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
     th_hat, se = float(db.theta), float(db.theta_se)
     cls_true, cls_hat = lp.classify(theta, 0.0, grade), lp.classify(th_hat, se, grade)
     rows = list(answers.rows)
-    chains = rg._reconstruct_root_cause_chains(rows, {}, [], grade)
+    chains = rg._reconstruct_root_cause_chains(
+        rows, {}, [], grade, confirm_probes=(snap.get("deep_scan_params") or {}).get("confirm_probes"))
     gap_set = set(gap_list)
     root_l3 = [l3_of(nodes, c.get("root_gap_skill_id") or "") for c in chains]
     detected = cause = named = False

@@ -647,6 +647,22 @@ class SessionService:
         """True once the session's Deep Scan items reached DEEP_SCAN_SESSION_BUDGET."""
         return state.deep_scan_items_total >= settings.deep_scan_session_budget
 
+    @staticmethod
+    def _scan_params(state: SessionState) -> dict:
+        """Deep Scan flags of THIS session, frozen from the settings at first use.
+
+        The first scan of a session stores them in the state; every later scan,
+        probe selection and the report read the stored values, never the live
+        settings.  ``trigger_mode`` is stored for traceability only (the trigger is
+        evaluated before the first scan exists)."""
+        if state.deep_scan_params is None:
+            state.deep_scan_params = {
+                "confirm_probes": int(settings.deep_scan_confirm_probes),
+                "probe_difficulty_offset": float(settings.deep_scan_probe_difficulty_offset),
+                "trigger_mode": str(settings.deep_scan_trigger_mode),
+            }
+        return state.deep_scan_params
+
     def _l3_warrants_deep_scan(self, subtopic) -> bool:
         """Trigger rule for a failed L3 (DEEP_SCAN_TRIGGER_MODE).
 
@@ -1158,6 +1174,7 @@ class SessionService:
         self, state: SessionState, failing_skill_id: str
     ) -> Optional[TaskOut]:
         """Build a DeepScanState from the prerequisite graph of the failing skill."""
+        self._scan_params(state)   # freeze the session's Deep Scan flags at the first scan
         prereq_ids = [
             pid for pid in self._prereq_l4_ids(failing_skill_id)
             if pid not in state.deep_scan_tested and pid != failing_skill_id
@@ -1195,8 +1212,8 @@ class SessionService:
         """Process one step of the deep scan prerequisite traversal.
 
         Correct: the branch is closed (the skill is mastered), the other queued
-        branches are still probed.  Wrong: a gap once DEEP_SCAN_CONFIRM_PROBES wrong
-        answers on different items of the skill are in (default 1), then its own
+        branches are still probed.  Wrong: a gap once the session's DEEP_SCAN_CONFIRM_PROBES
+        wrong answers on different items of the skill are in (default 1), then its own
         prerequisites are tested first; otherwise the same skill is probed again.
         The scan is bounded by max items, the session budget and the queue only."""
         if state.deep_scan is None:
@@ -1242,7 +1259,7 @@ class SessionService:
         if scan.current_skill_id:
             wrong = scan.wrong_counts.get(scan.current_skill_id, 0) + 1
             scan.wrong_counts[scan.current_skill_id] = wrong
-            if wrong < settings.deep_scan_confirm_probes:
+            if wrong < self._scan_params(state)["confirm_probes"]:
                 if budget_exceeded:
                     scan.unconfirmed.append(scan.current_skill_id)
                     self._finish_deep_scan(state, scan)
@@ -1333,10 +1350,11 @@ class SessionService:
 
         Measurement items target theta.  A Deep Scan probe targets
         theta - DEEP_SCAN_PROBE_DIFFICULTY_OFFSET (default 0: theta), i.e. easier items
-        for a positive offset; this is the only place the offset applies."""
+        for a positive offset (the session's frozen value, see ``_scan_params``);
+        this is the only place the offset applies."""
         target_b = state.theta.theta
         if state.is_in_deep_scan:
-            target_b = target_b - settings.deep_scan_probe_difficulty_offset
+            target_b = target_b - self._scan_params(state)["probe_difficulty_offset"]
         task = self.task_repo.get_task_by_difficulty_target(
             skill_id, target_b=target_b, exclude_ids=state.used_task_ids
         )

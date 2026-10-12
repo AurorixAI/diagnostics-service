@@ -264,6 +264,7 @@ def process_next_report_job() -> bool:
             items_max=settings.max_items,
             covered_section_ids=_snapshot_value(session, "covered_section_ids", []),
             deep_scan_incomplete=bool(_snapshot_value(session, "deep_scan_incomplete", False)),
+            deep_scan_params=_snapshot_value(session, "deep_scan_params", None),
             classification_confidence=classification_confidence,
             force=True,
             skip_narrative=is_deterministic_job(report),

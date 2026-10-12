@@ -66,6 +66,13 @@ class SessionState:
     # Probed skills whose gap was NOT confirmed (DEEP_SCAN_CONFIRM_PROBES > 1: wrong
     # answers short of the required number and no unused item left).  Not gaps.
     deep_scan_unconfirmed: List[str] = field(default_factory=list)
+    # Deep Scan flags FIXED for this session when its first scan starts:
+    # {"confirm_probes", "probe_difficulty_offset", "trigger_mode"}.  The scan engine
+    # and the report both read the session's own values, so a config change later
+    # (mid-session, or before the report is rebuilt) never changes what the session
+    # did or how its chains are read.  None = no scan started (or a pre-flag session:
+    # the report then uses the old rules, confirm_probes = 1).
+    deep_scan_params: Optional[dict] = None
 
     # Navigation context to restore after a one-off fallback task (see
     # SessionService._fallback_task): the item came from a different L4/L3/L2
@@ -113,6 +120,7 @@ class SessionState:
             "deep_scan_tested": self.deep_scan_tested,
             "deep_scan_items_total": self.deep_scan_items_total,
             "deep_scan_unconfirmed": self.deep_scan_unconfirmed,
+            "deep_scan_params": self.deep_scan_params,
             "fallback_nav_context": self.fallback_nav_context,
             "stop_reason": self.stop_reason,
         }
@@ -156,6 +164,7 @@ class SessionState:
             deep_scan_tested=data.get("deep_scan_tested", []),
             deep_scan_items_total=data.get("deep_scan_items_total", 0),
             deep_scan_unconfirmed=data.get("deep_scan_unconfirmed", []),
+            deep_scan_params=data.get("deep_scan_params"),
             fallback_nav_context=data.get("fallback_nav_context"),
             stop_reason=data.get("stop_reason"),
         )

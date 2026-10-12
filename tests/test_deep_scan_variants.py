@@ -479,11 +479,98 @@ def test_default_chain_is_unchanged_and_carries_no_probe_fields():
     assert chains_of(answers, confirm=1)[0] == chain
 
 
-def test_report_reads_the_confirmation_count_from_settings(monkeypatch):
+def test_report_without_a_stored_threshold_uses_the_old_rule_whatever_the_settings(monkeypatch):
     answers = [
         answer("G8_A", 0, minute=1),
         answer("G7_C", 0, minute=2, deep=True, origin="G8_A", step=1),
     ]
-    assert len(chains_of(answers)) == 1
-    monkeypatch.setattr(rg, "get_settings", lambda: NS(deep_scan_confirm_probes=2))
-    assert chains_of(answers) == []
+    monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", 3, raising=False)
+    assert len(chains_of(answers)) == 1                    # old session / no stored N -> 1, not the live setting
+    assert chains_of(answers) == chains_of(answers, confirm=1)
+
+
+# ── the flags are frozen per session; a rebuilt report must not change ────────
+
+def frozen_state(graph=None, bank=None):
+    service = make_service(graph or {}, [], bank=bank)
+    state = SessionState(session_id="s", student_id="u", grade_level=8)
+    state.phase, state.is_in_deep_scan = "deep_scan", True
+    return service, state
+
+
+def test_first_scan_freezes_the_session_flags(monkeypatch):
+    monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", 2, raising=False)
+    monkeypatch.setattr(ss.settings, "deep_scan_probe_difficulty_offset", 1.0, raising=False)
+    monkeypatch.setattr(ss.settings, "deep_scan_trigger_mode", "hard_prereq", raising=False)
+    service, state = frozen_state({"G8_A": ["B"]})
+    assert state.deep_scan_params is None
+    service._init_deep_scan(state, "G8_A")
+    assert state.deep_scan_params == {"confirm_probes": 2, "probe_difficulty_offset": 1.0,
+                                      "trigger_mode": "hard_prereq"}
+    stored = dict(state.deep_scan_params)
+    # the settings change later (config redeploy / env edit): the session keeps its own values
+    monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", 1, raising=False)
+    monkeypatch.setattr(ss.settings, "deep_scan_probe_difficulty_offset", 0.0, raising=False)
+    monkeypatch.setattr(ss.settings, "deep_scan_trigger_mode", "importance", raising=False)
+    assert service._advance_deep_scan(state, False) == "task:B"        # still needs a 2nd miss on B
+    assert state.deep_scan["gaps"] == [] and state.deep_scan["wrong_counts"] == {"B": 1}
+    assert state.deep_scan_params == stored
+
+
+def test_frozen_offset_is_used_for_probe_selection_after_the_setting_changes(monkeypatch):
+    monkeypatch.setattr(ss.settings, "deep_scan_probe_difficulty_offset", 1.0, raising=False)
+    state = state_with_theta(0.5, scanning=True)
+    SessionService._scan_params(state)
+    monkeypatch.setattr(ss.settings, "deep_scan_probe_difficulty_offset", 0.0, raising=False)
+    bank = FakeTasks([-2.0, -0.5, 0.4, 1.6])
+    assert service_with_bank(bank)._select_task_for_skill(state, "S").irt_difficulty == -0.5
+
+
+def test_session_flags_roundtrip_and_old_states_load_as_none():
+    state = SessionState(session_id="s", student_id="u", grade_level=8)
+    assert state.to_dict()["deep_scan_params"] is None
+    state.deep_scan_params = {"confirm_probes": 2, "probe_difficulty_offset": 1.0, "trigger_mode": "importance"}
+    assert SessionState.from_dict(state.to_dict()).deep_scan_params == state.deep_scan_params
+    legacy = state.to_dict()
+    del legacy["deep_scan_params"]
+    assert SessionState.from_dict(legacy).deep_scan_params is None
+
+
+def test_rebuilt_report_gives_the_same_chains_after_the_setting_changes(monkeypatch):
+    """Session ran with N=2 (stored in its state); the report is rebuilt later under other settings."""
+    monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", 2, raising=False)
+    service, state = frozen_state({}, bank=None)
+    SessionService._scan_params(state)
+    stored_n = state.deep_scan_params["confirm_probes"]
+    answers = [
+        answer("G8_A", 0, minute=1),
+        answer("G7_C", 0, minute=2, deep=True, origin="G8_A", step=1),
+        answer("G7_C", 0, minute=3, deep=True, origin="G8_A", step=2),     # confirmed with N = 2
+        answer("G8_D", 0, minute=4, deep=True, origin="G8_A", step=3),     # one miss: unconfirmed with N = 2
+    ]
+    at_creation = chains_of(answers, confirm=stored_n)
+    assert at_creation[0]["root_gap_skill_id"] == "G7_C"
+    for live in (1, 2, 3, 5):
+        monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", live, raising=False)
+        restored = SessionState.from_dict(state.to_dict())                 # what the report job reads
+        assert chains_of(answers, confirm=restored.deep_scan_params["confirm_probes"]) == at_creation
+
+
+@pytest.mark.parametrize("snapshot,expected", [
+    ({"deep_scan_params": {"confirm_probes": 2, "probe_difficulty_offset": 1.0, "trigger_mode": "importance"}},
+     {"confirm_probes": 2, "probe_difficulty_offset": 1.0, "trigger_mode": "importance"}),
+    ({}, None),                                            # session from before the flags: old rule
+])
+def test_report_job_passes_the_sessions_stored_params_to_the_generator(monkeypatch, snapshot, expected):
+    from src.domain import report_jobs
+    session = NS(id="sid", student_id="u", grade_level=8, theta=0.1, theta_se=0.3, overall_level="at_grade",
+                 topic_breakdown={}, weak_skills=[], items_answered=20, stop_reason="precision_reached",
+                 state_snapshot=snapshot)
+    captured = {}
+    monkeypatch.setattr(report_jobs, "SessionLocal", lambda: NS(close=lambda: None, rollback=lambda: None))
+    monkeypatch.setattr(report_jobs, "recover_stale_report_jobs", lambda db: 0)
+    monkeypatch.setattr(report_jobs, "_claim_next_report", lambda db: (NS(id="rid", report_json=None), session))
+    monkeypatch.setattr(report_jobs, "generate_and_save_report",
+                        lambda db, **kw: captured.update(kw) or NS(generation_status="ready"))
+    assert report_jobs.process_next_report_job() is True
+    assert captured["deep_scan_params"] == expected

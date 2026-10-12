@@ -26,7 +26,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
-from src.core.config import get_settings
 from src.core.gemini_client import call_gemini
 from src.models.diag_models import DiagReport
 from src.repositories.diag_repo import DiagReportRepository
@@ -692,12 +691,15 @@ def _reconstruct_root_cause_chains(
     without the link keep the previous inference (a run of consecutive deep-scan
     answers is attached to the preceding wrong navigation answer).
 
-    ``confirm_probes`` (default: DEEP_SCAN_CONFIRM_PROBES) is the number of wrong
-    answers on different items that made a probed skill a gap; see ``_probe_steps``.
-    A chain step is a probed skill, failed only if its gap was confirmed.
+    ``confirm_probes`` is the number of wrong answers on different items that made
+    a probed skill a gap IN THIS SESSION (the value stored in its state when its
+    first scan started; None = a session without it, i.e. the old rule of 1).  It
+    is never read from the live settings, so a rebuilt report gives the same
+    chains.  See ``_probe_steps``.  A chain step is a probed skill, failed only if
+    its gap was confirmed.
     """
     ep_by_task = {ep.get("task_id"): ep for ep in error_patterns if ep.get("task_id")}
-    required = int(confirm_probes if confirm_probes is not None else get_settings().deep_scan_confirm_probes)
+    required = max(1, int(confirm_probes or 1))
     ordered = _ordered_answers(answers_orm)
     has_timestamps = bool(ordered) and all(
         getattr(a, "answered_at", None) is not None for a in ordered
@@ -1333,6 +1335,7 @@ def generate_and_save_report(
     items_max: Optional[int] = None,
     covered_section_ids: Optional[List[str]] = None,
     deep_scan_incomplete: bool = False,
+    deep_scan_params: Optional[Dict[str, Any]] = None,
     classification_confidence: Optional[float] = None,
     student_name: str = "Ученик",
     test_code: str = "",
@@ -1421,7 +1424,10 @@ def generate_and_save_report(
                  level["category"], computed_status, correct, total, th, class_equivalent, level["provisional"])
 
         # ── Advanced Diagnostic Data Blocks ───────────────────────────────────
-        root_cause_chains = _reconstruct_root_cause_chains(answers_orm, skill_map, error_patterns, grade_level)
+        root_cause_chains = _reconstruct_root_cause_chains(
+            answers_orm, skill_map, error_patterns, grade_level,
+            confirm_probes=(deep_scan_params or {}).get("confirm_probes"),
+        )
         diagnostic_boundary = _build_diagnostic_boundary(answers_orm, skill_map, grade_level, root_cause_chains)
         cognitive_error_types = _build_cognitive_error_types(error_patterns)
         plan_candidates = _build_plan_candidates(
@@ -1628,6 +1634,7 @@ def generate_and_save_report(
                 "items_max": items_max,
                 "covered_section_ids": covered_section_ids or [],
                 "deep_scan_incomplete": deep_scan_incomplete,
+                "deep_scan_params": deep_scan_params,
                 "narrative_status": "ready" if ai_data else "deterministic_fallback",
             },
             "overall": {
