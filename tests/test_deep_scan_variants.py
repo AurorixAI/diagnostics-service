@@ -763,16 +763,25 @@ def test_complete_params_are_returned_as_is(monkeypatch):
 
 # ── D1: a non-finite target must not clamp to the easiest items ───────────────
 
-@pytest.mark.parametrize("theta,scanning", [(float("nan"), False), (float("nan"), True), (float("inf"), False)])
-def test_non_finite_target_is_logged_and_sent_as_none(theta, scanning, caplog):
-    # min(4, max(-4, nan)) is -4.0: a NaN theta used to target the easiest items silently
+@pytest.mark.parametrize("scanning", [False, True])
+def test_nan_target_is_logged_and_replaced_by_the_neutral_zero(scanning, caplog):
+    # min(4, max(-4, nan)) is -4.0, and a target-less request is ordered by difficulty ASC:
+    # both would serve the easiest items, so NaN falls back to 0.0
     bank = FakeTasks([-3.9, 0.4, 1.6])
-    state = state_with_theta(theta, scanning=scanning)
+    state = state_with_theta(float("nan"), scanning=scanning)
     with caplog.at_level("WARNING", logger=ss.log.name):
         task = service_with_bank(bank)._select_task_for_skill(state, "S")
-    assert bank.targets == [None]                                       # no difficulty target at all
-    assert task is not None and task.irt_difficulty == -3.9             # the bank decides, not a fake -4 target
-    assert any("non-finite target_b" in r.message for r in caplog.records)
+    assert bank.targets == [0.0]
+    assert task is not None and task.irt_difficulty == 0.4
+    assert any("NaN target_b" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("theta,expected", [(float("inf"), 4.0), (float("-inf"), -4.0)])
+def test_infinite_target_is_clamped_to_the_api_bound(theta, expected):
+    bank = FakeTasks([-3.9, 0.4, 3.9])
+    task = service_with_bank(bank)._select_task_for_skill(state_with_theta(theta, scanning=False), "S")
+    assert bank.targets == [expected]
+    assert task.irt_difficulty == (3.9 if expected > 0 else -3.9)
 
 
 def test_finite_target_is_still_clamped_not_dropped(caplog):
@@ -783,12 +792,12 @@ def test_finite_target_is_still_clamped_not_dropped(caplog):
     assert not caplog.records
 
 
-def test_unavailable_item_with_no_target_falls_back_to_any_unused_task():
+def test_nan_target_with_no_unused_task_returns_none():
     bank = FakeTasks([0.4])
     state = state_with_theta(float("nan"), scanning=False)
     state.used_task_ids.append("t0")                                    # the only task is used: both paths find nothing
     assert service_with_bank(bank)._select_task_for_skill(state, "S") is None
-    assert bank.targets == [None]
+    assert bank.targets == [0.0]
 
 
 # ── D2: a pre-flag session is frozen by answer handling, previews never freeze ────────────────────────────

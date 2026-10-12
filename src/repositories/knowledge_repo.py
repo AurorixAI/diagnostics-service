@@ -146,9 +146,11 @@ class TaskRepository:
         theta receive different task variants from the pool — critical for fairness
         when many tasks share the same irt_difficulty value.
 
-        ``target_b`` None or non-finite means "no usable target": no target is sent
-        (a non-finite one is logged by ``get_tasks_for_skill``) and any unused item of
-        the skill is picked at random.
+        ``target_b`` None or non-finite is a defensive path for callers that pass no usable
+        target: none is sent (a non-finite one is logged by ``get_tasks_for_skill``) and one
+        of the candidates content-service returns without a target is picked at random.
+        NOTE: content-service orders those by irt_difficulty ASC, so this favours the
+        easiest items; callers should pass a real target (SessionService uses 0.0 for NaN).
         """
         if target_b is None or not math.isfinite(target_b):
             candidates = self.get_tasks_for_skill(

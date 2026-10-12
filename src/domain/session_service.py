@@ -1399,19 +1399,20 @@ class SessionService:
         this is the only place the offset applies.  The target is clamped to the
         content API's target_b range ([-4, 4], same as the theta grid): theta near
         -4 minus a positive offset would otherwise get a 422 and break the session.
-        A non-finite target (NaN theta) would clamp to -4 and silently serve the easiest
-        items: it is logged and the item is picked without a difficulty target."""
+        A NaN target (NaN theta) is logged and replaced by the neutral 0.0 (the clamp would
+        turn it into -4.0, and a target-less request makes content-service order by
+        irt_difficulty ASC: both serve the easiest items); +-inf clamp to +-4."""
         target_b = state.theta.theta
         if state.is_in_deep_scan:
             target_b = target_b - self._scan_params(state)["probe_difficulty_offset"]
-        if math.isfinite(target_b):
-            target_b = min(_TARGET_B_MAX, max(_TARGET_B_MIN, target_b))
-        else:
+        if math.isnan(target_b):
             log.warning(
-                "_select_task_for_skill(%s): non-finite target_b %r (theta %r), picking without a difficulty target",
-                skill_id, target_b, state.theta.theta,
+                "_select_task_for_skill(%s): NaN target_b (theta %r), using the neutral target 0.0",
+                skill_id, state.theta.theta,
             )
-            target_b = None
+            target_b = 0.0
+        else:
+            target_b = min(_TARGET_B_MAX, max(_TARGET_B_MIN, target_b))   # also maps +-inf to +-4
         task = self.task_repo.get_task_by_difficulty_target(
             skill_id, target_b=target_b, exclude_ids=state.used_task_ids
         )
