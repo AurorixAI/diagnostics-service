@@ -7,6 +7,7 @@ attempt date vs build date, and stripping of retired fields from stored reports.
 """
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
+import json
 import uuid
 
 import pytest
@@ -132,7 +133,7 @@ def _gap_answers():
 # ── O4: retired claims never appear ───────────────────────────────────────────
 
 def test_schema_version_is_bumped_for_the_contract_change():
-    assert rg.REPORT_SCHEMA_VERSION == 6
+    assert rg.REPORT_SCHEMA_VERSION == 7
 
 
 def test_report_has_no_reliability_percent_no_class_equivalent_no_hours(gen):
@@ -1301,3 +1302,40 @@ def test_root_cause_guard_is_narrow(text, expected):
     valid, errors = rg._validate_ai_output(data, computed_status="below_level", score_pct=30,
                                            allowed_plan_skills={"G8_T1": "Дроби"}, root_cause_confirmed=False)
     assert any("No root cause is confirmed" in e for e in errors) is expected, (text, errors)
+
+
+# ── Student answer stored as a transport dict repr (stage finding) ─────────────
+
+_DICT_LATEX = r"$y = 2 \pm \sqrt{x - 1}$, $x \in [1; +\infty)$"
+
+
+def _with_wrapped_answers(answers):
+    for item in answers:
+        if item.outcome == 0:
+            item.student_answer = repr({"text": _DICT_LATEX, "is_correct": False})
+    return answers
+
+
+def test_report_shows_the_answer_text_not_the_stored_dict_repr(gen):
+    answers = _with_wrapped_answers(_gap_answers())
+    stored = [a.student_answer for a in answers]
+    rj = gen(answers, weak=["G7_T9_K1"], narrative=None).report_json
+    shown = [ep["student_answer"] for ep in rj["error_patterns"]]
+    assert shown and all(value == _DICT_LATEX for value in shown), shown
+    chain_answers = [step["student_answer"] for ch in rj["root_cause_chains"] for step in ch["steps"]
+                     if step.get("outcome") == 0]
+    assert chain_answers and all(value == _DICT_LATEX for value in chain_answers), chain_answers
+    prompt = gen.llm_calls[0]
+    assert "'is_correct'" not in prompt and "is_correct" not in prompt
+    assert f"ответ={repr(_DICT_LATEX)}" in prompt                                  # the text, repr()-quoted by the prompt
+    assert [a.student_answer for a in answers] == stored                              # the journal rows are untouched
+    assert "'text'" not in json.dumps(rj, ensure_ascii=False)
+
+
+def test_plain_answers_and_set_notation_reach_the_report_unchanged(gen):
+    answers = _gap_answers()
+    answers[0].student_answer = "{1; 2}"
+    answers[1].student_answer = "x = 5"
+    rj = gen(answers, weak=["G7_T9_K1"], narrative=None).report_json
+    by_task = {ep["task_id"]: ep["student_answer"] for ep in rj["error_patterns"]}
+    assert by_task["T1"] == "{1; 2}" and by_task["T2"] == "x = 5"
