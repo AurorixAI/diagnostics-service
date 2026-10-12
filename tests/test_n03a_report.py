@@ -236,6 +236,69 @@ def test_validator_rejects_class_equivalent_and_reliability_in_the_narrative():
         assert not valid and errors, bad
 
 
+def _narrative(summary, *, description="Практика.", label="Ниже уровня класса"):
+    return {
+        "overall": {"status": "below_level", "score_percent": 30, "status_label_ru": label,
+                    "student_summary": summary},
+        "action_plan": [{"priority": 1, "skill_id": "G8_T1", "skill_name_ru": "Дроби",
+                         "action_title": "Тема", "full_description": description}],
+    }
+
+
+def _validate(data):
+    return rg._validate_ai_output(data, computed_status="below_level", score_pct=30,
+                                  allowed_plan_skills={"G8_T1": "Дроби"})
+
+
+@pytest.mark.parametrize("bad", [
+    "Уровень — конец седьмого класса.",                    # number word (was missed)
+    "Соответствует концу седьмого класса.",
+    "Это НАЧАЛО ВОСЬМОГО КЛАССА.",                         # case-insensitive
+    "Ориентир: середина девятого класса.",
+    "Уровень на конец 10-го класса.",
+    "Надёжность 83%.",                                     # without «диагноза» (was missed)
+    "Надежность результата составляет 83 %.",
+    "Надёжность диагностики — 0,83.",
+    "Диагноз с надёжностью 83 процента.",
+    "Надёжность диагноза высокая.",
+    "Результат подтверждён с 83% надёжностью.",
+])
+def test_validator_catches_class_equivalent_and_reliability_variants(bad):
+    valid, errors = _validate(_narrative(bad))
+    assert not valid and errors, bad
+
+
+@pytest.mark.parametrize("bad_label", ["Конец 7 класса", "Надёжность 83%"])
+def test_validator_checks_the_level_label_too(bad_label):
+    assert not _validate(_narrative("Текст.", label=bad_label))[0]
+
+
+@pytest.mark.parametrize("good", [
+    "Решено верно 3 из 10 заданий (30%), затруднения в дробях.",
+    "Ученик уверенно решает задания на сложение дробей.",
+    "Тему изучают в седьмом классе, ученику доступен материал 8 класса.",
+    "Уровень диагностики подтверждён тремя заданиями из 10 (30%).",
+])
+def test_validator_accepts_ordinary_level_prose(good):
+    assert _validate(_narrative(good))[0], good
+
+
+def test_validator_does_not_reject_curriculum_references_in_the_plan():
+    # «в конце 7 класса изучают …» is a legitimate reference outside the level statement
+    data = _narrative("Ученик допускает ошибки в сложении дробей.",
+                      description="Повторите правило: в конце 7 класса изучают сложение дробей; надёжность метода 100%.")
+    assert _validate(data) == (True, [])
+    data["action_plan"][0]["action_title"] = "Тема 7 класса"
+    assert _validate(data)[0]
+
+
+def test_retired_claim_detector_on_plain_text():
+    assert rg.contains_retired_claim("конец 7 класса (заявлен 8)")
+    assert rg.contains_retired_claim("Надёжность диагноза 83%")
+    assert not rg.contains_retired_claim("Результат измерения: «ниже уровня класса».")
+    assert not rg.contains_retired_claim(None) and not rg.contains_retired_claim(5)
+
+
 # ── Zero-error student ────────────────────────────────────────────────────────
 
 def _clean_answers():
@@ -311,6 +374,58 @@ def test_attempt_date_falls_back_to_the_last_answer(gen):
     assert rj["report_meta"]["date"] == "2026-10-01"
 
 
+@pytest.mark.parametrize("completed_utc, local_date", [
+    (datetime(2026, 9, 3, 18, 59), "2026-09-03"),   # 23:59 in Tashkent
+    (datetime(2026, 9, 3, 19, 0), "2026-09-04"),    # 00:00 in Tashkent
+    (datetime(2026, 9, 3, 20, 30), "2026-09-04"),   # 01:30
+    (datetime(2026, 9, 3, 23, 59), "2026-09-04"),   # 04:59
+    (datetime(2026, 9, 4, 0, 0), "2026-09-04"),     # 05:00
+    (datetime(2026, 9, 4, 12, 0), "2026-09-04"),    # 17:00
+])
+def test_attempt_date_is_the_tashkent_calendar_day(completed_utc, local_date):
+    db = FakeDB([], completed_at=completed_utc)
+    assert rg._attempt_date(db, uuid.uuid4(), []) == local_date
+
+
+def test_attempt_date_of_a_night_attempt_reaches_the_report(gen):
+    rj = gen(_gap_answers(), completed_at=datetime(2026, 9, 3, 21, 0), weak=["G7_T9_K1"]).report_json
+    assert rj["report_meta"]["date"] == "2026-09-04"
+
+
+def test_attempt_date_last_answer_fallback_is_also_tashkent_local():
+    late = ans("G8_T1_K1", "G8_T1", 1, 0)
+    late.answered_at = datetime(2026, 10, 1, 22, 15)           # 03:15 on Oct 2 in Tashkent
+    assert rg._attempt_date(FakeDB([late]), uuid.uuid4(), [late]) == "2026-10-02"
+
+
+def test_failed_completion_query_rolls_back_and_falls_back_to_the_last_answer():
+    class BrokenDB(FakeDB):
+        rolled_back = 0
+
+        def query(self, entity):
+            raise RuntimeError("current transaction is aborted")
+
+        def rollback(self):
+            self.rolled_back += 1
+
+    last = ans("G8_T1_K1", "G8_T1", 1, 5)
+    db = BrokenDB([last])
+    assert rg._attempt_date(db, uuid.uuid4(), [last]) == "2026-10-01"
+    assert db.rolled_back == 1                                  # the session stays usable for saving the report
+
+
+def test_a_failing_rollback_never_fails_the_report_date():
+    class WorseDB(FakeDB):
+        def query(self, entity):
+            raise RuntimeError("boom")
+
+        def rollback(self):
+            raise RuntimeError("connection lost")
+
+    last = ans("G8_T1_K1", "G8_T1", 1, 5)
+    assert rg._attempt_date(WorseDB([last]), uuid.uuid4(), [last]) == "2026-10-01"
+
+
 def test_narrative_prompt_forbids_authorship_of_a_teacher_and_class_equivalent(gen):
     gen(_gap_answers(), weak=["G7_T9_K1"], narrative=None)
     prompt = gen.llm_calls[0]
@@ -335,3 +450,35 @@ def test_stored_pre_schema5_reports_lose_the_retired_fields_when_read():
     assert cleaned["action_plan"] == [{"priority": 1, "skill_id": "A"}]
     assert stored["overall"]["confidence_of_diagnosis"] == 0.84          # the stored row is not mutated
     assert rg.strip_retired_report_fields(None) is None
+
+
+@pytest.mark.parametrize("prose", [
+    "Уровень по результатам измерения — конец 7 класса (заявлен 8 класс). Затруднения в дробях.",
+    "Ученик решает на уровне НАЧАЛА 8 КЛАССА.",
+    "Надёжность диагноза 83%. Рекомендуется повторить дроби.",
+    "Диагностика проведена, надёжность 83%.",
+    "Уровень — середина седьмого класса.",
+])
+def test_stored_schema4_summary_with_retired_prose_is_withheld(prose):
+    stored = {"report_meta": {"report_schema_version": 4},
+              "overall": {"status": "on_level", "student_summary": prose, "score_percent": 40}}
+    cleaned = rg.strip_retired_report_fields(stored)
+    assert cleaned["overall"]["student_summary"] is None            # the front hides the block
+    assert cleaned["overall"]["status"] == "on_level" and cleaned["overall"]["score_percent"] == 40
+    assert stored["overall"]["student_summary"] == prose            # the stored row is not mutated
+
+
+@pytest.mark.parametrize("prose", [
+    "Решено верно 3 из 10 заданий. Основные затруднения — сложение дробей и степени.",
+    "Тему изучают в седьмом классе; ученик допускает вычислительные ошибки.",
+    "",
+    None,
+])
+def test_stored_summary_without_retired_claims_is_unchanged(prose):
+    stored = {"overall": {"status": "on_level", "student_summary": prose}}
+    assert rg.strip_retired_report_fields(stored)["overall"]["student_summary"] == prose
+
+
+def test_stored_report_without_overall_block_is_still_handled():
+    assert rg.strip_retired_report_fields({"action_plan": []}) == {"action_plan": []}
+    assert rg.strip_retired_report_fields({"overall": None}) == {"overall": None}

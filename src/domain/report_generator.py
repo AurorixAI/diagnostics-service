@@ -21,8 +21,9 @@ import json
 import logging
 import re
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
@@ -41,6 +42,11 @@ from .level_policy import (
 
 log = logging.getLogger(__name__)
 
+try:
+    _LOCAL_TZ = ZoneInfo("Asia/Tashkent")
+except ZoneInfoNotFoundError:  # image without tz database: Tashkent has been UTC+5 without DST since 1991
+    _LOCAL_TZ = timezone(timedelta(hours=5))
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 VALID_STATUS = {"above_level", "on_level", "partial_gap", "below_level", "critical"}
@@ -52,8 +58,40 @@ FORBIDDEN_PHRASES = [
 ]
 
 # N03a (O4): claims that have no verified basis and must never reach a report.
-_CLASS_EQUIVALENT_RE = re.compile(r"(?:начал\w+|середин\w+|кон(?:ец|ц\w+))\s+\d{1,2}[-\s]*(?:го\s+)?класс")
-_RELIABILITY_CLAIM_RE = re.compile(r"надёжност\w*\s+диагноз\w*|надежност\w*\s+диагноз\w*")
+# Both patterns are case-insensitive and are applied only to prose that states
+# the student's level (``overall`` summary / level label), never to the plan text:
+# «в конце 7 класса изучают …» is a legitimate curriculum reference there.
+_GRADE_WORDS = r"(?:пят|шест|седьм|восьм|девят|десят|одиннадцат)(?:ого|ой|ом|ый|ому|ым|ая|ое|ую)"
+_CLASS_EQUIVALENT_RE = re.compile(
+    r"(?:начал\w+|середин\w+|кон(?:ец|ц\w+))\s+"      # начало / середина / конец
+    r"(?:\d{1,2}|" + _GRADE_WORDS + r")"             # 7  |  седьмого
+    r"[-\s]*(?:(?:го|й|м|ом|ого)[-\s]+)?класс",      # [-го] класс(а)
+    re.IGNORECASE,
+)
+# «надёжность диагноза …», «надёжность 83%», «надёжность — 0,83», «83% надёжности».
+_RELIABILITY_CLAIM_RE = re.compile(
+    r"над[её]жност\w*\s+диагноз\w*"
+    r"|над[её]жност\w*[^.!?\n]{0,40}?(?:\d{1,3}(?:[.,]\d+)?[-\s]*(?:%|процент\w*)|\b[01][.,]\d+)"
+    r"|\d{1,3}(?:[.,]\d+)?[-\s]*(?:%|процент\w*)\s+(?:\w+\s+){0,2}над[её]жност",
+    re.IGNORECASE,
+)
+
+
+def contains_retired_claim(text: Any) -> bool:
+    """True when prose states a class equivalent or a reliability figure (O4)."""
+    return isinstance(text, str) and bool(
+        _CLASS_EQUIVALENT_RE.search(text) or _RELIABILITY_CLAIM_RE.search(text)
+    )
+
+
+def _level_statement_texts(data: Dict[str, Any]) -> List[str]:
+    """Prose fields of a narrative that state the level: the ``overall`` / ``level`` strings."""
+    texts: List[str] = []
+    for key in ("overall", "level"):
+        block = data.get(key)
+        if isinstance(block, dict):
+            texts.extend(v for v in block.values() if isinstance(v, str))
+    return texts
 
 _LEVEL_RU = {
     "mastered":    "Отличное владение",
@@ -327,9 +365,12 @@ def _validate_ai_output(
     for phrase in FORBIDDEN_PHRASES:
         if phrase in full_text:
             errors.append(f"Forbidden phrase: {phrase!r}")
-    if _CLASS_EQUIVALENT_RE.search(full_text):
+    # Only the level statement / summary is checked, not the whole JSON: the plan
+    # may legitimately say «в конце 7 класса изучают …».
+    level_texts = _level_statement_texts(data)
+    if any(_CLASS_EQUIVALENT_RE.search(t) for t in level_texts):
         errors.append("Class equivalent («начало/середина/конец N класса») is not allowed")
-    if _RELIABILITY_CLAIM_RE.search(full_text):
+    if any(_RELIABILITY_CLAIM_RE.search(t) for t in level_texts):
         errors.append("Reliability percentage of the diagnosis is not allowed")
     return len(errors) == 0, errors
 
@@ -1403,19 +1444,36 @@ def _attempt_date(db: Session, session_id: uuid.UUID, answers: List[Any]) -> str
     except Exception as exc:  # the date is informational; never fail a report over it
         log.warning("Could not read completion time of session %s: %s", session_id, exc)
         completed = None
+        try:
+            db.rollback()  # a failed statement aborts the transaction; the report still has to be saved
+        except Exception as rollback_exc:
+            log.warning("Rollback after failed completion-time read of session %s failed: %s",
+                        session_id, rollback_exc)
     if completed is None:
         completed = next(
             (a.answered_at for a in reversed(answers) if getattr(a, "answered_at", None)), None,
         )
-    return completed.date().isoformat() if completed is not None else date.today().isoformat()
+    if completed is None:
+        return datetime.now(_LOCAL_TZ).date().isoformat()
+    # Timestamps are stored as naive UTC, but the learning centre's calendar day is
+    # Asia/Tashkent (UTC+5): an attempt finished at 00:00–05:00 local time falls on
+    # the previous UTC date, so converting first keeps the printed date correct.
+    if completed.tzinfo is None:
+        completed = completed.replace(tzinfo=timezone.utc)
+    return completed.astimezone(_LOCAL_TZ).date().isoformat()
 
 
 def strip_retired_report_fields(report_json: Any) -> Any:
-    """Copy of a stored report without fields retired by N03a (decision O4).
+    """Copy of a stored report without claims retired by N03a (decision O4).
 
     Reports built before schema 5 stay in the database until they are
-    regenerated; their ``confidence_of_diagnosis`` percentage, class equivalent
-    and per-step ``estimated_hours`` must not reach any reader meanwhile.
+    regenerated.  Their structured ``confidence_of_diagnosis`` percentage, class
+    equivalent and per-step ``estimated_hours`` are removed.  The same claims
+    are also written into the prose ``overall.student_summary`` («конец 7 класса
+    (заявлен 8)», «Надёжность диагноза 83%»); that text cannot be edited
+    sentence by sentence, so such a summary is withheld (``None`` — the front
+    hides the block) until the report is regenerated.  A summary without these
+    claims is returned unchanged.
     """
     if not isinstance(report_json, dict):
         return report_json
@@ -1426,6 +1484,9 @@ def strip_retired_report_fields(report_json: Any) -> Any:
         if isinstance(block, dict):
             block.pop("confidence_of_diagnosis", None)
             block.pop("class_equivalent", None)
+    overall = cleaned.get("overall")
+    if isinstance(overall, dict) and contains_retired_claim(overall.get("student_summary")):
+        overall["student_summary"] = None
     plan = cleaned.get("action_plan")
     if isinstance(plan, list):
         for item in plan:
