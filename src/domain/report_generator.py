@@ -58,126 +58,19 @@ FORBIDDEN_PHRASES = [
 ]
 
 # N03a (O4): claims that have no verified basis and must never reach a report.
-#   * class equivalent («конец 7 класса») - checked only on the prose that states the
-#     student's level (``overall`` / ``level`` strings): «в конце 7 класса изучают …»
-#     is a legitimate curriculum reference in the plan text;
-#   * reliability / confidence of the diagnosis («надёжность диагноза 83%») - checked
-#     in EVERY string of the report, plan included; the math-curriculum wording
-#     («надёжность прибора равна 0,95», «надёжность системы») is told apart from it
-#     by the subject of the sentence, not by the field it stands in;
-#   * a statement about confirming / not confirming a single root cause
-#     («Единая первопричина не подтверждена») - checked in every string as well.
-# All patterns run on text normalised by ``_normalize_claim_text`` (lower case,
-# ё -> е, dash variants -> «-», invisible characters removed), so they are written
-# with plain «е» and a plain hyphen.
-_GRADE_WORDS = r"(?:пят|шест|седьм|восьм|девят|десят|одиннадцат)(?:ого|ой|ом|ый|ому|ым|ая|ое|ую)"
-_CLASS_EQUIVALENT_RE = re.compile(
-    r"(?:начал\w+|середин\w+|кон(?:ец|ц\w+))\s+"      # начало / середина / конец
-    r"(?:\d{1,2}|" + _GRADE_WORDS + r")"             # 7  |  седьмого
-    r"[-\s]*(?:(?:го|й|м|ом|ого)[-\s]+)?класс",      # [-го] класс(а)
-    re.IGNORECASE,
+# The detectors live in ``retired_claims`` (class equivalent, reliability of the
+# diagnosis, (non-)confirmation of a single root cause); this module decides WHERE
+# each one is applied: the class equivalent only to the level statement (the plan may
+# legitimately say «в конце 7 класса изучают …»), the other two to every string.
+from .retired_claims import (  # noqa: E402  (re-exported: tests and other modules use these names)
+    _CLASS_EQUIVALENT_RE,
+    _has_class_equivalent,
+    _has_reliability_claim,
+    _has_root_cause_claim,
+    _normalize_claim_text,
+    contains_retired_claim,
+    drop_retired_sentences,
 )
-
-# Reliability of the diagnosis itself, stated with or without a number:
-# «надёжность диагноза …», «надёжность метода 100%», «достоверность отчёта».
-_RELIABILITY_SUBJECT_RE = re.compile(
-    r"(?:надежност|достоверност)\w*\s+(?:[\w-]+\s+){0,2}?"
-    r"(?:диагноз|диагностик|диагностическ|отчет|оценк|оценоч|измерен|метод|тест|заключен)\w*"
-    r"|уверенност\w*\s+(?:в\s+)?диагноз\w*",
-)
-# A reliability figure without an explicit subject: «надёжность 83%», «надёжность — 0,83»,
-# «83% надёжности».  Not a claim about the diagnosis when the sentence is about a
-# technical object (probability tasks) and not about the diagnosis (see below).
-_RELIABILITY_FIGURE_RE = re.compile(
-    r"(?:надежност|достоверност)\w*[^.!?\n]{0,40}?(?:\d{1,3}(?:[.,]\d+)?[-\s]*(?:%|процент\w*)|\b[01][.,]\d+)"
-    r"|\d{1,3}(?:[.,]\d+)?[-\s]*(?:%|процент\w*)\s+(?:\w+\s+){0,2}(?:надежност|достоверност)",
-)
-_CURRICULUM_OBJECT_RE = re.compile(
-    r"прибор|систем|элемент|устройств|детал|ламп|механизм|узл|схем|цеп[иь]|станок|станк|автомат"
-    r"|компонент|оборудован|датчик|двигател|блок|агрегат|канал|издели|аппарат|реле"
-    r"|предохранител|процессор|батаре|аккумулятор|лифт|насос|самолет"
-)
-# The exemption is withdrawn only by the diagnosis itself being the subject; words such as
-# «ученик» are not a reason: «Предложите ученику задачи, где надёжность прибора равна 0,95».
-_DIAGNOSTIC_CONTEXT_RE = re.compile(r"диагноз|диагностик|тестирован")
-# Predicate form: «Диагноз достоверен», «Результаты диагностики достоверны», «Отчёт надёжен».
-_RELIABILITY_ADJECTIVE_RE = re.compile(
-    r"(?:диагноз|диагностик|отчет|тест|тестирован|заключен)\w*(?:\s+\w+){0,2}?\s+"
-    r"(?:(?:весьма|очень|вполне|достаточно|крайне)\s+)?(?:достовер|надеж)(?:на|ны|ен)(?![а-я])"
-)
-
-# Retired claim «единая первопричина не подтверждена»: the negation must DIRECTLY govern the
-# root-cause noun phrase (NP), never merely stand near it.  Precision first: a false positive
-# withholds a legitimate summary.  NP = «первопричина» or «единая/общая/главная/основная/
-# корневая причина» or «единый корень»; a bare «причина» is not a root cause.
-_RC_ADJ = r"(?:един|общ|главн|основн|корнев)(?:ая|ой|ую|ым|ые|ых|ое|ого)"
-_RC_NP = (
-    r"(?:перво-?причин\w*"
-    r"|" + _RC_ADJ + r"\s+причин(?:а|ы|е|у|ой|ою|ам|ами|ах)?(?![а-я])"
-    r"|един(?:ый|ого|ому|ым|ом)\s+корн(?:ь|я|ю|ем|е)(?![а-я]))"
-)
-_NOT = r"(?<![а-я])не"
-# A: negation + verb + NP, only blanks and at most one word in between
-#    («не подтвердила единую первопричину», «не позволила установить первопричину»).
-_RC_NEG_BEFORE = (
-    r"(?:" + _NOT + r"|(?<![а-я])нельзя)\s+(?:был(?:а|о|и)?\s+|удалось\s+|получилось\s+|позволил(?:а|о|и)?\s+)?"
-    r"(?:подтверд|установ|выяв|определ|найт|нашл|нашел|обнаруж|прослежив)\w*\s+(?:\w+\s+)?" + _RC_NP
-)
-# B: NP + a few words/commas (no : ( ) ; . ! ? in between) + negated predicate
-#    («первопричина, к сожалению, не установлена», «первопричину установить не удалось»);
-#    «отсутствует» / «нет» only directly after NP («первопричины нет»).  A dash after NP is
-#    accepted only when what follows is itself a negated participle («Единая первопричина —
-#    не подтверждена»), never «Первопричина — нет навыка…» / «— незафиксированный знак».
-_RC_PARTICIPLE = r"(?:был(?:а|о|и)?\s+)?(?:подтвержден|установлен|выявлен|определен|найден|обнаружен|прослежива)\w*"
-_RC_GAP = r"(?:[\s,]+\w+){0,3}?"
-_RC_NEG_AFTER = (
-    _RC_NP + r"(?:"
-    + _RC_GAP + r"[\s,]+(?:" + _NOT + r"[\s-]+" + _RC_PARTICIPLE
-    + r"|" + _NOT + r"\s+удалось|" + _NOT + r"\s+получилось"
-    + r"|(?<![а-я])нельзя\s+(?:подтвердить|установить|выявить|определить|найти))"
-    + r"|" + _RC_GAP + r"\s*-\s*" + _NOT + r"\s+" + _RC_PARTICIPLE
-    + r"|[\s,]+(?:отсутству\w*|нет(?![а-я])))"
-)
-# C: «нет единой первопричины».
-_RC_NO_NP = r"(?<![а-я])нет\s+(?:\w+\s+)?" + _RC_NP
-_ROOT_CAUSE_CLAIM_RE = re.compile(f"{_RC_NEG_BEFORE}|{_RC_NEG_AFTER}|{_RC_NO_NP}")
-
-_DASH_RE = re.compile("[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]")      # ‐ ‑ ‒ – — ― −
-_INVISIBLE_RE = re.compile("[\u00ad\u200b\u200c\u200d\u2060\ufeff]")       # soft hyphen, zero-width
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n")
-
-
-def _normalize_claim_text(text: str) -> str:
-    """Lower case, ё -> е, every dash variant -> «-», invisible characters removed."""
-    text = _DASH_RE.sub("-", _INVISIBLE_RE.sub("", text))
-    return text.lower().replace("ё", "е")
-
-
-def _has_class_equivalent(text: Any) -> bool:
-    return isinstance(text, str) and bool(_CLASS_EQUIVALENT_RE.search(_normalize_claim_text(text)))
-
-
-def _has_reliability_claim(text: Any) -> bool:
-    """«Надёжность диагноза …» as a statement, or a reliability figure outside a technical context."""
-    if not isinstance(text, str):
-        return False
-    for sentence in _SENTENCE_SPLIT_RE.split(_normalize_claim_text(text)):
-        if _RELIABILITY_SUBJECT_RE.search(sentence) or _RELIABILITY_ADJECTIVE_RE.search(sentence):
-            return True
-        if _RELIABILITY_FIGURE_RE.search(sentence) and not (
-            _CURRICULUM_OBJECT_RE.search(sentence) and not _DIAGNOSTIC_CONTEXT_RE.search(sentence)
-        ):
-            return True
-    return False
-
-
-def _has_root_cause_claim(text: Any) -> bool:
-    return isinstance(text, str) and bool(_ROOT_CAUSE_CLAIM_RE.search(_normalize_claim_text(text)))
-
-
-def contains_retired_claim(text: Any) -> bool:
-    """True when prose states a class equivalent, a reliability figure or a root-cause (non-)confirmation (O4)."""
-    return _has_class_equivalent(text) or _has_reliability_claim(text) or _has_root_cause_claim(text)
 
 
 def _level_statement_texts(data: Dict[str, Any]) -> List[str]:
@@ -1579,6 +1472,20 @@ def _attempt_date(db: Session, session_id: uuid.UUID, answers: List[Any]) -> str
     return completed.astimezone(_LOCAL_TZ).date().isoformat()
 
 
+_PLAN_IDENTIFIER_KEYS = frozenset({"skill_id", "skill_name_ru", "evidence", "priority"})
+
+
+def _sweep_plan_prose(value: Any) -> Any:
+    """Plan strings without the sentences that claim reliability or (non-)confirm a root cause."""
+    if isinstance(value, str):
+        return drop_retired_sentences(value)
+    if isinstance(value, list):
+        return [_sweep_plan_prose(v) for v in value]
+    if isinstance(value, dict):
+        return {k: (v if k in _PLAN_IDENTIFIER_KEYS else _sweep_plan_prose(v)) for k, v in value.items()}
+    return value
+
+
 def strip_retired_report_fields(report_json: Any) -> Any:
     """Copy of a stored report without claims retired by N03a (decision O4).
 
@@ -1590,7 +1497,8 @@ def strip_retired_report_fields(report_json: Any) -> Any:
     единую первопричину»); that text cannot be edited
     sentence by sentence, so such a summary is withheld (``None`` — the front
     hides the block) until the report is regenerated.  A summary without these
-    claims is returned unchanged.
+    claims is returned unchanged.  In the action plan the same prose claims are
+    removed sentence by sentence (a step keeps the rest of its text).
     """
     if not isinstance(report_json, dict):
         return report_json
@@ -1609,6 +1517,9 @@ def strip_retired_report_fields(report_json: Any) -> Any:
         for item in plan:
             if isinstance(item, dict):
                 item.pop("estimated_hours", None)
+                # plan prose: only the offending sentence goes, the rest of the step stays
+                for key in [k for k in item if k not in _PLAN_IDENTIFIER_KEYS]:
+                    item[key] = _sweep_plan_prose(item[key])
     return cleaned
 
 

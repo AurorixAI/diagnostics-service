@@ -806,3 +806,146 @@ def test_attempt_date_without_any_timestamp_falls_back_to_the_tashkent_today(mon
 
     monkeypatch.setattr(rg, "datetime", FrozenDatetime)
     assert rg._attempt_date(FakeDB([], completed_at=None), uuid.uuid4(), []) == "2026-10-02"
+
+
+# ── Round 4: recall, precision and subject-based reliability (token grammar) ──
+
+ROOT_CAUSE_MUST_BE_CLAIMS = [
+    # stem подтверж-/подтверд-, present passive
+    "Результаты не подтверждают единую первопричину.",
+    "Данные не подтверждают единую первопричину.",
+    "Не подтверждена единая первопричина.",
+    "Единая первопричина не подтверждается.",
+    "Наличие единой первопричины не подтверждается.",
+    # recall
+    "Проверка не подтвердила наличие единой первопричины",
+    "Единая первопричина не подтвердилась",
+    "Первопричину не удаётся установить",
+    "Первопричина не может быть установлена",
+    "Первопричина выявлена не была",
+    "Единая первопричина, по-видимому, не установлена",
+    "Единая первопричина по результатам углублённой проверки не подтверждена",
+    "Единой первопричины у ученика нет",
+    "Общей причины ошибок нет",
+    "Единый корень ошибок не выявлен",
+    # inside «» and ( )
+    "Проверка не подтвердила «единую первопричину».",
+    "«Единая первопричина» не подтверждена.",
+    "Проверка не подтвердила (единую первопричину).",
+    "(Единая первопричина) не подтверждена.",
+]
+ROOT_CAUSE_MUST_NOT_BE_CLAIMS = [
+    # an affirmed root cause + a negation about OTHER things
+    "Первопричина подтверждена, остальные затруднения не выявлены.",
+    "Единая первопричина подтверждена, других пробелов не выявлено.",
+    "Углублённая проверка подтвердила первопричину, более ранние пробелы не обнаружены.",
+    "Первопричина подтверждена\nДругие темы не выявлены",
+    "Первопричина найдена, но исправить не удалось.",
+    # infinitive / imperative / negation of something else
+    "Нельзя определять первопричину по одной задаче",
+    "Если не определить первопричину, ошибки повторятся",
+    "Не выявляйте первопричину самостоятельно",
+    "Основная причина ошибки — не определены знаки",
+    "Первопричина — не определены знаки",
+]
+
+
+@pytest.mark.parametrize("text", ROOT_CAUSE_MUST_BE_CLAIMS)
+def test_round4_root_cause_recall(text):
+    assert rg.contains_retired_claim(text), text
+    assert not _validate(_narrative(text))[0], text
+    assert not _validate(_narrative("Текст.", description=text))[0], text
+
+
+@pytest.mark.parametrize("text", ROOT_CAUSE_MUST_NOT_BE_CLAIMS)
+def test_round4_root_cause_precision(text):
+    assert not rg.contains_retired_claim(text), text
+    assert _validate(_narrative(text))[0], text
+
+
+@pytest.mark.parametrize("text", [
+    "Надёжность результата составляет 83% (автоматическое резюме).",
+    "Надёжность составляет 83%; уровень определён автоматически.",
+    "Уровень определён системой, надёжность 83%.",
+    "Достоверность вывода 90% — ученик решил элементарные задачи.",
+    "Тест системы имеет надёжность 83%.",
+    "Отчёт: надёжность 0,83 (система).",
+    "Диагноз поставлен с высокой достоверностью",
+    "Диагностика проведена с высокой надёжностью",
+    "Диагноз является достоверным",
+    "Результаты можно считать надёжными",
+    "Результат достоверен на 90%",
+    "Уверенность в диагностике 85%",
+    "Диагноз недостоверен.",
+    "Результаты диагностики ненадёжны.",
+    "Надёжность\nдиагноза 83%",
+])
+def test_round4_reliability_bypasses_are_rejected(text):
+    assert rg.contains_retired_claim(text), text
+    for field in ("summary", "plan"):
+        data = _narrative(text if field == "summary" else "Текст.", description=text if field == "plan" else "Практика.")
+        valid, errors = _validate(data)
+        assert not valid and any("Reliability" in e for e in errors), (field, text)
+
+
+@pytest.mark.parametrize("text", [
+    "В ходе диагностики ученик не справился с задачей о надёжности системы из двух элементов (0,9 и 0,8)",
+    "По результатам диагностики предложите задачи на надёжность прибора с вероятностью 0,95",
+    "Предложите ученику задачи, где надёжность прибора равна 0,95.",
+    "Покажите ученику, как надёжность системы зависит от надёжности элементов (0,9 и 0,8).",
+    "Надёжность работы лампы 0,9 — ученик решил неверно.",
+    "Прибор работает с 95% надёжностью; сколько приборов из 200 откажет?",
+    "Прибор надёжен на 95%, найдите вероятность отказа.",
+    "Решите задачи на вероятность: надёжность прибора равна 0,95, найдите вероятность отказа.",
+    "Надёжность системы из двух независимых элементов равна произведению их надёжностей.",
+    "Вероятность безотказной работы (надёжность узла) равна 0,99; найдите вероятность отказа.",
+    "Найдите надёжность устройства 0,9 · 0,8.",
+    # start-anchored subjects: «тест» inside «естественных», «аттестация»
+    "В естественных науках результаты надёжны",
+    "Аттестация ученика надёжна",
+    "Ученик надёжен в вычислениях.",
+    "Достоверное событие имеет вероятность 1.",
+])
+def test_round4_probability_wording_and_look_alikes_pass(text):
+    assert not rg.contains_retired_claim(text), text
+    assert _validate(_narrative("Текст.", description=text)) == (True, []), text
+
+
+@pytest.mark.parametrize("token", ["надежность", "первопричина", "Надёжность", "не", "диагноз"])
+def test_detectors_are_linear_on_a_long_single_token(token):
+    import time
+    unit = 20_000 // len(token) + 1                                  # about 20 KB of text
+    for text in (token * unit, (token + " ") * unit, (token + ", ") * unit, ("не подтвердила " + token + " ") * (unit // 2)):
+        assert len(text) >= 10_000
+        started = time.perf_counter()
+        rg.contains_retired_claim(text)
+        rg._has_reliability_claim(text)
+        rg._has_root_cause_claim(text)
+        assert time.perf_counter() - started < 0.2, (token, len(text))
+
+
+def test_stored_plan_prose_loses_only_the_offending_sentences():
+    stored = {
+        "overall": {"status": "on_level"},
+        "action_plan": [
+            {"priority": 1, "skill_id": "G8_T1", "skill_name_ru": "Дроби", "evidence": "observed_error",
+             "action_title": "Дроби: надёжность диагноза 83%",
+             "full_description": "Повторите правило сложения дробей. Надёжность диагноза 83%. "
+                                 "Единая первопричина не подтверждена. Решите пять примеров."},
+            {"priority": 2, "skill_id": "G8_T2", "skill_name_ru": "Степени",
+             "full_description": "В конце 7 класса изучают степени. Надёжность прибора равна 0,95.",
+             "steps": ["Шаг один.", "Результат достоверен на 90%.", "Шаг три."]},
+            {"priority": 3, "skill_id": "G8_T3", "skill_name_ru": "Уравнения", "full_description": "Практика."},
+        ],
+    }
+    cleaned = rg.strip_retired_report_fields(stored)
+    first, second, third = cleaned["action_plan"]
+    assert first["full_description"] == "Повторите правило сложения дробей. Решите пять примеров."
+    assert first["action_title"] == ""                              # the whole title was the claim
+    assert first["skill_id"] == "G8_T1" and first["skill_name_ru"] == "Дроби" and first["priority"] == 1
+    assert first["evidence"] == "observed_error"
+    # a class reference and a probability task stay; the nested list loses the claim only
+    assert second["full_description"] == "В конце 7 класса изучают степени. Надёжность прибора равна 0,95."
+    assert second["steps"] == ["Шаг один.", "", "Шаг три."]
+    assert third["full_description"] == "Практика."
+    assert "83%" in stored["action_plan"][0]["full_description"]    # the stored row is not mutated
