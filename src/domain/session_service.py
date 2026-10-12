@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import random
 import uuid
 from typing import List, Optional, Tuple
@@ -338,6 +339,11 @@ class SessionService:
         if state.phase == "completed":
             from src.core.exceptions import SessionAlreadyCompletedError
             raise SessionAlreadyCompletedError(str(session_id))
+
+        # Freeze the Deep Scan flags before any preview/trigger evaluation: a session created
+        # before the flags existed (or before some flag existed) is frozen by its first answer
+        # after the deploy.  No-op for a session whose flags are complete (create_session).
+        self._scan_params(state)
 
         # Never let a client choose an arbitrary task or replay a previous one.
         # The requested task must be exactly the task the server issued.
@@ -733,6 +739,7 @@ class SessionService:
             # Finish measuring this important failed subtopic before deciding
             # whether its prerequisites need a causal probe.
             return True
+        # mastery_threshold is intentionally live: a general CAT setting, not a Deep Scan flag.
         return skills.subtopic_score() < settings.mastery_threshold
 
     def _should_stop(self, state: SessionState, *, pending_critical_probe: bool = False) -> bool:
@@ -1391,11 +1398,20 @@ class SessionService:
         for a positive offset (the session's frozen value, see ``_scan_params``);
         this is the only place the offset applies.  The target is clamped to the
         content API's target_b range ([-4, 4], same as the theta grid): theta near
-        -4 minus a positive offset would otherwise get a 422 and break the session."""
+        -4 minus a positive offset would otherwise get a 422 and break the session.
+        A non-finite target (NaN theta) would clamp to -4 and silently serve the easiest
+        items: it is logged and the item is picked without a difficulty target."""
         target_b = state.theta.theta
         if state.is_in_deep_scan:
             target_b = target_b - self._scan_params(state)["probe_difficulty_offset"]
-        target_b = min(_TARGET_B_MAX, max(_TARGET_B_MIN, target_b))
+        if math.isfinite(target_b):
+            target_b = min(_TARGET_B_MAX, max(_TARGET_B_MIN, target_b))
+        else:
+            log.warning(
+                "_select_task_for_skill(%s): non-finite target_b %r (theta %r), picking without a difficulty target",
+                skill_id, target_b, state.theta.theta,
+            )
+            target_b = None
         task = self.task_repo.get_task_by_difficulty_target(
             skill_id, target_b=target_b, exclude_ids=state.used_task_ids
         )

@@ -81,3 +81,18 @@ def test_difficulty_target_helper_survives_nan_without_a_target():
     with patch("src.repositories.knowledge_repo.content_client.get") as get:
         get.return_value.json.return_value = []
         assert TaskRepository().get_task_by_difficulty_target("skill", math.nan) is None
+
+
+def test_difficulty_target_helper_with_no_target_sends_none_and_picks_any_unused_task():
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return [{"id": "a", "irt_difficulty": 0.3}, {"id": "b", "irt_difficulty": -1.0}]
+
+    with patch("src.repositories.knowledge_repo.content_client.get", return_value=Response()) as get:
+        task = TaskRepository().get_task_by_difficulty_target("skill", None, exclude_ids=["used"])
+    assert get.call_args.kwargs["params"] == {"skill_id": "skill", "limit": 20, "exclude_ids": ["used"]}
+    assert task.id in {"a", "b"}
+    with patch("src.repositories.knowledge_repo.content_client.get") as get:
+        get.return_value.json.return_value = []
+        assert TaskRepository().get_task_by_difficulty_target("skill", None) is None

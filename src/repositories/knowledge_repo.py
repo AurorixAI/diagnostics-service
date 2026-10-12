@@ -135,7 +135,7 @@ class TaskRepository:
     def get_task_by_difficulty_target(
         self,
         skill_id: str,
-        target_b: float,
+        target_b: Optional[float],
         *,
         exclude_ids: Optional[List[str]] = None,
     ) -> Optional[types.SimpleNamespace]:
@@ -145,9 +145,12 @@ class TaskRepository:
         Using random.choice instead of min() ensures that students with the same
         theta receive different task variants from the pool — critical for fairness
         when many tasks share the same irt_difficulty value.
+
+        ``target_b`` None or non-finite means "no usable target": no target is sent
+        (a non-finite one is logged by ``get_tasks_for_skill``) and any unused item of
+        the skill is picked at random.
         """
-        if not math.isfinite(target_b):
-            # No usable target (the repository logs it and sends none): any unused item.
+        if target_b is None or not math.isfinite(target_b):
             candidates = self.get_tasks_for_skill(
                 skill_id, exclude_ids=exclude_ids, limit=20, target_b=target_b
             )

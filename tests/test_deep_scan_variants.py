@@ -122,7 +122,7 @@ class FakeTasks:
         free = {k: b for k, b in self.items.items() if k not in (exclude_ids or [])}
         if not free:
             return None
-        best = min(free, key=lambda k: (abs(free[k] - target_b), k))
+        best = min(free, key=lambda k: (abs(free[k] - target_b) if target_b is not None else 0.0, k))
         return NS(id=best, irt_difficulty=free[best])
 
     def get_tasks_for_skill(self, skill_id, *, exclude_ids=None, limit=1, **kw):
@@ -759,3 +759,92 @@ def test_complete_params_are_returned_as_is(monkeypatch):
     SessionService._scan_params(state)
     stored = state.deep_scan_params
     assert SessionService._peek_scan_params(state) is stored and SessionService._scan_params(state) is stored
+
+
+# ── D1: a non-finite target must not clamp to the easiest items ───────────────
+
+@pytest.mark.parametrize("theta,scanning", [(float("nan"), False), (float("nan"), True), (float("inf"), False)])
+def test_non_finite_target_is_logged_and_sent_as_none(theta, scanning, caplog):
+    # min(4, max(-4, nan)) is -4.0: a NaN theta used to target the easiest items silently
+    bank = FakeTasks([-3.9, 0.4, 1.6])
+    state = state_with_theta(theta, scanning=scanning)
+    with caplog.at_level("WARNING", logger=ss.log.name):
+        task = service_with_bank(bank)._select_task_for_skill(state, "S")
+    assert bank.targets == [None]                                       # no difficulty target at all
+    assert task is not None and task.irt_difficulty == -3.9             # the bank decides, not a fake -4 target
+    assert any("non-finite target_b" in r.message for r in caplog.records)
+
+
+def test_finite_target_is_still_clamped_not_dropped(caplog):
+    bank = FakeTasks([-3.9, 0.4, 3.9])
+    with caplog.at_level("WARNING", logger=ss.log.name):
+        task = service_with_bank(bank)._select_task_for_skill(state_with_theta(9.0, scanning=False), "S")
+    assert bank.targets == [4.0] and task.irt_difficulty == 3.9
+    assert not caplog.records
+
+
+def test_unavailable_item_with_no_target_falls_back_to_any_unused_task():
+    bank = FakeTasks([0.4])
+    state = state_with_theta(float("nan"), scanning=False)
+    state.used_task_ids.append("t0")                                    # the only task is used: both paths find nothing
+    assert service_with_bank(bank)._select_task_for_skill(state, "S") is None
+    assert bank.targets == [None]
+
+
+# ── D2: a pre-flag session is frozen by answer handling, previews never freeze ────────────────────────────
+
+def answering_service(state, seen):
+    """Service whose collaborators are stubbed just enough to run _submit_answer_locked up to the
+    early-stop decision; ``seen`` records the frozen params at the moment of the critical-probe preview."""
+    service = object.__new__(SessionService)
+    service.session_repo = NS(get_fresh=lambda sid, for_update=False: None)
+    service.get_completed_answer_result = lambda sid, task_id, answer: None
+    service.redis = NS(load=lambda sid: state)
+    service.evaluator = NS(evaluate=lambda task, answer: (1.0, "correct"))
+    service.answer_repo = NS(log_answer=lambda **kw: None)
+    real_preview = service._has_pending_critical_probe
+
+    def preview(st, correct):
+        seen.append(copy.deepcopy(st.deep_scan_params))
+        return real_preview(st, correct)
+
+    service._has_pending_critical_probe = preview
+    service._should_stop = lambda st, pending_critical_probe=False: True
+    service._complete_session = lambda st, outcome, category: "DONE"
+    return service
+
+
+def test_answer_handling_freezes_a_pre_flag_session_before_any_preview(monkeypatch):
+    set_live(monkeypatch, importance_threshold=8, session_budget=6, max_items=6, trigger_mode="importance",
+             confirm_probes=1, probe_difficulty_offset=0.0)
+    task = NS(id="T", irt_discrimination=1.0, irt_difficulty=0.0, irt_guessing=0.0)
+    monkeypatch.setattr(ss, "task_object", lambda snapshot, task_id: task)
+    state = navigation_state(9)
+    state.current_task_id, state.current_task_snapshot = "T", {"id": "T"}
+    assert state.deep_scan_params is None                               # created before the flags existed
+    seen = []
+    service = answering_service(state, seen)
+    result = service._submit_answer_locked(session_id="sid", task_id="T", student_answer="1", time_ms=1)
+    assert result == "DONE"
+    assert len(seen) == 1 and set(seen[0]) == SIX_KEYS                  # frozen BEFORE the preview ran
+    assert state.deep_scan_params["importance_threshold"] == 8
+    # the config changes afterwards: the frozen values keep deciding
+    set_live(monkeypatch, importance_threshold=3)
+    assert SessionService._peek_scan_params(state)["importance_threshold"] == 8
+    # ... while previews on another pre-flag state still never freeze it
+    other = navigation_state(9)
+    assert service._l3_warrants_deep_scan(other, NS(subtopic_id="L3", importance=5)) is True   # live 3
+    assert other.deep_scan_params is None
+
+
+def test_answer_handling_leaves_complete_params_untouched(monkeypatch):
+    task = NS(id="T", irt_discrimination=1.0, irt_difficulty=0.0, irt_guessing=0.0)
+    monkeypatch.setattr(ss, "task_object", lambda snapshot, task_id: task)
+    state = navigation_state(9)
+    state.current_task_id, state.current_task_snapshot = "T", {"id": "T"}
+    SessionService._scan_params(state)
+    stored = state.deep_scan_params
+    set_live(monkeypatch, importance_threshold=2, session_budget=1)
+    seen = []
+    answering_service(state, seen)._submit_answer_locked(session_id="sid", task_id="T", student_answer="1", time_ms=1)
+    assert state.deep_scan_params is stored and seen == [stored]
