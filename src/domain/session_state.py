@@ -63,6 +63,19 @@ class SessionState:
     deep_scan_tested: List[str] = field(default_factory=list)
     # Deep Scan items answered so far in the whole session (session budget).
     deep_scan_items_total: int = 0
+    # Probed skills whose gap was NOT confirmed (DEEP_SCAN_CONFIRM_PROBES > 1: wrong
+    # answers short of the required number and no unused item left).  Not gaps.
+    deep_scan_unconfirmed: List[str] = field(default_factory=list)
+    # Deep Scan flags FIXED for this session at create_session:
+    # {"confirm_probes", "probe_difficulty_offset", "trigger_mode",
+    #  "importance_threshold", "session_budget", "max_items"}.  The trigger rule, the scan
+    # engine, probe selection and the report all read the session's own values, so a
+    # config change later (mid-session, or before the report is rebuilt) never changes
+    # what the session did or how its chains are read.  None = a session created before
+    # the flags existed (the report then uses the old rules, confirm_probes = 1; the
+    # service freezes the flags from the live settings at its first Deep Scan use); a
+    # dict stored before some key existed gets that key the same way.
+    deep_scan_params: Optional[dict] = None
 
     # Navigation context to restore after a one-off fallback task (see
     # SessionService._fallback_task): the item came from a different L4/L3/L2
@@ -109,6 +122,8 @@ class SessionState:
             "saved_nav_context": self.saved_nav_context,
             "deep_scan_tested": self.deep_scan_tested,
             "deep_scan_items_total": self.deep_scan_items_total,
+            "deep_scan_unconfirmed": self.deep_scan_unconfirmed,
+            "deep_scan_params": self.deep_scan_params,
             "fallback_nav_context": self.fallback_nav_context,
             "stop_reason": self.stop_reason,
         }
@@ -151,6 +166,8 @@ class SessionState:
             saved_nav_context=data.get("saved_nav_context"),
             deep_scan_tested=data.get("deep_scan_tested", []),
             deep_scan_items_total=data.get("deep_scan_items_total", 0),
+            deep_scan_unconfirmed=data.get("deep_scan_unconfirmed", []),
+            deep_scan_params=data.get("deep_scan_params"),
             fallback_nav_context=data.get("fallback_nav_context"),
             stop_reason=data.get("stop_reason"),
         )

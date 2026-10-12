@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 """Root-cause study, stage 0: run one arm of cat_sim on the fixed stand for all grades, and compare arms.
 
-  # run an arm (default settings = BASE); results -> tools/sim_results/rootcause_<tag>_G<n>.json
+  # run an arm (default settings = the shipped defaults = variant OC15: offset 1.5, confirm probes 2);
+  # the old baseline needs --setting DEEP_SCAN_PROBE_DIFFICULTY_OFFSET=0.0 --setting DEEP_SCAN_CONFIRM_PROBES=1
+  # results -> tools/sim_results/rootcause_<tag>_G<n>.json
   python tools/rootcause_run.py run --tag base
   python tools/rootcause_run.py run --tag budget8 --setting DEEP_SCAN_SESSION_BUDGET=8 --grades 7 8
   python tools/rootcause_run.py run --tag base_ref --stand-set reference --grades 7 8 9 11   # earlier gap sets

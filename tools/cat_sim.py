@@ -90,6 +90,9 @@ PROD_SETTINGS = {
     "DEEP_SCAN_SESSION_BUDGET": "6", "DEEP_SCAN_MAX_ITEMS": "6",
     "DEEP_SCAN_IMPORTANCE_THRESHOLD": "8", "MASTERY_THRESHOLD": "0.6",
 }
+# Deep Scan flags whose defaults live in the diagnostic-service Settings (variant OC15 since 2026-10-12);
+# not pinned here, only reported with the effective settings.
+VARIANT_FLAGS = ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE")
 TOKEN = "cat-sim-internal-token"
 EFFECTIVE_SETTINGS: Dict[str, Dict[str, Any]] = {}     # arm label -> settings reported by the workers
 
@@ -308,7 +311,8 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
     th_hat, se = float(db.theta), float(db.theta_se)
     cls_true, cls_hat = lp.classify(theta, 0.0, grade), lp.classify(th_hat, se, grade)
     rows = list(answers.rows)
-    chains = rg._reconstruct_root_cause_chains(rows, {}, [], grade)
+    chains = rg._reconstruct_root_cause_chains(
+        rows, {}, [], grade, confirm_probes=(snap.get("deep_scan_params") or {}).get("confirm_probes"))
     gap_set = set(gap_list)
     root_l3 = [l3_of(nodes, c.get("root_gap_skill_id") or "") for c in chains]
     detected = cause = named = False
@@ -316,7 +320,8 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
         detected = gap in root_l3                       # strict: injected L3 is the report's root gap
         for c in chains:
             for st in c["steps"]:
-                if l3_of(nodes, st.get("skill_id") or "") != gap or lp.is_correct(st["outcome"]):
+                if (l3_of(nodes, st.get("skill_id") or "") != gap or lp.is_correct(st["outcome"])
+                        or st.get("gap_confirmed") is False):   # DEEP_SCAN_CONFIRM_PROBES > 1: wrong but not confirmed
                     continue
                 named = True                            # failed step under the L3 anywhere (incl. scan origin)
                 if st.get("is_deep_scan"):
@@ -373,6 +378,7 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
         "weak_entries": entries, "coh_entries": coh_entries, "weak_sessions": int(entries > 0),
         "coh_sessions": int(entries > 0 and coh_entries == entries), "gap_topic_named": gap_topic_named,
         "confirmed_gaps": confirmed, "confirmed_gap_is_G": confirmed_gap_is_G,
+        "ds_unconfirmed": len(snap.get("deep_scan_unconfirmed") or []),   # probed skills whose gap was not confirmed
         "scan_triggered": ds_items > 0,                              # >=1 Deep Scan item was served
         "ds_budget_exhausted": ds_items >= budget,                   # session Deep Scan budget spent
         "hit_max_items": db.stop_reason == "max_items_reached" or int(db.items_answered) >= max_items,
@@ -393,20 +399,52 @@ def _seed_pg(ctx, seed: int, i: int) -> None:
 def _worker(args):
     (db_url, truth_url, content_dir, extra, idxs, seed, grade, gap_list, gap_fraction, gap_fail_p, depth) = args
     import logging
-    ctx = bootstrap(db_url, truth_url, Path(content_dir), extra)
-    logging.disable(logging.WARNING)
-    fail_cache: Dict[str, set] = ctx.setdefault("_fail_cache", {})
+    import traceback
+    # Every failure leaves the worker as a plain RuntimeError: some exceptions
+    # (httpx.HTTPStatusError) cannot be unpickled in the parent, which kills Pool's
+    # result thread and hangs the run forever.  Building the message is guarded too.
+    try:
+        ctx = bootstrap(db_url, truth_url, Path(content_dir), extra)
+        logging.disable(logging.WARNING)
+        fail_cache: Dict[str, set] = ctx.setdefault("_fail_cache", {})
+        settings_used = _effective_settings(ctx, extra)
+    except Exception as e:
+        raise RuntimeError(f"worker bootstrap failed (grade {grade}, seed {seed}): {_error_detail(e)}\n"
+                           f"{traceback.format_exc()[-1500:]}") from None
     out = []
     for i in idxs:
-        out.append(simulate_student(ctx, i, seed, grade, gap_list, gap_fraction, gap_fail_p, fail_cache, depth))
-    return out, _effective_settings(ctx, extra)
+        try:
+            out.append(simulate_student(ctx, i, seed, grade, gap_list, gap_fraction, gap_fail_p, fail_cache, depth))
+        except Exception as e:
+            raise RuntimeError(f"student {i} (grade {grade}, seed {seed}): {_error_detail(e)}\n"
+                               f"{traceback.format_exc()[-1500:]}") from None
+    return out, settings_used
+
+
+def _error_detail(e: BaseException) -> str:
+    """repr(e), plus the HTTP request/response when e carries one.  Never raises: if reading
+    the response fails, repr(e) alone is still reported."""
+    try:
+        detail = repr(e)
+    except Exception:
+        detail = f"<unrepresentable {type(e).__name__}>"
+    try:
+        resp = getattr(e, "response", None)
+        if resp is not None:
+            detail += f" | {resp.request.method} {resp.request.url} -> {resp.status_code}: {resp.text[:300]}"
+    except Exception as inner:
+        detail += f" | (response details unavailable: {inner!r})"
+    return detail
 
 
 def _effective_settings(ctx, extra) -> Dict[str, Any]:
     """Settings as the worker's diagnostic-service Settings object actually holds them
     (PROD_SETTINGS + --setting overrides + every overridden key), not what the parent env says."""
     st = ctx["settings"]
-    keys = list(PROD_SETTINGS) + [k.upper() for k in dict(extra) if k.upper() not in PROD_SETTINGS]
+    # The Deep Scan variant flags are always reported: their defaults (variant OC15) are not pinned
+    # in PROD_SETTINGS, so a run without --setting must still show which values it actually used.
+    keys = list(PROD_SETTINGS) + [k for k in VARIANT_FLAGS if k not in PROD_SETTINGS]
+    keys += [k.upper() for k in dict(extra) if k.upper() not in keys]
     return {k: getattr(st, k.lower(), "<unknown setting>") for k in keys}
 
 

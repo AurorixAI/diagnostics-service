@@ -9,6 +9,8 @@ need to know about the transport switch.
 """
 from __future__ import annotations
 
+import logging
+import math
 import random
 import types
 from typing import List, Optional
@@ -17,10 +19,27 @@ from src.clients import content_client
 
 BASE = "/api/v1/content"
 
+log = logging.getLogger(__name__)
+
+# content-service GET /tasks validates target_b with Query(ge=-4, le=4); anything outside
+# is a 422 there, so the transport layer clamps instead of letting a caller break a session.
+TARGET_B_MIN, TARGET_B_MAX = -4.0, 4.0
+
 # Maximum additional IRT b-param distance allowed beyond the closest match.
 # Keeps pool tight: tasks in pool differ by at most 0.1 from the best-matching task.
 # Wider values (e.g. 0.5) incorrectly mix tasks of very different difficulty levels.
 _IRT_TOLERANCE = 0.1
+
+
+def _normalise_target_b(target_b: float, skill_id: str) -> float:
+    """A target the content API accepts: NaN -> 0.0 (warning), +-inf and out-of-range values
+    -> the nearest bound of [TARGET_B_MIN, TARGET_B_MAX].  A target-less request would not
+    be neutral: content-service then orders by irt_difficulty ASC (the easiest items), and
+    the clamp alone would turn NaN into the lowest bound."""
+    if math.isnan(target_b):
+        log.warning("target_b is NaN for skill %s, using the neutral target 0.0", skill_id)
+        return 0.0
+    return min(TARGET_B_MAX, max(TARGET_B_MIN, target_b))
 
 
 def _ns(d: dict) -> types.SimpleNamespace:
@@ -111,7 +130,7 @@ class TaskRepository:
         if difficulty:
             params["difficulty"] = difficulty
         if target_b is not None:
-            params["target_b"] = target_b
+            params["target_b"] = _normalise_target_b(target_b, skill_id)
         if exclude_ids:
             params["exclude_ids"] = exclude_ids
         resp = content_client.get(f"{BASE}/tasks", params=params)
@@ -121,7 +140,7 @@ class TaskRepository:
     def get_task_by_difficulty_target(
         self,
         skill_id: str,
-        target_b: float,
+        target_b: Optional[float],
         *,
         exclude_ids: Optional[List[str]] = None,
     ) -> Optional[types.SimpleNamespace]:
@@ -131,7 +150,18 @@ class TaskRepository:
         Using random.choice instead of min() ensures that students with the same
         theta receive different task variants from the pool — critical for fairness
         when many tasks share the same irt_difficulty value.
+
+        ``target_b`` is normalised first (``_normalise_target_b``): NaN -> 0.0 with a warning,
+        +-inf / out-of-range -> +-4, so every caller is safe.  Only ``target_b=None`` sends no
+        target: one of the candidates content-service returns without a target (it orders them
+        by irt_difficulty ASC, i.e. the easiest) is picked at random.
         """
+        if target_b is None:
+            candidates = self.get_tasks_for_skill(
+                skill_id, exclude_ids=exclude_ids, limit=20, target_b=None
+            )
+            return random.choice(candidates) if candidates else None
+        target_b = _normalise_target_b(target_b, skill_id)   # as sent to the API
         candidates = self.get_tasks_for_skill(
             skill_id, exclude_ids=exclude_ids, limit=20, target_b=target_b
         )
