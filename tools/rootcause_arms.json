@@ -1,0 +1,11 @@
+{
+ "note": "Stage-3b arms (ASSUMED composition, edit freely). All arms run the same stand/students (paired); A0 = defaults = OC15. Each arm = list of cat_sim --setting KEY=VAL overrides. D1 = two strikes, D2 = residual, D3 = informative probe.",
+ "arms": {
+  "A0": [],
+  "A1": ["DEEP_SCAN_TRIGGER_RULE=d1"],
+  "A2": ["DEEP_SCAN_TRIGGER_RULE=d1", "DEEP_SCAN_TRIGGER_MODE=hard_prereq"],
+  "A3": ["DEEP_SCAN_TRIGGER_RULE=d2", "DEEP_SCAN_RESIDUAL_MIN=1.0"],
+  "A4": ["DEEP_SCAN_PROBE_MIN_P=0.5"],
+  "A5": ["DEEP_SCAN_TRIGGER_RULE=d1", "DEEP_SCAN_PROBE_MIN_P=0.5"]
+ }
+}

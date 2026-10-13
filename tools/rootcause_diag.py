@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Root-cause study, stage 3a: diagnostic metrics of ONE arm (the instrumented runs of cat_sim / rootcause_run).
 
-  python tools/rootcause_diag.py --tag A0 --stage stage3a [--n-boot 2000]
+  python tools/rootcause_diag.py --tag A0 --stage stage3a [--n-boot 2000]                 # one arm (stage 3a tables)
+  python tools/rootcause_diag.py --base A0 --variants A1 A2 A3 A4 A5 --stage stage3b       # arms vs base + acceptance verdicts
 
 Reads tools/sim_results/rootcause_<tag>_G<n>.json and writes tools/sim_results/rootcause_<stage>_diag.json + .txt
 (summary files; the per-grade result JSONs stay gitignored).
@@ -28,6 +29,11 @@ Metrics (rates are shares of students unless stated):
      d1g / d2g = d1 / d2 AND importance >= threshold.
      P(trigger | signal L3 failed) vs P(trigger | noise L3 failed) and their ratio; student level: P(any trigger).
 
+Compare mode (stage 3b/3c): every metric of the variant minus the base on the SAME students (same weights in the same
+replicate, so the difference is paired), scopes ALL / theta tercile / grade / gap-L3 class (eligible, non_eligible, typical);
+the acceptance criteria of tools/rootcause_accept.json (non-inferiority margins on the 95% CI for guardrails; point effect
+AND a CI beyond 0 for gains) are evaluated on the ALL-grades cluster-bootstrap CIs and written into the .txt/.json.
+
 Confidence intervals: per grade = student bootstrap (gap and gap-free students resampled separately within the grade, as in
 cat_sim.paired_bootstrap); ALL grades = cluster bootstrap by gap L3 (per grade, the gap L3 clusters are redrawn with
 replacement and carry all their gap students; gap-free students are resampled within the grade); 95% percentile CI.
@@ -44,7 +50,7 @@ import numpy as np
 
 TOOLS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TOOLS))
-from rootcause_run import GRADES, RESULTS, content_db_url  # noqa: E402
+from rootcause_run import GRADES, RESULTS, STAND, content_db_url  # noqa: E402
 
 T_CUT = NormalDist().inv_cdf(2 / 3)          # |theta| cut of the terciles of N(0,1): +-0.4307
 RULES = ("cur", "act", "d1", "d2", "d1g", "d2g")
@@ -55,6 +61,19 @@ RULE_LABEL = {"cur": "current (imp>=8 & failing)", "act": "actual (budget respec
 # ─────────────────────────────────────────────────────────────────────────────
 # per-student arrays
 # ─────────────────────────────────────────────────────────────────────────────
+CLASSES = ("eligible", "non_eligible", "typical")      # a trigger-relevant view of the gap L3: see gap_class()
+
+
+def gap_class(stand, stand_set, grade, G):
+    """eligible = a direct in-grade dependant with importance >= 8 exists (a failed dependant can start a scan that reaches G);
+    non_eligible = dependants exist, all < 8; typical = no dependant.  Stand A: the class/trigger_eligible fields of its detail;
+    stand B: its class labels (eligible_fill counts as eligible)."""
+    if stand_set == "B":
+        c = stand["stand_b"]["grades"][str(grade)]["detail"][G]["class"]
+        return "eligible" if c.startswith("eligible") else c
+    d = stand["grades"][str(grade)]["detail"][G]
+    return "typical" if d["class"] == "typical" else ("eligible" if d["trigger_eligible"] else "non_eligible")
+
 def load_tag(tag, results=RESULTS):
     out = {}
     for g in GRADES:
@@ -90,10 +109,15 @@ def build_arrays(data, l2_of=None):
     A = {k: f() for k in (
         "grade", "gap", "theta", "terc", "cluster", "scan", "ds_items", "nch", "chG", "conf", "topic", "entries", "wt", "ct",
         "dt", "V", "F", "S", "R", "Rany", "Rorig", "Rprobe", "Cprobe", "Q", "Fimp", "Fbud", "C", "budget_sig", "n_sig_scans", "budget_noise", "n_noise_scans",
-        "sig_n", "noise_n", "n_cut", "n_terminal", "n_visits", "n_failed")}
+        "sig_n", "noise_n", "n_cut", "n_terminal", "n_visits", "n_failed",
+        "acc", "sq", "items", "maxit", "cause", "detected", "named", "fp", "cls")}
     for rule in RULES:
         A[f"sig_{rule}"], A[f"noise_{rule}"], A[f"any_{rule}"], A[f"anysig_{rule}"] = f(), f(), f(), f()
     A["cluster"][:] = -1
+    A["cls"][:] = -1
+    stand = json.loads(STAND.read_text())
+    stand_sets = {g: d["rootcause"].get("stand_set", "stand") for g, d in data.items()}
+    A["items_oh"] = np.zeros((N, 64), np.float32)
     IC, IT = np.zeros((N, J)), np.zeros((N, J))        # would-be conf / topic indicators for each cluster's L3 (grade-matched)
     aux = {}
     for i, (g, r) in enumerate(recs):
@@ -101,6 +125,11 @@ def build_arrays(data, l2_of=None):
         A["grade"][i], A["gap"][i], A["theta"][i] = g, 1.0 if G else 0.0, r["theta"]
         A["terc"][i] = 0 if r["theta"] < -T_CUT else (2 if r["theta"] >= T_CUT else 1)
         A["scan"][i], A["ds_items"][i] = float(bool(r.get("scan_triggered"))), r["ds_items"]
+        A["acc"][i], A["sq"][i] = float(r["cat_true"] == r["cat_hat"]), (r["theta_hat"] - r["theta"]) ** 2
+        A["items"][i], A["maxit"][i] = r["items"], float(bool(r.get("hit_max_items")))
+        A["items_oh"][i, min(int(r["items"]), 63)] = 1.0
+        A["cause"][i], A["detected"][i], A["named"][i], A["fp"][i] = (float(bool(r["cause"])), float(bool(r["detected"])),
+                                                                     float(bool(r["named"])), float(bool(r["fp"])))
         roots = r.get("chain_roots") or []
         A["nch"][i] = r["n_chains"]
         A["chG"][i] = sum(1 for x in roots if G and x == G)
@@ -114,6 +143,7 @@ def build_arrays(data, l2_of=None):
                 IT[i, j] = l2_of.get(GG) in named
         if G:
             A["cluster"][i] = col_ix[(g, G)]
+            A["cls"][i] = CLASSES.index(gap_class(stand, stand_sets[g], g, G))
             A["conf"][i], A["topic"][i] = float(bool(r.get("confirmed_gap_is_G"))), float(bool(r.get("gap_topic_named")))
             vis = [v for v in r["l3_visits"] if v.get("complete")]
             sc = r["scan_log"]
@@ -220,6 +250,20 @@ def metrics(A, cols, W, scope):
                 out[f"{name}_{side}"] = mean(key, m)
     out["chain_precision"] = _div(s(A["chG"], gap), s(A["nch"], gap))
     out["n_chains_gap"] = s(A["nch"], gap)
+    # level estimation, length (all students of the scope), root-cause detection (gap) and false claims (gap-free)
+    out["acc_category"] = mean("acc", scope)
+    out["rmse_theta"] = np.sqrt(mean("sq", scope))
+    out["len_mean"] = mean("items", scope)
+    out["hit_max_items"] = mean("maxit", scope)
+    counts = W @ (A["items_oh"] * scope[:, None])                          # replicates x item-count histogram
+    cum = np.cumsum(counts, axis=1)
+    out["len_p90"] = (cum >= 0.9 * cum[:, -1:]).argmax(axis=1).astype(float)
+    for name, key in (("detect_cause", "cause"), ("detect_root", "detected"), ("detect_named", "named")):
+        out[name] = mean(key, gap)
+    out["fp_nogap"] = mean("fp", ng)
+    out["signal_cause"] = out["detect_cause"] - out["fp_nogap"]
+    out["scan_signal"] = out["scan_gap"] - out["scan_nogap"]
+    out["chains_ps_signal"] = out["chains_ps_gap"] - out["chains_ps_nogap"]
     # lift over the matched gap-free base rate
     cl = A["cluster"].astype(int)
     colg = np.array([g for g, _ in cols])
@@ -297,12 +341,21 @@ def table(title, rows, cols, width=21):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--tag", required=True)
+    ap.add_argument("--tag", help="one-arm tables for this arm (stage 3a)")
+    ap.add_argument("--base", help="compare mode: the base arm")
+    ap.add_argument("--variants", nargs="+", help="compare mode: arms to compare with --base")
+    ap.add_argument("--accept", type=Path, default=ACCEPT)
     ap.add_argument("--stage", default="stage3a")
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=12345)
     ap.add_argument("--results", type=Path, default=RESULTS)
     a = ap.parse_args()
+    if a.variants:
+        if not a.base:
+            ap.error("--variants needs --base")
+        return compare_main(a)
+    if not a.tag:
+        ap.error("--tag (one arm) or --base with --variants (compare) is required")
     data = load_tag(a.tag, a.results)
     if not data:
         raise SystemExit(f"no result files for tag {a.tag}")
@@ -402,6 +455,151 @@ def main():
     json.dump({"tag": a.tag, "n_boot": a.n_boot, "grades": grades, "n_students": N, "instrumentation_aux": aux,
                "theta_tercile_cut": T_CUT, "results": res}, open(out_json, "w"), ensure_ascii=False, indent=1)
     out_json.with_suffix(".txt").write_text(text)
+    print(text)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# compare mode: variants minus base, acceptance criteria
+# ─────────────────────────────────────────────────────────────────────────────
+ACCEPT = TOOLS / "rootcause_accept.json"
+# (metric, label, scale, decimals) of the compact comparison tables
+COMPARE_ROWS = [
+    ("acc_category", "acc3 (pp)", 100, 1), ("rmse_theta", "RMSE", 1, 3), ("len_mean", "len", 1, 2), ("len_p90", "p90", 1, 1),
+    ("hit_max_items", "max_items (pp)", 100, 1), ("ds_items_gap", "ds items gap", 1, 2), ("ds_items_nogap", "ds items no gap", 1, 2),
+    ("scan_gap", "scan gap (pp)", 100, 1), ("scan_nogap", "scan no gap (pp)", 100, 1), ("scan_signal", "scan gap-nogap (pp)", 100, 1),
+    ("chain_precision", "chain_precision (pp)", 100, 1), ("p_chain_nogap", "P(chain) no gap (pp)", 100, 1),
+    ("chains_ps_nogap", "chains/stud no gap", 1, 2), ("p_chain_gap", "P(chain) gap (pp)", 100, 1),
+    ("conf_gap", "conf_is_G gap (pp)", 100, 1), ("conf_diff", "  over base (pp)", 100, 1), ("topic_gap", "topic_named gap (pp)", 100, 1),
+    ("detect_cause", "cause (pp)", 100, 1), ("detect_root", "root (pp)", 100, 1), ("fp_nogap", "fp no gap (pp)", 100, 1),
+    ("signal_cause", "sig_c = cause-fp (pp)", 100, 1), ("f_S", "funnel S (pp)", 100, 1), ("f_R", "funnel R (pp)", 100, 1),
+    ("f_C", "funnel C (pp)", 100, 1), ("sh_ratio_act", "shadow ratio (act)", 1, 2),
+]
+TERCILE_ROWS = ["p_chain_nogap", "chains_ps_nogap", "scan_nogap", "scan_gap", "chain_precision", "conf_gap", "ds_items_nogap"]
+CLASS_ROWS = ["scan_gap", "chain_precision", "conf_gap", "detect_cause", "f_S", "f_R", "f_C", "ds_items_gap"]
+
+
+def load_common(tags, results):
+    loaded = {t: load_tag(t, results) for t in tags}
+    missing = [t for t, d in loaded.items() if not d]
+    if missing:
+        raise SystemExit(f"no result files for tags {missing}")
+    grades = sorted(set.intersection(*(set(d) for d in loaded.values())))
+    return grades, {t: {g: d[g] for g in grades} for t, d in loaded.items()}
+
+
+def same_students(a, b):
+    return all(np.array_equal(a[k], b[k]) for k in ("grade", "gap", "theta", "cluster"))
+
+
+def delta(m_var, m_base, key):
+    return m_var[key] - m_base[key]
+
+
+def evaluate_criteria(crit, diffs):
+    """diffs[scope][metric] = {'diff', 'ci95'}; returns the list of criterion results."""
+    out = []
+    for c in crit["criteria"]:
+        x = diffs.get(c["scope"], {}).get(c["metric"])
+        if x is None or x["diff"] is None or x["ci95"][0] is None:
+            out.append({**c, "value": None, "ci": [None, None], "pass": False, "note": "metric not available"})
+            continue
+        k = c.get("scale", 1)
+        v, lo, hi = x["diff"] * k, x["ci95"][0] * k, x["ci95"][1] * k
+        if c["kind"] == "guardrail":                      # non-inferiority: the CI bound on the bad side stays within the margin
+            ok = lo >= c["margin"] if c["direction"] == "ge" else hi <= c["margin"]
+        else:                                             # gain: large enough AND the CI excludes 0
+            ok = (v >= c["min_effect"] and lo > 0) if c["direction"] == "ge" else (v <= c["min_effect"] and hi < 0)
+        out.append({**c, "value": v, "ci": [lo, hi], "pass": bool(ok)})
+    return out
+
+
+def compare_main(a):
+    crit = json.loads(Path(a.accept).read_text())
+    tags = [a.base] + list(a.variants)
+    grades, data = load_common(tags, a.results)
+    l2, arrays = None, {}
+    for t in tags:
+        arrays[t], cols, aux = build_arrays(data[t], l2)
+        l2 = l2 or gap_parents({G for _, G in cols})
+    base = arrays[a.base]
+    for t in a.variants:
+        if not same_students(base, arrays[t]):
+            raise SystemExit(f"{t}: students/gap assignment differ from {a.base} (different seed, n or stand?)")
+    N = len(base["grade"])
+    rng = np.random.default_rng(a.seed)
+    w1 = np.ones((1, N), np.float32)
+    w_stu = student_weights(base, a.n_boot, rng)
+    w_clu = cluster_weights(base, cols, a.n_boot, rng)
+    scopes = {"ALL": (np.ones(N, bool), w_clu)}
+    for t_, name in enumerate(("T1", "T2", "T3")):
+        scopes[f"ALL_{name}"] = (base["terc"] == t_, w_clu)
+    for g in grades:
+        scopes[f"G{g}"] = (base["grade"] == g, w_stu)
+    for k, c in enumerate(CLASSES):                       # gap students of one class only (no gap-free students in the scope)
+        if ((base["cls"] == k) & base["gapb"]).any():
+            scopes[f"CLS_{c}"] = (((base["cls"] == k) & base["gapb"]), w_clu)
+
+    def metr(A, scope):
+        m, w = scopes[scope]
+        return metrics(A, cols, w1, m), metrics(A, cols, w, m)
+
+    base_m = {sc: metr(base, sc) for sc in scopes}
+    results, verdicts = {}, {}
+    for t in a.variants:
+        res = {}
+        for sc in scopes:
+            pt_v, bt_v = metr(arrays[t], sc)
+            pt_b, bt_b = base_m[sc]
+            res[sc] = {}
+            for key in pt_v:
+                d_pt, d_bt = pt_v[key] - pt_b[key], bt_v[key] - bt_b[key]
+                res[sc][key] = {"base": float(pt_b[key][0]) if np.isfinite(pt_b[key][0]) else None,
+                                "var": float(pt_v[key][0]) if np.isfinite(pt_v[key][0]) else None,
+                                "diff": float(d_pt[0]) if np.isfinite(d_pt[0]) else None, "ci95": ci(d_bt)}
+        results[t] = res
+        ev = evaluate_criteria(crit, res)
+        guard_ok = all(e["pass"] for e in ev if e["kind"] == "guardrail")
+        gains = sum(1 for e in ev if e["kind"] == "gain" and e["pass"])
+        verdicts[t] = {"criteria": ev, "guardrails_ok": guard_ok, "gains_passed": gains,
+                       "advance": bool(guard_ok and gains >= crit["min_gains"])}
+
+    heads = ["ALL"] + [f"G{g}" for g in grades]
+    cell = lambda x, k, p, ci_on=True: ("n/a" if x is None or x["diff"] is None else
+                                        f"{x['diff'] * k:+.{p}f}" + (f"[{x['ci95'][0] * k:+.{p}f},{x['ci95'][1] * k:+.{p}f}]"
+                                        + ("*" if x['ci95'][0] > 0 or x['ci95'][1] < 0 else "") if ci_on and x['ci95'][0] is not None else ""))
+    L = [f"{a.stage}: variants minus base {a.base}, grades {grades}, N={N} students ({int(base['gap'].sum())} with gap), n_boot={a.n_boot}",
+         "paired (same students, same replicate); ALL / terciles / classes = cluster bootstrap by gap L3, G<n> = student bootstrap; "
+         "diff[95% CI], * = CI excludes 0",
+         f"acceptance criteria: {a.accept} (min_gains={crit['min_gains']})"]
+    for t in a.variants:
+        res = results[t]
+        L += ["", f"=== {t} vs {a.base}"]
+        L += [f"{'metric':26s}" + "".join(f"{h:>26s}" for h in heads)]
+        for key, label, k, p in COMPARE_ROWS:
+            L.append(f"{label:26s}" + "".join(f"{cell(res[h].get(key), k, p, ci_on=True):>26s}" for h in heads))
+        L += ["", "  by theta tercile (ALL, cluster bootstrap; pp for rates)", f"{'metric':26s}" + "".join(f"{h:>26s}" for h in ("T1 weak", "T2", "T3 strong"))]
+        for key in TERCILE_ROWS:
+            k = 1 if key.startswith(("chains_ps", "ds_items")) else 100
+            L.append(f"{key:26s}" + "".join(f"{cell(res[f'ALL_{n}'].get(key), k, 2 if k == 1 else 1):>26s}" for n in ("T1", "T2", "T3")))
+        cls_present = [c for c in CLASSES if f"CLS_{c}" in res]
+        if cls_present:
+            L += ["", "  by gap-L3 class (gap students only)", f"{'metric':26s}" + "".join(f"{c:>26s}" for c in cls_present)]
+            for key in CLASS_ROWS:
+                k = 1 if key.startswith("ds_items") else 100
+                L.append(f"{key:26s}" + "".join(f"{cell(res[f'CLS_{c}'].get(key), k, 2 if k == 1 else 1):>26s}" for c in cls_present))
+        v = verdicts[t]
+        L += ["", f"  acceptance: guardrails {'OK' if v['guardrails_ok'] else 'FAIL'}, gains {v['gains_passed']}/"
+                  f"{sum(1 for e in v['criteria'] if e['kind'] == 'gain')} (need {crit['min_gains']}) -> "
+                  f"{'ADVANCE' if v['advance'] else 'DROP'}"]
+        for e in v["criteria"]:
+            val = "n/a" if e["value"] is None else f"{e['value']:+.2f}[{e['ci'][0]:+.2f},{e['ci'][1]:+.2f}]"
+            thr = e.get("margin", e.get("min_effect"))
+            L.append(f"   {'PASS' if e['pass'] else 'FAIL'} {e['id']:3s} {e['kind']:9s} {e['label']:58s} {val:>26s}  ({e['direction']} {thr})")
+    text = "\n".join(L) + "\n"
+    out = a.results / f"rootcause_{a.stage}_compare"
+    json.dump({"base": a.base, "variants": a.variants, "grades": grades, "n_students": N, "n_boot": a.n_boot, "criteria_file": str(a.accept),
+               "criteria": crit, "verdicts": verdicts, "results": results}, open(str(out) + ".json", "w"), ensure_ascii=False, indent=1)
+    Path(str(out) + ".txt").write_text(text)
     print(text)
 
 

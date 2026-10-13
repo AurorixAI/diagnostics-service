@@ -4,6 +4,10 @@
   python tools/rootcause_summary.py --base base2 --variants OFF1 CONF2 OC OCT OCTB OC15 \
          --stage stage2 [--progress-log PATH]
 
+Stage 3b/3c: add --accept [FILE] to get the paired comparison with the acceptance verdicts (guardrails + gains of
+tools/rootcause_accept.json, cluster bootstrap by gap L3 for ALL) instead of this table; it delegates to
+tools/rootcause_diag.py (--base A0 --variants A1 ... --stage stage3b).  Arms and run plan: tools/rootcause_stage3b.py plan.
+
 Reads tools/sim_results/rootcause_<tag>_G<n>.json (written by rootcause_run.py run) and writes
 tools/sim_results/rootcause_<stage>_summary.json + .txt.
 
@@ -90,7 +94,13 @@ def main():
     ap.add_argument("--stage", default="stage2")
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--progress-log", type=Path)
+    ap.add_argument("--accept", nargs="?", const=str(TOOLS / "rootcause_accept.json"),
+                    help="stage 3b: acceptance-criteria comparison (delegates to rootcause_diag.compare_main)")
     a = ap.parse_args()
+    if a.accept:
+        import rootcause_diag
+        return rootcause_diag.compare_main(argparse.Namespace(
+            base=a.base, variants=a.variants, stage=a.stage, n_boot=a.n_boot, seed=12345, results=RESULTS, accept=Path(a.accept)))
 
     problems, results, overrides, runtimes = [], {}, {}, {}
     fps = fingerprints(a.progress_log)

@@ -8,7 +8,7 @@
   python tools/rootcause_run.py run --tag budget8 --setting DEEP_SCAN_SESSION_BUDGET=8 --grades 7 8
   python tools/rootcause_run.py run --tag base_ref --stand-set reference --grades 7 8 9 11   # earlier gap sets
   python tools/rootcause_run.py run --tag A0 --stand-set stand --workers 8     # stand A (default)
-  python tools/rootcause_run.py run --tag B0 --stand-set B                     # stand B: 8 seeded gap L3 per grade (rootcause_stand_b.py)
+  python tools/rootcause_run.py run --tag B0s2 --stand-set B --seed 2          # stand B: 8 seeded gap L3 per grade (rootcause_stand_b.py), student seed 2
 
 Stage-3a instrumentation (l3_visits, shadow_triggers, scan_log, ...) is written into every per-student record; metrics:
   python tools/rootcause_diag.py --tag A0 --stage stage3a
@@ -77,7 +77,7 @@ def cmd_run(a):
             gap = stand["grades"][str(g)]["gap_l3"]
         out = out_path(a.tag, g)
         cmd = [sys.executable, str(TOOLS / "cat_sim.py"), "--grade", str(g), "--n-students", str(a.n_students or P["n_students"]),
-               "--seed", str(P["seed"]), "--gap-fraction", str(P["gap_fraction"]), "--gap-fail-p", str(P["gap_fail_p"]),
+               "--seed", str(a.seed if a.seed is not None else P["seed"]), "--gap-fraction", str(P["gap_fraction"]), "--gap-fail-p", str(P["gap_fail_p"]),
                "--dependant-depth", str(P["dependant_depth"]), "--workers", str(a.workers),
                "--content-db-url", url, "--out", str(out), "--gap-l3", *gap]
         for kv in a.setting:
@@ -89,7 +89,8 @@ def cmd_run(a):
             print(f"G{g} FAILED:\n{(r.stderr or r.stdout)[-1500:]}"); sys.exit(1)
         d = json.load(open(out))
         d["rootcause"] = {"tag": a.tag, "grade": g, "stand_set": a.stand_set, "gap_l3": gap, "runtime_s": round(dt, 1),
-                          "setting_overrides": a.setting, "n_students": a.n_students or P["n_students"]}
+                          "setting_overrides": a.setting, "n_students": a.n_students or P["n_students"],
+                          "seed": a.seed if a.seed is not None else P["seed"]}
         json.dump(d, open(out, "w"), ensure_ascii=False)
         times[g] = dt
         s = d["arms"]["A"]["summary"]
@@ -197,7 +198,8 @@ def main():
     r.add_argument("--setting", action="append", default=[], help="KEY=VAL override passed to cat_sim --setting")
     r.add_argument("--grades", type=int, nargs="*", default=GRADES)
     r.add_argument("--stand-set", choices=["stand", "reference", "B"], default="stand")
-    r.add_argument("--n-students", type=int, default=None); r.add_argument("--workers", type=int, default=8)
+    r.add_argument("--n-students", type=int, default=None); r.add_argument("--seed", type=int, default=None, help="student seed (default: the stand's)")
+    r.add_argument("--workers", type=int, default=8)
     r.add_argument("--content-db-url")
     t = sp.add_parser("table"); t.add_argument("--tag", required=True); t.add_argument("--out")
     c = sp.add_parser("compare"); c.add_argument("--base", required=True); c.add_argument("--variant", required=True)

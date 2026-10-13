@@ -1,0 +1,16 @@
+{
+ "note": "Stage-3b acceptance criteria, evaluated by tools/rootcause_diag.py --base A0 --variants ... on the ALL-grades cluster-bootstrap 95% CI of the paired variant-minus-base difference. ASSUMED thresholds (the written plan of 12.10 was not available to the author): edit this file to the plan's numbers. guardrail = non-inferiority: the CI bound on the bad side must stay inside `margin` (units = metric * scale). gain = point effect at least `min_effect` in the good direction AND the CI excludes 0. A variant ADVANCES iff every guardrail passes and at least `min_gains` gains pass. Baseline A0 (stage 3a, stand A, ALL): acc3 ~83.5%, scan gap/no gap 97.1/96.1%, chain_precision 3.9%, P(chain|no gap) 40.7% (T1 73.8%), chains/student no gap 0.43.",
+ "min_gains": 2,
+ "criteria": [
+  {"id": "G1", "kind": "guardrail", "label": "level accuracy (acc3) not worse than -1.0 pp", "scope": "ALL", "metric": "acc_category", "scale": 100, "direction": "ge", "margin": -1.0},
+  {"id": "G2", "kind": "guardrail", "label": "theta RMSE not worse than +0.015", "scope": "ALL", "metric": "rmse_theta", "scale": 1, "direction": "le", "margin": 0.015},
+  {"id": "G3", "kind": "guardrail", "label": "mean test length not longer than +0.5 items", "scope": "ALL", "metric": "len_mean", "scale": 1, "direction": "le", "margin": 0.5},
+  {"id": "G4", "kind": "guardrail", "label": "sessions hitting max_items not more than +3 pp", "scope": "ALL", "metric": "hit_max_items", "scale": 100, "direction": "le", "margin": 3.0},
+  {"id": "G5", "kind": "guardrail", "label": "gap still confirmed: confirmed_gap_is_G not worse than -3 pp", "scope": "ALL", "metric": "conf_gap", "scale": 100, "direction": "ge", "margin": -3.0},
+  {"id": "P1", "kind": "gain", "label": "noise: chains per gap-free student fall by >= 0.10", "scope": "ALL", "metric": "chains_ps_nogap", "scale": 1, "direction": "le", "min_effect": -0.10},
+  {"id": "P2", "kind": "gain", "label": "weak students (T1): P(any chain | no gap) falls by >= 10 pp", "scope": "ALL_T1", "metric": "p_chain_nogap", "scale": 100, "direction": "le", "min_effect": -10.0},
+  {"id": "P3", "kind": "gain", "label": "chain_precision (root == G) rises by >= 3 pp", "scope": "ALL", "metric": "chain_precision", "scale": 100, "direction": "ge", "min_effect": 3.0},
+  {"id": "P4", "kind": "gain", "label": "scan selectivity: (scan gap - scan no gap) rises by >= 3 pp", "scope": "ALL", "metric": "scan_signal", "scale": 100, "direction": "ge", "min_effect": 3.0},
+  {"id": "P5", "kind": "gain", "label": "net signal cause(gap) - fp(no gap) rises by >= 3 pp", "scope": "ALL", "metric": "signal_cause", "scale": 100, "direction": "ge", "min_effect": 3.0}
+ ]
+}
