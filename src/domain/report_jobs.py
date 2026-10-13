@@ -313,38 +313,108 @@ class BackupError(RuntimeError):
     """The backup of the snapshots about to be overwritten could not be written: nothing is changed."""
 
 
-# What makes a refresh of one answer fail (the operator must look at it); an inactive task is only skipped.
-REFRESH_FAILURES = ("fetch_errors", "missing_task", "build_errors", "invalid_snapshot", "invalid_live_task")
+# What makes a refresh of one answer fail (the operator must look at it).  Inactive and deleted (404)
+# tasks are skipped with a warning: the old snapshot stays and the report is still rebuilt from it.
+REFRESH_FAILURES = ("fetch_errors", "build_errors", "invalid_snapshot", "invalid_live_task")
 
 
-def default_backup_path(now: Optional[datetime] = None) -> str:
-    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d_%H%M%S")
-    return f"/app/backups/task_snapshots_before_refresh_{stamp}.jsonl"
+def write_snapshot_backup(path: str, rows: Sequence[Dict[str, Any]], *, stamp: str) -> Dict[str, Any]:
+    """JSONL of (answer_id, session_id, task_id, task_snapshot) as they are NOW.
 
-
-def write_snapshot_backup(path: str, rows: Sequence[Dict[str, Any]], *, stamp: str) -> int:
-    """JSONL of (answer_id, session_id, task_id, task_snapshot) as they are NOW; exclusive create, fsync, read back."""
+    ``path`` is a file (exclusive create, fsync, read back) or ``-`` for stdout (the caller redirects it;
+    all logging goes to stderr).  Returns ``{path, rows, sha256, stdout}``.
+    """
+    import hashlib
     import json
     import os
+    import sys
 
+    lines = [
+        json.dumps({
+            "answer_id": str(row["answer_id"]), "session_id": str(row["session_id"]), "task_id": row["task_id"],
+            "task_snapshot": row["old_snapshot"], "backed_up_at": stamp,
+        }, ensure_ascii=False, separators=(",", ":")) + "\n"
+        for row in rows
+    ]
+    blob = "".join(lines).encode("utf-8")
+    digest = hashlib.sha256(blob).hexdigest()
+    if path == "-":
+        try:
+            sys.stdout.write(blob.decode("utf-8"))
+            sys.stdout.flush()
+        except (OSError, ValueError) as exc:
+            raise BackupError(f"cannot write the backup to stdout: {exc}") from exc
+        return {"path": "-", "rows": len(lines), "sha256": digest, "stdout": True}
     try:
-        directory = os.path.dirname(os.path.abspath(path))
-        os.makedirs(directory, exist_ok=True)
-        with open(path, "x", encoding="utf-8") as handle:
-            for row in rows:
-                handle.write(json.dumps({
-                    "answer_id": str(row["answer_id"]), "session_id": str(row["session_id"]),
-                    "task_id": row["task_id"], "task_snapshot": row["old_snapshot"], "backed_up_at": stamp,
-                }, ensure_ascii=False, separators=(",", ":")) + "\n")
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "xb") as handle:
+            handle.write(blob)
             handle.flush()
             os.fsync(handle.fileno())
-        with open(path, "r", encoding="utf-8") as handle:
-            written = sum(1 for _ in handle)
+        with open(path, "rb") as handle:
+            read_back = handle.read()
     except OSError as exc:
         raise BackupError(f"cannot write the backup {path}: {exc}") from exc
-    if written != len(rows):
-        raise BackupError(f"backup {path} holds {written} of {len(rows)} rows")
-    return written
+    if hashlib.sha256(read_back).hexdigest() != digest:
+        raise BackupError(f"backup {path} does not read back identically")
+    return {"path": os.path.abspath(path), "rows": len(lines), "sha256": digest, "stdout": False}
+
+
+def _probe_report_lock(db: Session, session_id: uuid.UUID) -> str:
+    """Take the worker's claim lock on the session's report row (kept until the transaction ends).
+
+    ``ok`` - locked and not generating; ``busy`` - generating, or locked by someone else (SKIP LOCKED);
+    ``no_report`` - there is no report row, so no worker can claim anything for this session.
+    """
+    if db.query(DiagReport.id).filter(DiagReport.session_id == session_id).first() is None:
+        return "no_report"
+    locked = (
+        db.query(DiagReport).filter(DiagReport.session_id == session_id).with_for_update(skip_locked=True).first()
+    )
+    return "busy" if locked is None or locked.generation_status == "generating" else "ok"
+
+
+def _write_snapshots(db: Session, items: Sequence[Dict[str, Any]]) -> List[uuid.UUID]:
+    """One transaction per session: lock its report row, guarded UPDATEs, commit.
+
+    Sets ``item["written"]`` to ``written`` / ``busy`` / ``skipped_concurrent`` and returns the busy sessions
+    (generating or locked report, or an answer changed under us - nothing of such a session is kept).
+    """
+    busy: List[uuid.UUID] = []
+    by_session: Dict[uuid.UUID, List[Dict[str, Any]]] = {}
+    for item in items:
+        by_session.setdefault(item["session_id"], []).append(item)
+    for session_id, group in by_session.items():
+        try:
+            if _probe_report_lock(db, session_id) == "busy":
+                db.rollback()
+                for item in group:
+                    item["written"] = "busy"
+                busy.append(session_id)
+                continue
+            clean = True
+            for item in group:
+                result = db.execute(
+                    update(DiagAnswer)
+                    .where(DiagAnswer.id == item["answer_id"], DiagAnswer.task_snapshot == item["old_snapshot"])
+                    .values(task_snapshot=item["new_snapshot"])
+                )
+                if not result.rowcount:
+                    clean = False
+                    break
+            if clean:
+                db.commit()
+                for item in group:
+                    item["written"] = "written"
+            else:
+                db.rollback()
+                for item in group:
+                    item["written"] = "skipped_concurrent"
+                busy.append(session_id)
+        except Exception:
+            db.rollback()
+            raise
+    return busy
 
 
 def refresh_answer_task_snapshots(
@@ -366,27 +436,28 @@ def refresh_answer_task_snapshots(
     ``task_snapshot`` column is written (``UPDATE ... WHERE id AND task_snapshot = <what was read>``) -
     never ``outcome``, ``student_answer`` or any other column of the append-only journal.
 
-    * every task is fetched BEFORE any write transaction; inactive tasks and live tasks with an empty
-      question or key are skipped; a missing task, a fetch error, an unreadable snapshot or a build error
-      are failures: the answers of such a session are not written and the session is not queued
-      (``allow_partial`` proceeds with what can be refreshed);
+    * every task is fetched BEFORE any write transaction; inactive and deleted (404) tasks are skipped with
+      a warning, live tasks with an empty question or key are failures, so are fetch errors, unreadable
+      snapshots and build errors: the answers of such a session are not written and the session is not
+      queued (``allow_partial`` proceeds with what can be refreshed);
     * an answer is refreshed only if the new content cannot contradict its stored verdict
       (``task_evidence.integrity_flags``); flagged answers are listed and skipped, or with
       ``allow_key_change`` refreshed WITHOUT replacing key and question;
-    * before the first write the old snapshots go to a JSONL backup (``write_snapshot_backup``); no
-      backup, no write; ``restore_task_snapshots`` puts them back;
-    * the report rows of the sessions are locked (``FOR UPDATE SKIP LOCKED``, the worker's own claim
-      lock) during the write: a ``generating`` or locked report is "busy" - not rewritten, run again when
-      the worker is idle; a ``pending`` job simply reads the new snapshots when it is claimed.
-    Dry-run (``execute=False``) fetches and plans but writes nothing.
+    * before the first write the old snapshots go to a backup (``write_snapshot_backup``, mandatory path or
+      ``-``); no backup, no write.  The pre-image also stays in the row (``refresh_history[-1].previous_task``);
+    * one transaction per session holds the worker's claim lock (``FOR UPDATE SKIP LOCKED``) on its report
+      row: a ``generating`` or locked report - or an answer changed meanwhile - makes the session "busy":
+      nothing of it is written, run again when the worker is idle.  A ``pending`` job simply reads the
+      new snapshots when it is claimed.
+    Dry-run (``execute=False``) fetches and plans (and probes the locks) but writes nothing.
     """
     from src.domain.task_evidence import integrity_flags, live_task_problem, read_task, refresh_snapshot
 
     stamp = (now or datetime.now(timezone.utc)).isoformat()
     stats = {
         "examined": 0, "would_refresh": 0, "refreshed": 0, "unchanged": 0, "null_snapshot": 0,
-        "inactive_task": 0, "flagged_skipped": 0, "flagged_refreshed_safe": 0, "held_back": 0, "busy": 0,
-        "skipped_concurrent": 0, "fetch_errors": 0, "missing_task": 0, "build_errors": 0, "invalid_snapshot": 0,
+        "inactive_task": 0, "missing_task": 0, "flagged_skipped": 0, "flagged_refreshed_safe": 0, "held_back": 0,
+        "busy": 0, "skipped_concurrent": 0, "fetch_errors": 0, "build_errors": 0, "invalid_snapshot": 0,
         "invalid_live_task": 0,
     }
     wanted = _unique(str(t).strip() for t in task_ids if str(t).strip())
@@ -418,7 +489,7 @@ def refresh_answer_task_snapshots(
     for answer_id, session_id, task_id, student_answer, outcome, snapshot in answers:
         stats["examined"] += 1
         item = {"answer_id": answer_id, "session_id": session_id, "task_id": task_id, "status": "", "changed": [],
-                "flags": [], "old_snapshot": snapshot, "new_snapshot": None, "reason": ""}
+                "flags": [], "old_snapshot": snapshot, "new_snapshot": None, "reason": "", "written": None}
         items.append(item)
         if not snapshot:
             item["status"] = "null_snapshot"
@@ -428,7 +499,7 @@ def refresh_answer_task_snapshots(
             item["status"], item["reason"] = "fetch_errors", "content-service error / timeout"
             continue
         if task is None:
-            item["status"], item["reason"] = "missing_task", "task not found (404)"
+            item["status"], item["reason"] = "missing_task", "task not found (404): deleted from the bank"
             continue
         problem = live_task_problem(task)
         if problem:
@@ -466,82 +537,67 @@ def refresh_answer_task_snapshots(
         if item["status"] == "refresh" and item["session_id"] in excluded:
             item["status"] = "held_back"
 
-    # 5. write (backup first, report rows locked)
+    # 5. write (backup first; one locked transaction per session)
     busy_sessions: List[uuid.UUID] = []
     backup = None
     to_write = [i for i in items if i["status"] == "refresh"]
-    if to_write:
-        sessions_to_write = _unique(i["session_id"] for i in to_write)
-        reports = {}
-        for chunk in _chunks(sessions_to_write):
-            for report in db.query(DiagReport).filter(DiagReport.session_id.in_(chunk)).all():
-                reports[report.session_id] = report
-        db.rollback()
-        # predicted in dry-run, decided under the lock in execute
-        busy_sessions = [sid for sid in sessions_to_write if sid in reports and reports[sid].generation_status == "generating"]
-        if execute:
-            backup = backup_path or default_backup_path(now)
-            write_snapshot_backup(backup, [i for i in to_write if i["session_id"] not in busy_sessions], stamp=stamp)
-            try:
-                for sid in sessions_to_write:
-                    if sid in busy_sessions or sid not in reports:
-                        continue
-                    locked = (
-                        db.query(DiagReport).filter(DiagReport.session_id == sid)
-                        .with_for_update(skip_locked=True).first()
-                    )
-                    if locked is None or locked.generation_status == "generating":
-                        busy_sessions.append(sid)
-                for item in to_write:
-                    if item["session_id"] in busy_sessions:
-                        item["status"] = "busy"
-                        continue
-                    result = db.execute(
-                        update(DiagAnswer)
-                        .where(DiagAnswer.id == item["answer_id"], DiagAnswer.task_snapshot == item["old_snapshot"])
-                        .values(task_snapshot=item["new_snapshot"])
-                    )
-                    item["status"] = "refreshed" if result.rowcount else "skipped_concurrent"
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise
-        else:
-            for item in to_write:
-                item["status"] = "busy" if item["session_id"] in busy_sessions else "would_refresh"
+    if to_write and not execute:
+        for session_id in _unique(i["session_id"] for i in to_write):
+            if _probe_report_lock(db, session_id) == "busy":
+                busy_sessions.append(session_id)
+            db.rollback()                                                 # the probe's lock is released at once
+        for item in to_write:
+            item["status"] = "busy" if item["session_id"] in busy_sessions else "would_refresh"
+    elif to_write:
+        if not backup_path:
+            raise BackupError("a backup is mandatory with --execute: pass --backup PATH (or - for stdout)")
+        backup = write_snapshot_backup(backup_path, to_write, stamp=stamp)
+        busy_sessions = _write_snapshots(db, to_write)
+        for item in to_write:
+            item["status"] = {"written": "refreshed"}.get(item["written"], item["written"])
 
     for item in items:
         status = item["status"]
         stats[status] = stats.get(status, 0) + 1
         if status in ("refreshed", "would_refresh") and item["flags"]:
             stats["flagged_refreshed_safe"] += 1
+    busy_sessions = list(dict.fromkeys(busy_sessions))
     return {
         "stats": stats,
         "items": items,
         "failed": [{"answer_id": str(i["answer_id"]), "session_id": str(i["session_id"]), "task_id": i["task_id"],
                     "status": i["status"], "reason": i["reason"]} for i in items if i["status"] in REFRESH_FAILURES],
         "inactive_tasks": sorted({i["task_id"] for i in items if i["status"] == "inactive_task"}),
+        "missing_tasks": sorted({i["task_id"] for i in items if i["status"] == "missing_task"}),
         "failed_sessions": sorted(str(s) for s in failed_sessions),
         "excluded_sessions": set(excluded) | set(busy_sessions),
-        "busy_sessions": list(dict.fromkeys(busy_sessions)),
+        "busy_sessions": busy_sessions,
         "backup": backup,
     }
 
 
-def restore_task_snapshots(db: Session, backup_path: str, *, execute: bool = False) -> Dict[str, int]:
-    """Put the snapshots of a ``write_snapshot_backup`` file back (dry-run by default).
+def _requeue(db: Session, session_ids: Sequence[uuid.UUID], *, deterministic: bool) -> Dict[str, List]:
+    return enqueue_forced_report_generations(list(session_ids), deterministic=deterministic, db=db)
+
+
+def restore_task_snapshots(
+    db: Session, backup_path: str, *, execute: bool = False, deterministic: bool = True, requeue: bool = True,
+) -> Dict[str, int]:
+    """Put the snapshots of a backup file back (dry-run by default), then re-queue the affected reports.
 
     A row is restored only if the answer still carries the snapshot this refresh produced
     (``refresh_history[-1].previous_sha256`` equals the backed-up hash) - after a later refresh or a manual
     change it is ``diverged`` and left alone (restore the newest backup first).  The write has the same
-    guard as the refresh: ``WHERE id AND task_snapshot = <current>``.
+    guard as the refresh (``WHERE id AND task_snapshot = <current>``) and runs in one transaction per session
+    holding the report lock; a busy session is skipped (run again when the worker is idle).
     """
     import json
 
     stats = {"rows": 0, "would_restore": 0, "restored": 0, "already_restored": 0, "diverged": 0,
-             "missing_answer": 0, "invalid_rows": 0, "skipped_concurrent": 0}
+             "missing_answer": 0, "invalid_rows": 0, "skipped_concurrent": 0, "busy": 0, "queued": 0}
     with open(backup_path, "r", encoding="utf-8") as handle:
         lines = [line for line in handle.read().splitlines() if line.strip()]
+    plan: List[Dict[str, Any]] = []
     for line in lines:
         stats["rows"] += 1
         try:
@@ -552,11 +608,11 @@ def restore_task_snapshots(db: Session, backup_path: str, *, execute: bool = Fal
         except Exception:
             stats["invalid_rows"] += 1
             continue
-        current = db.query(DiagAnswer.task_snapshot).filter(DiagAnswer.id == answer_id).first()
-        if current is None:
+        found = db.query(DiagAnswer.session_id, DiagAnswer.task_snapshot).filter(DiagAnswer.id == answer_id).first()
+        if found is None:
             stats["missing_answer"] += 1
             continue
-        current = current[0]
+        session_id, current = found
         if current == old:
             stats["already_restored"] += 1
             continue
@@ -565,17 +621,67 @@ def restore_task_snapshots(db: Session, backup_path: str, *, execute: bool = Fal
                 and history[-1].get("previous_sha256") == old.get("sha256")):
             stats["diverged"] += 1
             continue
-        if not execute:
-            stats["would_restore"] += 1
-            continue
-        result = db.execute(
-            update(DiagAnswer).where(DiagAnswer.id == answer_id, DiagAnswer.task_snapshot == current).values(task_snapshot=old)
+        plan.append({"answer_id": answer_id, "session_id": session_id, "old_snapshot": current, "new_snapshot": old,
+                     "written": None})
+    return _finish_restore(db, plan, stats, execute=execute, deterministic=deterministic, requeue=requeue)
+
+
+def restore_latest_refresh(
+    db: Session, *, session_ids: Sequence[uuid.UUID], task_ids: Sequence[str] = (), execute: bool = False,
+    deterministic: bool = True, requeue: bool = True,
+) -> Dict[str, int]:
+    """Undo each selected answer's latest refresh from its OWN ``refresh_history`` (no backup file needed).
+
+    The pre-image kept in the row is verified against ``previous_sha256``; same guard, locks and re-queue as
+    ``restore_task_snapshots``.  Dry-run by default.
+    """
+    from src.domain.task_evidence import restore_previous_snapshot
+
+    stats = {"rows": 0, "would_restore": 0, "restored": 0, "not_refreshed": 0, "unverifiable": 0,
+             "skipped_concurrent": 0, "busy": 0, "queued": 0}
+    wanted = _unique(str(t).strip() for t in task_ids if str(t).strip())
+    plan: List[Dict[str, Any]] = []
+    for chunk in _chunks(_unique(session_ids)):
+        query = db.query(DiagAnswer.id, DiagAnswer.session_id, DiagAnswer.task_snapshot).filter(
+            DiagAnswer.session_id.in_(chunk)
         )
-        stats["restored" if result.rowcount else "skipped_concurrent"] += 1
-    if execute:
-        db.commit()
-    else:
+        if wanted:
+            query = query.filter(DiagAnswer.task_id.in_(wanted))
+        for answer_id, session_id, current in query.order_by(DiagAnswer.session_id, DiagAnswer.id).all():
+            stats["rows"] += 1
+            if not (isinstance(current, dict) and current.get("provenance") == "bank_refresh"):
+                stats["not_refreshed"] += 1
+                continue
+            try:
+                previous = restore_previous_snapshot(current)
+            except ValueError as exc:
+                log.warning("restore-last: answer %s: %s", answer_id, exc)
+                stats["unverifiable"] += 1
+                continue
+            plan.append({"answer_id": answer_id, "session_id": session_id, "old_snapshot": current,
+                         "new_snapshot": previous, "written": None})
+    return _finish_restore(db, plan, stats, execute=execute, deterministic=deterministic, requeue=requeue)
+
+
+def _finish_restore(db, plan, stats, *, execute, deterministic, requeue):
+    if not plan:
         db.rollback()
+        return stats
+    if not execute:
+        stats["would_restore"] += len(plan)
+        db.rollback()
+        return stats
+    busy = _write_snapshots(db, plan)
+    restored_sessions = []
+    for item in plan:
+        key = {"written": "restored"}.get(item["written"], item["written"])
+        stats[key] += 1
+        if item["written"] == "written" and item["session_id"] not in restored_sessions:
+            restored_sessions.append(item["session_id"])
+    if requeue and restored_sessions:
+        outcome = _requeue(db, restored_sessions, deterministic=deterministic)
+        stats["queued"] = len(outcome["queued"])
+    stats["busy_sessions"] = len(busy)
     return stats
 
 

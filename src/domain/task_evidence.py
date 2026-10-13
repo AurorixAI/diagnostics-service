@@ -114,6 +114,8 @@ def refresh_snapshot(snapshot, task_id: str, live_task, *, source: str, refreshe
         'source': source,
         'previous_sha256': snapshot.get('sha256'),
         'previous_provenance': snapshot.get('provenance'),
+        # the pre-image itself (verifiable against previous_sha256): the refresh can be undone from the row alone
+        'previous_task': copy.deepcopy(old_payload),
         'changed_fields': changed,
         'kept_key_and_question': bool(keep_key_and_question),
     })
@@ -158,3 +160,28 @@ def integrity_flags(old_payload: dict, new_payload: dict, student_answer, outcom
     ):
         flags.append('question_changed')
     return flags
+
+
+def restore_previous_snapshot(snapshot) -> dict:
+    """The snapshot as it was before the LATEST refresh, rebuilt from the row's own ``refresh_history``.
+
+    Raises ``ValueError`` when the row was not refreshed, carries no pre-image, or the pre-image does not
+    hash to ``previous_sha256``.  Other envelope keys (e.g. ``backfill_source``) are kept as they are.
+    """
+    if not isinstance(snapshot, dict) or snapshot.get('provenance') != 'bank_refresh':
+        raise ValueError('Not a refreshed snapshot')
+    history = snapshot.get('refresh_history')
+    if not isinstance(history, list) or not history or not isinstance(history[-1], dict):
+        raise ValueError('No refresh history')
+    last = history[-1]
+    previous = last.get('previous_task')
+    if not isinstance(previous, dict):
+        raise ValueError('No stored pre-image')
+    if _digest(previous) != last.get('previous_sha256'):
+        raise ValueError('Pre-image does not match previous_sha256')
+    restored = {k: v for k, v in snapshot.items() if k not in ('task', 'sha256', 'provenance', 'refresh_history')}
+    restored.update({'version': 1, 'provenance': last.get('previous_provenance'), 'task': copy.deepcopy(previous),
+                     'sha256': last['previous_sha256']})
+    if history[:-1]:
+        restored['refresh_history'] = history[:-1]
+    return restored

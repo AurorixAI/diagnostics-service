@@ -5,6 +5,7 @@ In-memory SQLite (JSONB rendered as JSON) by default; no content-service, no mod
 real PostgreSQL (JSONB equality guard, FOR UPDATE SKIP LOCKED); tests that need a second connection holding a
 row lock run only there.
 """
+import hashlib
 import json
 import os
 import uuid
@@ -318,8 +319,9 @@ def test_execute_writes_the_backup_first_and_only_the_snapshot_column(db, tmp_pa
     result = refresh(db, repo, [sid], tmp_path, task_ids=["t1"])
     assert result["refresh"]["refreshed"] == 1 and result["queued"] == 1 and result["exit_code"] == 0
     assert journal(db) == before_journal                                   # outcome / student_answer / category untouched
-    backup = result["refresh_details"]["backup"]
-    rows = [json.loads(line) for line in open(backup, encoding="utf-8")]
+    info = result["refresh_details"]["backup"]
+    assert info["rows"] == 1 and not info["stdout"] and info["sha256"] == hashlib.sha256(open(info["path"], "rb").read()).hexdigest()
+    rows = [json.loads(line) for line in open(info["path"], encoding="utf-8")]
     assert len(rows) == 1 and rows[0]["task_id"] == "t1" and rows[0]["task_snapshot"] == before_snaps[(sid, "t1")]
     snaps = snapshots(db)
     new = snaps[(sid, "t1")]
@@ -329,7 +331,8 @@ def test_execute_writes_the_backup_first_and_only_the_snapshot_column(db, tmp_pa
     old = before_snaps[(sid, "t1")]
     assert new["refresh_history"] == [{
         "at": new["refresh_history"][0]["at"], "source": report_jobs.REFRESH_SOURCE, "previous_sha256": old["sha256"],
-        "previous_provenance": "issued", "changed_fields": ["distractor_meta"], "kept_key_and_question": False,
+        "previous_provenance": "issued", "previous_task": old["task"], "changed_fields": ["distractor_meta"],
+        "kept_key_and_question": False,
     }]
     assert payload["id"] == "t1" and payload["irt_difficulty"] == 0.0
     assert payload["display_options"] == old["task"]["display_options"]
@@ -481,7 +484,7 @@ def test_allow_partial_goes_on_but_still_exits_non_zero(db, tmp_path):
     assert snapshots(db)[(mixed, "t2")] != before[(mixed, "t2")] and snapshots(db)[(mixed, "t3")] == before[(mixed, "t3")]
 
 
-def test_missing_task_invalid_snapshot_and_build_error_are_separate_failures(db, tmp_path, monkeypatch):
+def test_invalid_snapshot_and_build_error_are_separate_failures_a_404_is_not_one(db, tmp_path, monkeypatch):
     gone = add_session(db, tasks=("t1",), minute=1)
     bad = add_session(db, tasks=("t2",), minute=2)
     boom = add_session(db, tasks=("t3",), minute=3)
@@ -501,7 +504,9 @@ def test_missing_task_invalid_snapshot_and_build_error_are_separate_failures(db,
     result = refresh(db, FakeRepo({"t2": repaired("t2"), "t3": repaired("t3")}), [gone, bad, boom], execute=False)
     stats = result["refresh"]
     assert (stats["missing_task"], stats["invalid_snapshot"], stats["build_errors"]) == (1, 1, 1)
-    assert {f["status"] for f in result["refresh_details"]["failed"]} == {"missing_task", "invalid_snapshot", "build_errors"}
+    # a task deleted from the bank (404) is skipped with a warning like an inactive one: not a failure
+    assert {f["status"] for f in result["refresh_details"]["failed"]} == {"invalid_snapshot", "build_errors"}
+    assert result["refresh_details"]["missing_tasks"] == ["t1"]
     assert result["exit_code"] == script.EXIT_FAILURES
 
 
@@ -521,20 +526,40 @@ def test_all_tasks_are_fetched_before_any_write_transaction(db, tmp_path):
     assert states == [False, False]                                         # no transaction held open during the HTTP calls
 
 
-def test_the_update_guard_skips_an_answer_changed_in_the_meantime(db, factory, tmp_path):
-    sid = add_session(db, tasks=("t1",), minute=1)
-    answer_id = db.query(DiagAnswer.id).scalar()
+def test_an_answer_changed_in_the_meantime_makes_the_session_busy_and_nothing_of_it_is_kept(db, factory, tmp_path):
+    sid = add_session(db, tasks=("t1", "t2"), minute=1)
+    other = add_session(db, tasks=("t3",), minute=2)
+    t2_id = db.query(DiagAnswer.id).filter(DiagAnswer.task_id == "t2").scalar()
+    before = snapshots(db)
 
-    def concurrent_edit(_task_id):
-        with factory() as other:
-            row = other.query(DiagAnswer).filter(DiagAnswer.id == answer_id).one()
+    def concurrent_edit(task_id):
+        if task_id != "t2":
+            return
+        with factory() as second:
+            row = second.query(DiagAnswer).filter(DiagAnswer.id == t2_id).one()
             row.task_snapshot = {**row.task_snapshot, "note": "changed by someone else"}
-            other.commit()
+            second.commit()
 
-    result = refresh(db, FakeRepo({"t1": repaired("t1")}, on_fetch=concurrent_edit), [sid], tmp_path)
-    assert result["refresh"]["skipped_concurrent"] == 1 and result["refresh"]["refreshed"] == 0
-    assert snapshots(db)[(sid, "t1")]["note"] == "changed by someone else"
-    assert snapshots(db)[(sid, "t1")]["provenance"] == "issued"
+    repo = FakeRepo({t: repaired(t) for t in ("t1", "t2", "t3")}, on_fetch=concurrent_edit)
+    result = refresh(db, repo, [sid, other], tmp_path)
+    assert result["refresh"]["skipped_concurrent"] == 2 and result["refresh"]["refreshed"] == 1
+    after = snapshots(db)
+    assert after[(sid, "t1")] == before[(sid, "t1")]                         # the whole session was rolled back
+    assert after[(sid, "t2")]["note"] == "changed by someone else" and after[(sid, "t2")]["provenance"] == "issued"
+    assert after[(other, "t3")]["provenance"] == "bank_refresh"              # other sessions are unaffected
+    assert result["exit_code"] == script.EXIT_BUSY and result["refresh_details"]["busy_sessions"] == [sid]
+    assert set(reports(db)) == {other}                                       # the busy session is not queued
+    assert [r[4] for r in result["sessions"] if r[0] == str(sid)] == ["busy (generating): run again when the worker is idle"]
+
+
+def test_backup_is_mandatory_for_a_write(db, tmp_path):
+    sid = add_session(db, tasks=("t1",), minute=1)
+    before = snapshots(db)
+    with pytest.raises(report_jobs.BackupError, match="mandatory"):
+        refresh(db, FakeRepo({"t1": repaired("t1")}), [sid])                  # no backup_path, no default under /app
+    assert snapshots(db) == before and reports(db) == {}
+    with pytest.raises(SystemExit):
+        script.main(["--session-id", str(sid), "--refresh-task-content", "--execute"])
 
 
 def test_no_backup_no_write(db, tmp_path):
@@ -647,3 +672,174 @@ def test_main_restore_mode_and_argument_checks(db, factory, tmp_path, repo_in_ma
                 ["--refresh-task-content"]):
         with pytest.raises(SystemExit):
             script.main(bad)
+
+
+# ── durable undo, backup copy-out, consistency ────────────────────────────────
+
+def test_the_pre_image_is_kept_in_the_row_and_verified_against_its_hash(db, tmp_path):
+    from src.domain.task_evidence import _digest, restore_previous_snapshot
+
+    sid = add_session(db, tasks=("t1",), minute=1)
+    original = snapshots(db)[(sid, "t1")]
+    refresh(db, FakeRepo({"t1": repaired("t1")}), [sid], tmp_path)
+    refreshed = snapshots(db)[(sid, "t1")]
+    last = refreshed["refresh_history"][-1]
+    assert last["previous_task"] == original["task"] and _digest(last["previous_task"]) == last["previous_sha256"]
+    assert restore_previous_snapshot(refreshed) == original                      # exactly the issued snapshot
+    tampered = json.loads(json.dumps(refreshed))
+    tampered["refresh_history"][-1]["previous_task"]["correct_answer"] = "999"
+    with pytest.raises(ValueError, match="previous_sha256"):
+        restore_previous_snapshot(tampered)
+    for broken in (original, {**refreshed, "refresh_history": []}):
+        with pytest.raises(ValueError):
+            restore_previous_snapshot(broken)
+
+
+def test_restore_last_needs_no_file_walks_back_and_requeues(db, tmp_path):
+    sid = add_session(db, tasks=("t1",), minute=1)
+    original = snapshots(db)[(sid, "t1")]
+    refresh(db, FakeRepo({"t1": repaired("t1")}), [sid], tmp_path, name="b1.jsonl")
+    after_first = snapshots(db)[(sid, "t1")]
+    reports(db)[sid].generation_status = "ready"
+    db.commit()
+    refresh(db, FakeRepo({"t1": repaired("t1", distractors=(("3", "СНОВА новое"), ("4", "Забыл знак")))}), [sid],
+            tmp_path, name="b2.jsonl")
+    after_second = snapshots(db)[(sid, "t1")]
+    reports(db)[sid].generation_status = "ready"
+    db.commit()
+
+    dry = script.run_restore_last(session_ids=[sid], execute=False, db=db)
+    assert dry["restore"]["would_restore"] == 1 and dry["exit_code"] == 0
+    assert snapshots(db)[(sid, "t1")] == after_second and reports(db)[sid].generation_status == "ready"   # dry-run: no change
+    done = script.run_restore_last(session_ids=[sid], execute=True, db=db)
+    assert done["restore"]["restored"] == 1 and done["restore"]["queued"] == 1
+    assert snapshots(db)[(sid, "t1")] == after_first
+    row = reports(db)[sid]
+    assert row.generation_status == "pending" and report_jobs.is_deterministic_job(row)       # re-queued, no LLM
+    row.generation_status = "ready"
+    db.commit()
+    assert script.run_restore_last(session_ids=[sid], execute=True, db=db)["restore"]["restored"] == 1
+    assert snapshots(db)[(sid, "t1")] == original
+    again = script.run_restore_last(session_ids=[sid], execute=True, db=db)
+    assert again["restore"]["not_refreshed"] == 1 and again["restore"]["restored"] == 0
+
+
+def test_restore_last_selects_by_tasks_and_reports_unverifiable_rows(db, tmp_path):
+    sid = add_session(db, tasks=("t1", "t2"), minute=1)
+    refresh(db, FakeRepo({"t1": repaired("t1"), "t2": repaired("t2")}), [sid], tmp_path)
+    row = db.query(DiagAnswer).filter(DiagAnswer.task_id == "t2").one()
+    snap = json.loads(json.dumps(row.task_snapshot))
+    snap["refresh_history"][-1]["previous_task"]["correct_answer"] = "999"
+    row.task_snapshot = snap
+    db.commit()
+    result = script.run_restore_last(session_ids=[sid], task_ids=["t1"], execute=True, db=db)
+    assert result["restore"]["restored"] == 1 and result["exit_code"] == 0              # only t1 was selected
+    bad = script.run_restore_last(session_ids=[sid], task_ids=["t2"], execute=True, db=db)
+    assert bad["restore"]["unverifiable"] == 1 and bad["exit_code"] == script.EXIT_FAILURES
+
+
+def test_restore_takes_the_report_lock_skips_a_generating_session_and_requeues_the_rest(db, tmp_path):
+    busy = add_session(db, tasks=("t1",), minute=1)
+    free = add_session(db, tasks=("t2",), minute=2)
+    refresh(db, FakeRepo({"t1": repaired("t1"), "t2": repaired("t2")}), [busy, free], tmp_path)
+    for sid in (busy, free):
+        reports(db)[sid].generation_status = "ready"
+    db.commit()
+    reports(db)[busy].generation_status = "generating"                           # the worker claimed it meanwhile
+    db.commit()
+    refreshed = snapshots(db)
+    result = script.run_restore(backup_path=str(tmp_path / "backup.jsonl"), execute=True, db=db)
+    assert result["restore"]["busy"] == 1 and result["restore"]["restored"] == 1 and result["restore"]["queued"] == 1
+    assert result["exit_code"] == script.EXIT_BUSY
+    after = snapshots(db)
+    assert after[(busy, "t1")] == refreshed[(busy, "t1")] and after[(free, "t2")]["provenance"] == "issued"
+    assert reports(db)[free].generation_status == "pending" and reports(db)[busy].generation_status == "generating"
+
+
+def test_backup_to_stdout_keeps_stdout_clean_and_reports_rows_and_sha(db, capsys):
+    sid = add_session(db, tasks=("t1", "t2"), minute=1)
+    before = snapshots(db)
+    result = refresh(db, FakeRepo({"t1": repaired("t1"), "t2": repaired("t2")}), [sid], backup_path="-")
+    out = capsys.readouterr().out
+    info = result["refresh_details"]["backup"]
+    assert info["stdout"] and info["path"] == "-" and info["rows"] == 2
+    assert hashlib.sha256(out.encode("utf-8")).hexdigest() == info["sha256"]
+    rows = [json.loads(line) for line in out.splitlines()]                      # ONLY the JSONL on stdout
+    assert len(rows) == 2 and {r["task_snapshot"]["task"]["id"] for r in rows} == {"t1", "t2"}
+    assert {r["task_snapshot"]["sha256"] for r in rows} == {before[(sid, "t1")]["sha256"], before[(sid, "t2")]["sha256"]}
+
+
+def test_main_prints_the_docker_cp_command_and_logs_to_stderr(db, factory, tmp_path, repo_in_main, caplog, capsys):
+    import logging
+
+    sid = add_session(db, tasks=("t1",), minute=1)
+    repo_in_main(FakeRepo({"t1": repaired("t1")}))
+    backup = tmp_path / "out.jsonl"
+    with caplog.at_level(logging.INFO, logger="regenerate_reports"):
+        assert script.main(["--session-id", str(sid), "--refresh-task-content", "--execute", "--backup", str(backup)]) == 0
+    text = caplog.text
+    assert f'docker cp "$HOSTNAME":{backup} ./' in text and "rows=1" in text
+    assert hashlib.sha256(backup.read_bytes()).hexdigest() in text
+    assert capsys.readouterr().out == ""                                        # nothing but a requested backup goes to stdout
+    import inspect
+    assert "stream=sys.stderr" in inspect.getsource(script.main)                # --backup - leaves stdout to the JSONL
+
+
+def test_a_deleted_task_is_skipped_with_a_warning_and_the_session_is_still_queued(db, tmp_path):
+    sid = add_session(db, tasks=("t1",), minute=1)
+    before = snapshots(db)
+    result = refresh(db, FakeRepo({}), [sid], tmp_path)                         # the bank answers 404 for t1
+    assert result["refresh"]["missing_task"] == 1 and result["exit_code"] == 0
+    assert result["refresh_details"]["missing_tasks"] == ["t1"] and result["refresh_details"]["failed"] == []
+    assert snapshots(db) == before and result["queued"] == 1
+
+
+def test_sessions_without_a_report_row_are_written_consistently_and_queued_afterwards(db, tmp_path):
+    no_row = add_session(db, tasks=("t1",), minute=1)
+    with_row = add_session(db, tasks=("t2",), report="current", minute=2)
+    dry = refresh(db, FakeRepo({"t1": repaired("t1"), "t2": repaired("t2")}), [no_row, with_row], execute=False)
+    assert dry["refresh"]["would_refresh"] == 2 and dry["refresh"]["busy"] == 0
+    done = refresh(db, FakeRepo({"t1": repaired("t1"), "t2": repaired("t2")}), [no_row, with_row], tmp_path)
+    assert done["refresh"]["refreshed"] == 2 and done["queued"] == 2
+    assert set(reports(db)) == {no_row, with_row}
+
+
+def test_dry_run_probes_the_same_busy_state_as_execute(db, tmp_path):
+    busy = add_session(db, tasks=("t1",), report="generating", minute=1)
+    result = refresh(db, FakeRepo({"t1": repaired("t1")}), [busy], execute=False)
+    assert result["refresh"]["busy"] == 1 and result["exit_code"] == script.EXIT_BUSY
+
+
+@needs_postgres
+def test_dry_run_sees_a_report_row_locked_by_the_worker(db, factory):
+    sid = add_session(db, tasks=("t1",), report="pending", minute=1)
+    with factory() as worker:
+        worker.query(DiagReport).filter(DiagReport.session_id == sid).with_for_update().first()
+        result = refresh(db, FakeRepo({"t1": repaired("t1")}), [sid], execute=False)
+        assert result["refresh"]["busy"] == 1 and result["exit_code"] == script.EXIT_BUSY
+        worker.rollback()
+    assert refresh(db, FakeRepo({"t1": repaired("t1")}), [sid], execute=False)["refresh"]["would_refresh"] == 1
+
+
+@needs_postgres
+def test_the_documented_plain_sql_fallback_restores_the_previous_snapshot(db, factory, tmp_path):
+    import re
+    from sqlalchemy import text
+
+    sid = add_session(db, tasks=("t1",), minute=1)
+    answer_id = db.query(DiagAnswer.id).scalar()
+    original = snapshots(db)[(sid, "t1")]
+    refresh(db, FakeRepo({"t1": repaired("t1")}), [sid], tmp_path, name="b1.jsonl")
+    reports(db)[sid].generation_status = "ready"
+    db.commit()
+    refresh(db, FakeRepo({"t1": repaired("t1", distractors=(("3", "СНОВА новое"), ("4", "Забыл знак")))}), [sid],
+            tmp_path, name="b2.jsonl")
+    sql = re.search(r"(UPDATE diag_answers a SET.*?WHERE a\.id = s\.id;)", script.__doc__, re.S).group(1)
+    sql = re.sub(r"^ {9}", "", sql, flags=re.M).replace("<answer uuid>", str(answer_id))
+    db.execute(text(sql))
+    db.commit()
+    step_back = snapshots(db)[(sid, "t1")]
+    assert step_back["provenance"] == "bank_refresh" and len(step_back["refresh_history"]) == 1     # one refresh undone
+    db.execute(text(sql))
+    db.commit()
+    assert snapshots(db)[(sid, "t1")] == original                                                  # all of them

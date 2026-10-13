@@ -70,7 +70,37 @@ selected sessions.
     python -m scripts.regenerate_reports --affected-by-tasks ds_llm_0007,ds_llm_0031 --refresh-task-content
     python -m scripts.regenerate_reports --affected-by-tasks-file fixed_tasks.txt --refresh-task-content --execute
     python -m scripts.regenerate_reports --session-id 3f1c...-... --session-id 9a2b...-... --execute
-    python -m scripts.regenerate_reports --restore-from /app/backups/task_snapshots_before_refresh_<ts>.jsonl
+    python -m scripts.regenerate_reports --restore-from <backup.jsonl> --execute
+
+RUNBOOK for --refresh-task-content (it rewrites diag_answers.task_snapshot; outcome / student_answer never)
+  0. Image: run it ONLY after the new image is deployed on EVERY worker (an older image cannot read a
+     "bank_refresh" snapshot and would fail those reports).  Do NOT roll the image back after --execute;
+     restore the snapshots first (step 5) if you must.
+  1. Worker idle: run when the report worker has nothing pending/generating.  The script locks each
+     session's report row like the worker's claim (SKIP LOCKED) and refuses a generating session (exit 4,
+     "busy": nothing of it is written, run again); a pending job simply reads the new snapshots.
+  2. Dry-run first (no --execute): per answer the changed fields and flags (key_changed, ...); inactive
+     / deleted (404) tasks are skipped with a warning; failures (fetch/build/unreadable/blank task) exit 2.
+  3. Backup: --execute REQUIRES --backup PATH|-.  A file lives inside the container, copy it out at once:
+         docker exec <svc> python -m scripts.regenerate_reports <selectors> --refresh-task-content --execute --backup /tmp/b.jsonl
+         docker cp "$HOSTNAME":/tmp/b.jsonl ./        (the script prints the exact command, rows and sha256)
+     or stream it to the host:  docker exec <svc> python -m scripts.regenerate_reports ... --backup - > backup.jsonl
+  4. The pre-image also stays in each row: snapshot.refresh_history[-1].previous_task (verified against
+     previous_sha256), so the backup file is a second copy, not the only one.
+  5. Undo: --restore-last with the same selectors (from the rows themselves), or --restore-from backup.jsonl
+     (newest backup first; rows that changed since are "diverged" and left alone).  Both are dry-run by
+     default, take the report lock, and re-queue the affected reports (deterministic).
+  6. Plain-SQL fallback (psql, per answer; the previous snapshot is rebuilt from the history):
+         UPDATE diag_answers a SET task_snapshot = (a.task_snapshot - 'task' - 'sha256' - 'provenance' - 'refresh_history')
+             || jsonb_build_object('version', 1, 'task', h->'previous_task', 'sha256', h->>'previous_sha256',
+                'provenance', h->>'previous_provenance')
+             || CASE WHEN jsonb_array_length(a.task_snapshot->'refresh_history') > 1
+                     THEN jsonb_build_object('refresh_history', (a.task_snapshot->'refresh_history') - -1) ELSE '{}'::jsonb END
+         FROM (SELECT id, task_snapshot->'refresh_history'->-1 AS h FROM diag_answers
+               WHERE id = '<answer uuid>' AND task_snapshot->>'provenance' = 'bank_refresh') s
+         WHERE a.id = s.id;
+     (or load the backup rows: UPDATE ... SET task_snapshot = '<old json>'::jsonb WHERE id = '<answer uuid>').
+     Then re-queue the reports: --session-id <uuid> --execute.
 """
 from __future__ import annotations
 
@@ -94,6 +124,7 @@ from src.domain.report_jobs import (  # noqa: E402
     find_regeneration_targets,
     list_stale_report_sessions,
     refresh_answer_task_snapshots,
+    restore_latest_refresh,
     restore_task_snapshots,
 )
 
@@ -212,16 +243,49 @@ def run(
             db.close()
 
 
-def run_restore(*, backup_path: str, execute: bool, db: Any = None) -> dict:
+def _restore_exit_code(stats: dict) -> int:
+    if stats.get("invalid_rows") or stats.get("diverged") or stats.get("unverifiable"):
+        return EXIT_FAILURES
+    if stats.get("busy") or stats.get("skipped_concurrent"):
+        return EXIT_BUSY
+    return EXIT_OK
+
+
+def run_restore(*, backup_path: str, execute: bool, with_narrative: bool = False, db: Any = None) -> dict:
+    """Snapshots back from a --backup file; the affected reports are re-queued (deterministic by default)."""
     own_session = db is None
     db = db or SessionLocal()
     try:
-        stats = restore_task_snapshots(db, backup_path, execute=execute)
+        stats = restore_task_snapshots(db, backup_path, execute=execute, deterministic=not with_narrative)
         return {"mode": "execute" if execute else "dry-run", "backup": backup_path, "restore": stats,
-                "exit_code": EXIT_FAILURES if stats["invalid_rows"] or stats["diverged"] else EXIT_OK}
+                "exit_code": _restore_exit_code(stats)}
     finally:
         if own_session:
             db.close()
+
+
+def run_restore_last(
+    *, session_ids: Sequence[uuid.UUID], task_ids: Sequence[str] = (), execute: bool, with_narrative: bool = False,
+    db: Any = None,
+) -> dict:
+    """Undo the latest refresh of the selected answers from their own refresh_history (no file needed)."""
+    own_session = db is None
+    db = db or SessionLocal()
+    try:
+        stats = restore_latest_refresh(
+            db, session_ids=_sessions_for(db, session_ids, task_ids), task_ids=task_ids, execute=execute,
+            deterministic=not with_narrative,
+        )
+        return {"mode": "execute" if execute else "dry-run", "restore": stats, "exit_code": _restore_exit_code(stats)}
+    finally:
+        if own_session:
+            db.close()
+
+
+def _sessions_for(db: Any, session_ids: Sequence[uuid.UUID], task_ids: Sequence[str]) -> List[uuid.UUID]:
+    targets = find_regeneration_targets(db, session_ids=list(session_ids), task_ids=list(task_ids))
+    db.rollback()
+    return [t["session_id"] for t in targets if not t["skip"]]
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -242,17 +306,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="targeted: first refresh the affected answers' task snapshots from content-service. "
                              "Needs the NEW image on every worker (an older image cannot read a refreshed snapshot); "
                              "run it when the report worker is idle")
-    parser.add_argument("--backup", metavar="PATH", default=None,
-                        help="JSONL backup of the snapshots about to be overwritten (default /app/backups/...); "
-                             "--execute refuses to write without it")
+    parser.add_argument("--backup", metavar="PATH|-", default=None,
+                        help="MANDATORY with --execute: JSONL backup of the snapshots about to be overwritten. A file "
+                             "inside the container (then copy it out: docker cp \"$HOSTNAME\":PATH ./) or - for stdout "
+                             "(logs go to stderr): docker exec ... --backup - > backup.jsonl")
     parser.add_argument("--allow-key-change", action="store_true",
                         help="refresh answers whose key / question changed or whose verdict would contradict the new "
                              "key - WITHOUT replacing key and question (default: such answers are skipped)")
     parser.add_argument("--allow-partial", action="store_true",
                         help="queue sessions although some of their answers failed to refresh (exit code 3)")
     parser.add_argument("--restore-from", metavar="BACKUP", default=None,
-                        help="put the snapshots of a --backup file back (dry-run unless --execute); "
-                             "restore the newest backup first")
+                        help="put the snapshots of a --backup file back (dry-run unless --execute); restore the newest "
+                             "backup first; the affected reports are re-queued")
+    parser.add_argument("--restore-last", action="store_true",
+                        help="undo the latest refresh of the selected answers (--session-id / --affected-by-tasks[-file]) "
+                             "from the pre-image kept in each row's refresh_history - no backup file needed "
+                             "(dry-run unless --execute); the affected reports are re-queued")
     args = parser.parse_args(argv)
     task_ids = parse_task_ids(args.affected_by_tasks)
     for path in args.affected_by_tasks_file:
@@ -264,16 +333,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--refresh-task-content needs --session-id and/or --affected-by-tasks[-file]")
     if (args.allow_key_change or args.allow_partial or args.backup) and not args.refresh_task_content:
         parser.error("--backup / --allow-key-change / --allow-partial belong to --refresh-task-content")
-    if args.restore_from and (targeted or args.refresh_task_content):
+    if args.refresh_task_content and args.execute and not args.backup:
+        parser.error("--backup PATH (or - for stdout) is mandatory with --refresh-task-content --execute")
+    if args.restore_from and (targeted or args.refresh_task_content or args.restore_last):
         parser.error("--restore-from is a mode of its own")
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if args.restore_last and (args.refresh_task_content or not targeted):
+        parser.error("--restore-last needs --session-id and/or --affected-by-tasks[-file] and is a mode of its own")
+    # stdout may carry the backup (--backup -): every log line goes to stderr
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
 
-    if args.restore_from:
-        result = run_restore(backup_path=args.restore_from, execute=args.execute)
-        log.info("%s restore from %s: %s", result["mode"], args.restore_from,
-                 " ".join(f"{k}={v}" for k, v in result["restore"].items()))
+    if args.restore_from or args.restore_last:
+        if args.restore_from:
+            result = run_restore(backup_path=args.restore_from, execute=args.execute, with_narrative=args.with_narrative)
+            label = f"restore from {args.restore_from}"
+        else:
+            result = run_restore_last(session_ids=args.session_id, task_ids=task_ids, execute=args.execute,
+                                      with_narrative=args.with_narrative)
+            label = "restore-last (from refresh_history)"
+        log.info("%s %s: %s", result["mode"], label, " ".join(f"{k}={v}" for k, v in result["restore"].items()))
         if not args.execute:
-            log.info("dry-run only; add --execute to write the old snapshots back (then re-queue the reports)")
+            log.info("dry-run only; add --execute to write the old snapshots back (the reports are then re-queued)")
+        if result["exit_code"]:
+            log.error("exit code %d (2 = rows that could not be restored: diverged / invalid / unverifiable; "
+                      "4 = busy report or concurrent change: run again when the worker is idle)", result["exit_code"])
         return result["exit_code"]
 
     try:
@@ -303,9 +385,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     if details is not None:
         log.info("task snapshots (%s): %s", "written" if args.execute else "would be written",
                  " ".join(f"{k}={v}" for k, v in details["stats"].items() if v))
-        if details["backup"]:
-            log.info("backup of the overwritten snapshots: %s  (restore: --restore-from %s --execute)",
-                     details["backup"], details["backup"])
+        backup = details["backup"]
+        if backup:
+            if backup["stdout"]:
+                log.info("backup of the overwritten snapshots written to stdout: rows=%d sha256=%s",
+                         backup["rows"], backup["sha256"])
+            else:
+                log.info("backup of the overwritten snapshots: %s rows=%d sha256=%s", backup["path"], backup["rows"],
+                         backup["sha256"])
+                log.info('copy it out of the container:  docker cp "$HOSTNAME":%s ./', backup["path"])
+            log.info("undo: --restore-last (from the rows themselves) or --restore-from <backup> --execute")
         shown = 0
         for item in details["items"]:
             if (item["changed"] or item["flags"] or item["status"] in REFRESH_FAILURES) and shown < 1000:
@@ -315,14 +404,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                          item["flags"] or "-", item["reason"])
         if details["inactive_tasks"]:
             log.warning("inactive tasks skipped: %s", ", ".join(details["inactive_tasks"]))
+        if details["missing_tasks"]:
+            log.warning("tasks deleted from the bank (404) skipped: %s", ", ".join(details["missing_tasks"]))
         for failure in details["failed"]:
             log.error("FAILED answer %(answer_id)s task %(task_id)s session %(session_id)s: %(status)s %(reason)s", failure)
         if details["busy_sessions"]:
-            log.warning("busy (report generating or locked) - NOT rewritten, run again when the worker is idle: %s",
+            log.warning("busy (report generating / locked, or an answer changed meanwhile) - NOT rewritten, not queued; "
+                        "run again when the worker is idle: %s",
                         ", ".join(str(s) for s in details["busy_sessions"]))
     if result["exit_code"]:
         log.error("exit code %d (2 = refresh failures, those sessions not queued; 3 = failures with --allow-partial; "
-                  "4 = busy sessions)", result["exit_code"])
+                  "4 = busy sessions, run again when the worker is idle)", result["exit_code"])
     if not args.execute:
         log.info("dry-run only; add --execute to %squeue them", "refresh the snapshots and " if args.refresh_task_content else "")
     return result["exit_code"]
