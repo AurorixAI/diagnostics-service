@@ -109,17 +109,20 @@ def test_unicode_answer_is_mapped_to_the_latex_option_display():
 def test_rebuilt_report_explains_a_unicode_snapshot_answer_against_latex_distractors(monkeypatch):
     task = {
         "id": "G9_TB_17_2_1", "question_text": "Переведите 45° в радианы", "question_latex": None,
-        "correct_answer": r"$\dfrac{\pi}{4}$", "correct_answer_latex": r"$\dfrac{\pi}{4}$", "distractor_meta": G9_TB_17_2_1,
-        "_option_pairs": [(r"$\dfrac{\pi}{4}$", r"$\dfrac{\pi}{4}$"), (r"$\dfrac{\pi}{45}$", r"$\dfrac{\pi}{45}$")], "_answer_type": "mcq",
+        "correct_answer": r"$\dfrac{\pi}{4}$", "correct_answer_latex": r"$\dfrac{\pi}{4}$",
+        "distractor_meta": G9_TB_17_2_1,
+        "_option_pairs": [(r"$\dfrac{\pi}{4}$", r"$\dfrac{\pi}{4}$"),
+        (r"$\dfrac{\pi}{45}$", r"$\dfrac{\pi}{45}$")], "_answer_type": "mcq",
     }
     monkeypatch.setattr(rg, "_load_task_context", lambda answer: (dict(task), "snapshot"))
     answer = NS(
         id="a1", session_id=None, task_id="G9_TB_17_2_1", skill_id="S1", topic_id="T1", outcome=0,
-        eval_category="distractor", student_answer="$π/45$", task_snapshot=None, answered_at=None, time_ms=1, phase="navigation",
+        eval_category="distractor", student_answer="$π/45$", task_snapshot=None, answered_at=None, time_ms=1,
+        phase="navigation",
         is_deep_scan=False,
     )
     patterns = rg._build_error_patterns([answer], {"S1": {"name_ru": "Радианы"}})
     assert len(patterns) == 1
     assert patterns[0]["distractor_explanation"] == "explanation 1"
-    assert patterns[0]["student_answer"] == "$π/45$"                                  # the stored answer is shown as it was
+    assert patterns[0]["student_answer"] == "$π/45$"                   # the stored answer is shown as it was
     assert patterns[0]["student_answer_latex"] == r"$\dfrac{\pi}{45}$"

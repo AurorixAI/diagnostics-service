@@ -172,7 +172,8 @@ def test_report_key_is_idempotent_and_does_not_collapse_different_values():
 
 @pytest.mark.parametrize("snapshot, bank", [
     # prod 13.10: G9_TB_17_2_1 (options shown as Unicode, distractor_meta in LaTeX)
-    ("$π/45$", r"$\dfrac{\pi}{45}$"), ("$π/8$", r"$\dfrac{\pi}{8}$"), ("$π/4$", r"$\dfrac{\pi}{4}$"), ("$45π$", r"$45\pi$"),
+    ("$π/45$", r"$\dfrac{\pi}{45}$"), ("$π/8$", r"$\dfrac{\pi}{8}$"), ("$π/4$", r"$\dfrac{\pi}{4}$"),
+    ("$45π$", r"$45\pi$"),
     # prod 13.10: G9_TB_21_252_4, every wrong option and the correct one
     ("x = -π/2 + 2πk, k ∈ Z", r"$x = -\dfrac{\pi}{2} + 2\pi k, k \in \mathbb{Z}$"),
     ("x = -4π + 2πk, k ∈ Z", r"$x = -4\pi + 2\pi k, k \in \mathbb{Z}$"),
@@ -181,9 +182,11 @@ def test_report_key_is_idempotent_and_does_not_collapse_different_values():
     # one symbol, two spellings
     ("π", r"\pi"), ("2π", r"2\pi"), ("∞", r"\infty"), ("(-∞; 3]", r"(-\infty; 3]"), ("x ∈ (0; 1)", r"x \in (0; 1)"),
     ("x ∉ A", r"x \notin A"), ("x ≤ 5", r"x \le 5"), ("x ≤ 5", r"x \leq 5"), (r"x \le 5", r"x \leq 5"),
-    ("x ≥ 5", r"x \ge 5"), ("x ≥ 5", r"x \geq 5"), ("a ≠ 0", r"a \ne 0"), ("a ≠ 0", r"a \neq 0"), ("x<=5", "x ≤ 5"), ("x>=5", "x ≥ 5"),
+    ("x ≥ 5", r"x \ge 5"), ("x ≥ 5", r"x \geq 5"), ("a ≠ 0", r"a \ne 0"), ("a ≠ 0", r"a \neq 0"), ("x<=5", "x ≤ 5"),
+    ("x>=5", "x ≥ 5"),
     ("2·3", r"2 \cdot 3"), ("2⋅3", r"2\cdot3"), ("2×3", r"2 \times 3"), ("−3", "-3"), ("a − b", "a - b"),
-    ("±1", r"\pm 1"), ("∅", r"\emptyset"), ("∅", r"\varnothing"), ("α", r"\alpha"), ("sin α", r"\sin \alpha"), ("2β + γ", r"2\beta + \gamma"),
+    ("±1", r"\pm 1"), ("∅", r"\emptyset"), ("∅", r"\varnothing"), ("α", r"\alpha"), ("sin α", r"\sin \alpha"),
+    ("2β + γ", r"2\beta + \gamma"),
     ("30°", r"30^{\circ}"), ("30°", r"30^\circ"), ("x²", "x^{2}"), ("x²", "x^2"), ("(x+1)³", "(x+1)^3"),
     ("tg x", r"\operatorname{tg} x"), ("ctg 2x", r"\operatorname{ctg}2x"), ("arctg 1", r"\operatorname{arctg} 1"),
     ("arcsin x", r"\arcsin x"), ("lg 2", r"\lg 2"), ("max", r"\max"),
@@ -196,8 +199,10 @@ def test_report_key_is_idempotent_and_does_not_collapse_different_values():
     ("√(x+1)", r"\sqrt{x+1}"), ("√3/2", r"\dfrac{\sqrt{3}}{2}"), ("-√2/2", r"-\dfrac{\sqrt{2}}{2}"),
     ("(-∞; -√2/2) ∪ (√2/2; +∞)", r"(-\infty; -\dfrac{\sqrt{2}}{2}) \cup (\dfrac{\sqrt{2}}{2}; +\infty)"),
     # a fraction of two single atoms
-    ("1/2", r"\frac{1}{2}"), ("1/2", r"\dfrac{1}{2}"), ("-3/4", r"-\dfrac{3}{4}"), ("π/45", r"\frac{\pi}{45}"), ("5π/2", r"\frac{5\pi}{2}"),
-    ("x/2", r"\frac{x}{2}"), ("2x/3", r"\frac{2x}{3}"), ("1/x", r"\frac{1}{x}"), ("a/b", r"\dfrac{a}{b}"), ("1/√2", r"\frac{1}{\sqrt{2}}"),
+    ("1/2", r"\frac{1}{2}"), ("1/2", r"\dfrac{1}{2}"), ("-3/4", r"-\dfrac{3}{4}"), ("π/45", r"\frac{\pi}{45}"),
+    ("5π/2", r"\frac{5\pi}{2}"),
+    ("x/2", r"\frac{x}{2}"), ("2x/3", r"\frac{2x}{3}"), ("1/x", r"\frac{1}{x}"), ("a/b", r"\dfrac{a}{b}"),
+    ("1/√2", r"\frac{1}{\sqrt{2}}"),
     ("π / 6", r"\frac{\pi}{6}"), ("sin(π/6)", r"\sin\left(\dfrac{\pi}{6}\right)"), ("x^{1/2}", r"x^{\frac{1}{2}}"),
     ("(1/2; 3]", r"(\frac{1}{2}; 3]"), ("x = 1/2", r"x = \frac{1}{2}"),
     ("x = π/6, 5π/6", r"x = \frac{\pi}{6}, \frac{5\pi}{6}"), ("1/2; 3/4", r"\frac{1}{2}; \frac{3}{4}"),
@@ -210,34 +215,52 @@ def test_report_key_merges_unicode_and_latex_spellings_of_the_same_value(snapsho
 
 @pytest.mark.parametrize("first, second", [
     # a different number / symbol
-    ("π/4", r"\frac{\pi}{2}"), ("π/4", r"\frac{4}{\pi}"), ("1/2", r"\frac{2}{1}"), ("1/2", r"\frac{1}{3}"), ("a/b", "b/a"),
-    ("5π/2", r"\frac{5}{2\pi}"), ("√3", r"\sqrt{2}"), ("√3", "3"), ("α", "β"), ("30°", "30"), ("x²", "x^3"), ("x³", "x^{23}"),
+    ("π/4", r"\frac{\pi}{2}"), ("π/4", r"\frac{4}{\pi}"), ("1/2", r"\frac{2}{1}"), ("1/2", r"\frac{1}{3}"),
+    ("a/b", "b/a"),
+    ("5π/2", r"\frac{5}{2\pi}"), ("√3", r"\sqrt{2}"), ("√3", "3"), ("α", "β"), ("30°", "30"), ("x²", "x^3"),
+    ("x³", "x^{23}"),
     # same value, different notation: the key never parses or simplifies
-    ("2π/3", r"\frac{2}{3}\pi"),            # 2π/3 is (2π)/3, \frac{2}{3}\pi is 2/3 times π: equal in value, not in notation
+    # 2π/3 is (2π)/3 and \frac{2}{3}\pi is 2/3 times π: equal in value, not in notation
+    ("2π/3", r"\frac{2}{3}\pi"),
     ("1/2", "0,5"), ("1/2", "0.5"), ("-π/2", r"\frac{-\pi}{2}"), ("1 2/3", r"1\frac{2}{3}"),
-    # a mixed number is not the fraction of its digits (found on the real bank: 24 groups such as `1 3/25` vs `\dfrac{13}{25}`)
+    # a mixed number is not the fraction of its digits (real bank: 24 groups such as `1 3/25` vs `\dfrac{13}{25}`)
     ("1 3/25", r"\dfrac{13}{25}"), ("1 3/25", "13/25"), ("4 1/48", r"\frac{41}{48}"), ("-2 5/7", r"-\dfrac{25}{7}"),
     (r"1\,3/25", r"\frac{13}{25}"), ("2 1/2", r"\frac{21}{2}"),
-    ("1 125/200", "1125/200"),               # thousands grouping or a mixed number? unknowable, so the fraction is not recognised
+    # thousands grouping or a mixed number? unknowable, so the fraction is not recognised
+    ("1 125/200", "1125/200"),
     # composite numerator / denominator are not unfolded (and must not raise)
-    ("(x+1)/2", r"\frac{x+1}{2}"), ("x/2 + 1", r"\frac{x+1}{2}"), ("2πk/3", r"\frac{2\pi}{3}k"), ("1/(2x)", r"\frac{1}{2x}"),
+    ("(x+1)/2", r"\frac{x+1}{2}"), ("x/2 + 1", r"\frac{x+1}{2}"), ("2πk/3", r"\frac{2\pi}{3}k"),
+    ("1/(2x)", r"\frac{1}{2x}"),
     ("x^2/2", r"\frac{x^2}{2}"), ("a/bc", r"\frac{a}{b}c"),
     # a slash that is not a plain fraction of two atoms
     ("1/2x", r"\frac{1}{2x}"), ("1/2x", r"\frac{1}{2}x"), ("1/2π", r"\frac{1}{2\pi}"), ("x/2y", r"\frac{x}{2y}"),
-    ("1/2/3", r"\frac{1}{2}/3"), ("x^1/2", r"x^{\frac{1}{2}}"), ("x^-1/2", r"x^{-\frac{1}{2}}"), ("0.5/2", r"\frac{5}{2}"),
-    ("1,5/2", r"\frac{5}{2}"), ("3/4,5", r"\frac{3}{4},5"), ("sin 1/2", r"\sin\frac{1}{2}"), ("30°/2", r"\frac{30^{\circ}}{2}"),
+    ("1/2/3", r"\frac{1}{2}/3"), ("x^1/2", r"x^{\frac{1}{2}}"), ("x^-1/2", r"x^{-\frac{1}{2}}"),
+    ("x^+1/2", r"x^{+\frac{1}{2}}"),
+    # a sign after `/` (or after a division sign) does not start a new fraction: 8/-4/2 is (8/-4)/2, not 8/(-4/2)
+    ("8/-4/2", r"8/-\frac{4}{2}"), ("a/-x/√3", r"a/-\frac{x}{\sqrt{3}}"), ("2/-3/4", r"2/-\frac{3}{4}"),
+    ("1/+2/3", r"1/+\frac{2}{3}"), ("a/±b/c", r"a/±\frac{b}{c}"), ("a÷-b/c", r"a÷-\frac{b}{c}"),
+    ("a:-b/c", r"a:-\frac{b}{c}"), ("8/--4/2", r"8/--\frac{4}{2}"), ("a/∓x/2", r"a/∓\frac{x}{2}"),
+    # `:` and `÷` are division signs as often as separators: not a left boundary, like `/` in `a/b/c`
+    ("8:4/2", r"8:\frac{4}{2}"), ("8÷4/2", r"8÷\frac{4}{2}"), ("a:b/c", r"a:\frac{b}{c}"),
+    ("0.5/2", r"\frac{5}{2}"),
+    ("1,5/2", r"\frac{5}{2}"), ("3/4,5", r"\frac{3}{4},5"), ("sin 1/2", r"\sin\frac{1}{2}"),
+    ("30°/2", r"\frac{30^{\circ}}{2}"),
     # a number set only right after a membership sign
-    ("Z", r"\mathbb{Z}"), ("Z = 5", r"\mathbb{Z} = 5"), ("Z ∈ A", r"\mathbb{Z} \in A"), ("k ∈ Zx", r"k \in \mathbb{Z}x"),
+    ("Z", r"\mathbb{Z}"), ("Z = 5", r"\mathbb{Z} = 5"), ("Z ∈ A", r"\mathbb{Z} \in A"),
+    ("k ∈ Zx", r"k \in \mathbb{Z}x"),
     ("x ∈ z", r"x \in \mathbb{Z}"), ("x ∈ Z", "x ∈ R"), ("x ∈ Z", "x ∈ N"), ("x ∉ Z", r"x \in \mathbb{Z}"),
     ("ℤ", "ℝ"), (r"\mathbb{Z}", r"\mathbb{N}"), ("M ∈ Z", "M ∈ M"),
     # relations and signs
-    (r"x \le 5", "x < 5"), ("x ≤ 5", "x < 5"), ("x ≤ 5", "x ≥ 5"), ("x ≥ 5", "x > 5"), ("a ≠ 0", "a = 0"), ("-1", "±1"), ("−1", "±1"),
+    (r"x \le 5", "x < 5"), ("x ≤ 5", "x < 5"), ("x ≤ 5", "x ≥ 5"), ("x ≥ 5", "x > 5"), ("a ≠ 0", "a = 0"),
+    ("-1", "±1"), ("−1", "±1"),
     ("x ∈ A", "x ∉ A"), ("∞", "-∞"), ("(1; 2)", "(1; 2]"), ("2·3", "23"), ("a·b", "a+b"), ("<=", "<"),
     # square roots: a radicand that is a guess stays unmatched
-    ("√2x", r"\sqrt{2x}"), ("√2x", r"\sqrt{2}x"), ("√12", r"\sqrt{1}2"), ("√x²", r"\sqrt{x^2}"), ("√(x+1)", r"\sqrt{x}+1"),
+    ("√2x", r"\sqrt{2x}"), ("√2x", r"\sqrt{2}x"), ("√12", r"\sqrt{1}2"), ("√x²", r"\sqrt{x^2}"),
+    ("√(x+1)", r"\sqrt{x}+1"),
     ("√12.5", r"\sqrt{12.5}"),
     # functions and Greek letters that are not the same name / glyph
-    ("tg x", "ctg x"), ("tg x", r"\operatorname{ctg} x"), ("sin x", "cos x"), ("arcsin x", r"\arccos x"), (r"\phi", "φ"), (r"\varepsilon", "ε"),
+    ("tg x", "ctg x"), ("tg x", r"\operatorname{ctg} x"), ("sin x", "cos x"), ("arcsin x", r"\arccos x"),
+    (r"\phi", "φ"), (r"\varepsilon", "ε"),
     ("sin² x", r"\sin x^2"),
 ])
 def test_report_key_keeps_different_notations_and_values_apart(first, second):
@@ -245,16 +268,20 @@ def test_report_key_keeps_different_notations_and_values_apart(first, second):
 
 
 @pytest.mark.parametrize("value", [
-    "", "/", "//", "1/", "/2", "√", "√(", "√()", "√(x", "()/2", "(/)", "∈", "∈ Z", "x ∈", r"\mathbb", r"\mathbb{", r"\frac{", r"\frac{1}{",
-    r"\sqrt", r"\sqrt{", "^{", "1,", ", 2", "1, 2/3", "·", "−", "<=", "<=>", "1/2" * 400, "√" * 50, "x" * 5000 + "/" + "y" * 5000,
+    "", "/", "//", "1/", "/2", "√", "√(", "√()", "√(x", "()/2", "(/)", "∈", "∈ Z", "x ∈", r"\mathbb", r"\mathbb{",
+    r"\frac{", r"\frac{1}{", r"\sqrt", r"\sqrt{", "^{", "1,", ", 2", "1, 2/3", "·", "−", "<=", "<=>",
+    "1/2" * 400, "√" * 50, "x" * 5000 + "/" + "y" * 5000, "8/-4/2", "-/-", "+-±∓", "/-", ":4/2", "÷4/2",
 ])
 def test_report_key_never_raises_on_odd_input(value):
     assert isinstance(report_answer_key(value), str)
 
 
 def test_report_key_stays_idempotent_with_the_new_spellings():
-    for value in (r"$\dfrac{\pi}{45}$", "π/45", "x = -5π/2 + πk, k ∈ Z", r"k \in \mathbb{Z}", "√3/2", r"\sqrt3", "x ≤ 5", "x <= 5", "30°",
-                  "x²", "1/2x", "(x+1)/2", "x = π/6, 5π/6", "1,5/2", r"\operatorname{tg} x", "−1", "2·3", "ℝ"):
+    for value in (
+        r"$\dfrac{\pi}{45}$", "π/45", "x = -5π/2 + πk, k ∈ Z", r"k \in \mathbb{Z}", "√3/2", r"\sqrt3", "x ≤ 5",
+        "x <= 5", "30°", "x²", "1/2x", "(x+1)/2", "x = π/6, 5π/6", "1,5/2", r"\operatorname{tg} x", "−1", "2·3", "ℝ",
+        "8/-4/2", "8:4/2",
+    ):
         once = report_answer_key(value)
         assert report_answer_key(once) == once
 
@@ -264,21 +291,75 @@ def test_report_key_decides_a_comma_between_digits_by_the_space_after_it():
     assert report_answer_key("1/2, 3/4") == report_answer_key(r"\frac{1}{2}, \frac{3}{4}")
     assert report_answer_key("1,5/2") != report_answer_key("1, 5/2")
     assert report_answer_key("1/2,5") != report_answer_key("1/2, 5")
-    assert "" not in report_answer_key("1/2, 3/4")                 # the internal list marker never leaks into a key
+    assert not {"\ue000", "\ue001"} & set(report_answer_key("1/2, 3/4"))   # internal markers never leak
+    assert not {"\ue000", "\ue001"} & set(report_answer_key("1 3/25"))
 
 
 def test_report_key_only_widens_what_the_old_key_did_not_know():
     """Old report keys that were equal stay equal (whitespace, `$`, \\dfrac, single-token braces)."""
     for first, second in [
-        ("x^3 < y^3", "$x^{3} < y^{3}$"), ("x ^ 3", "x^{3}"), (r"\dfrac{1}{2}", r"\frac {1} {2}"), ("a_{2}", "a_2"), ("1 / 2", "1/2"),
+        ("x^3 < y^3", "$x^{3} < y^{3}$"), ("x ^ 3", "x^{3}"), (r"\dfrac{1}{2}", r"\frac {1} {2}"), ("a_{2}", "a_2"),
+        ("1 / 2", "1/2"),
         ("x \\in [1; 2]", "x\\in[1;2]"), ("π / 45", "π/45"), ("5 π / 2", "5π/2"), (r"\sqrt{ 3 }", r"\sqrt{3}"),
-        ("1 000", "1000"), (r"1\,000", "1000"), ("1 3", "13"),     # a gap between digits stays invisible outside a fraction
+        # a gap between digits stays invisible outside a fraction
+        ("1 000", "1000"), (r"1\,000", "1000"), ("1 3", "13"),
     ]:
         assert report_answer_key(first) == report_answer_key(second)
 
 
 def test_scoring_key_ignores_the_new_equivalences():
     """Grading at answer time keeps `answer_value_key`: Unicode and LaTeX spellings are still different there."""
-    for first, second in [("π/45", r"\frac{\pi}{45}"), ("k ∈ Z", r"k \in \mathbb{Z}"), ("x ≤ 5", r"x \le 5"), ("√3", r"\sqrt{3}")]:
+    for first, second in [
+        ("π/45", r"\frac{\pi}{45}"), ("k ∈ Z", r"k \in \mathbb{Z}"), ("x ≤ 5", r"x \le 5"), ("√3", r"\sqrt{3}"),
+    ]:
         assert answer_value_key(first) != answer_value_key(second)
         assert report_answer_key(first) == report_answer_key(second)
+
+
+def test_report_key_is_not_idempotent_for_a_mixed_number_and_that_is_safe():
+    """`4 3/28` must not become the fraction 43/28, so its digit gap survives until the fractions are read.
+
+    The finished key `43/28` therefore differs from the key of `43/28` itself and, keyed AGAIN, would read as the
+    fraction.  That is safe because a key is only ever compared with other keys of raw stored values.
+    """
+    key = report_answer_key("4 3/28")
+    assert key == "43/28" and report_answer_key("43/28") == r"\frac{43}{28}" and key != report_answer_key("43/28")
+    assert report_answer_key(key) == report_answer_key("43/28")             # what a (never made) re-keying would do
+    assert report_answer_key("4 3/28") != report_answer_key(r"\frac{43}{28}")
+
+
+def test_no_caller_keys_a_key_again():
+    import pathlib
+    import re
+    root = pathlib.Path(__file__).resolve().parent.parent
+    nested = re.compile(r"report_answer_key\(\s*report_answer_key\(")
+    sources = [*root.glob("src/**/*.py"), *root.glob("scripts/**/*.py"), *root.glob("tools/**/*.py")]
+    assert sources and not [str(path) for path in sources if nested.search(path.read_text(encoding="utf-8"))]
+
+
+# Runtime: a long answer must cost linear time.  A digit run used to be tried as a numerator from every position
+# (20 000 digits took 13 s).  The thresholds are far above the measured 5-50 ms and far below a quadratic scan.
+_PATHOLOGICAL_UNITS = [
+    "1", "√", "/", "π", "(", "x", "1 ", "√(", "1/", "/-", "8/-4/", "a/-x/", "1/2/", "π/2,", "1,5/", "1, ", "√1 ",
+    r"\sqrt ", r"\sqrt{", r"\mathbb{", r"\operatorname{", r"\frac{1}{", r"^{\circ", "∈ ", "2π", "1\\,", "-", "+-",
+]
+
+
+def _repeat(unit, length):
+    return (unit * (length // len(unit) + 1))[:length]
+
+
+def test_report_key_time_is_linear_for_a_long_digit_run():
+    import time
+    started = time.perf_counter()
+    report_answer_key("1" * 20000)
+    report_answer_key("1" * 20000 + "x/2")
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize("unit", _PATHOLOGICAL_UNITS)
+def test_report_key_time_is_linear_for_long_repetitive_input(unit):
+    import time
+    started = time.perf_counter()
+    report_answer_key(_repeat(unit, 30000))
+    assert time.perf_counter() - started < 1.0

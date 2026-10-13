@@ -84,13 +84,14 @@ _GREEK = {
     "upsilon": "υ", "chi": "χ", "psi": "ψ", "omega": "ω",
     "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π", "Sigma": "Σ", "Phi": "Φ",
     "Psi": "Ψ", "Omega": "Ω",
-}   # not merged on purpose: phi/varphi, epsilon/varepsilon, vartheta ... (two different glyphs share one Unicode letter)
+}   # not merged on purpose: phi/varphi, epsilon/varepsilon, vartheta ... (one Unicode letter, two different glyphs)
 _COMMAND_SYMBOLS = {
-    **_GREEK, "infty": "∞", "in": "∈", "notin": "∉", "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥", "ne": "≠", "neq": "≠",
-    "pm": "±", "mp": "∓", "emptyset": "∅", "varnothing": "∅",
+    **_GREEK, "infty": "∞", "in": "∈", "notin": "∉", "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥",
+    "ne": "≠", "neq": "≠", "pm": "±", "mp": "∓", "emptyset": "∅", "varnothing": "∅",
 }
 _FUNCTION_NAMES = frozenset(
-    "sin cos tan tg cot ctg sec csc arcsin arccos arctan arctg arccot arcctg sinh cosh tanh coth lg ln log exp max min".split()
+    ("sin cos tan tg cot ctg sec csc arcsin arccos arctan arctg arccot arcctg sinh cosh tanh coth "
+     "lg ln log exp max min").split()
 )
 _NUMBER_SETS = {"N": "ℕ", "Z": "ℤ", "Q": "ℚ", "R": "ℝ"}
 _UNICODE_SPELLINGS = str.maketrans({"\u2212": "-", "·": "*", "⋅": "*", "×": "*", "²": "^2", "³": "^3"})
@@ -145,26 +146,30 @@ def _equivalent_spellings(text: str) -> str:
     return _FRACTION_GAP_RE.sub(_GAP_MARK, text)
 
 
-# A numerator is one "atom": an integer, a single letter, `\sqrt` of one of those, or an integer coefficient in front of a
-# letter / root (`5π`, `2x`, `3√2`); a denominator is the same WITHOUT a coefficient (`1/2π` may be ½π or 1/(2π), so
-# `2π` is never taken as a denominator).  `2πk` and `x+1` are not atoms.  Applied to the already normalised key
-# (lower case, no spaces).
+# A numerator is one "atom": an integer, a single letter, `\sqrt` of one of those, or an integer coefficient in front
+# of a letter / root (`5π`, `2x`, `3√2`); a denominator is the same WITHOUT a coefficient (`1/2π` may be ½π or
+# 1/(2π), so `2π` is never taken as a denominator).  `2πk` and `x+1` are not atoms.  Applied to the already
+# normalised key (lower case, no spaces).  `(?<!\d)` keeps the scan linear: a number is tried only from its first
+# digit (a start inside a digit run is rejected anyway, its left neighbour being a digit).
 _SYM = rf"(?:[a-z{_GREEK_LETTERS.lower()}])"
 _ROOT = rf"(?:\\sqrt\{{(?:\d+|{_SYM})\}})"
 _NUMERATOR = rf"(?:\d+(?:{_SYM}|{_ROOT})?|{_SYM}|{_ROOT})"
 _DENOMINATOR = rf"(?:\d+|{_SYM}|{_ROOT})"
-_PLAIN_FRACTION_RE = re.compile(rf"({_NUMERATOR})/({_DENOMINATOR})")
-_FRACTION_LEFT = frozenset("([{=+-*<>≤≥≠,;:|±∓∈∉∪∩" + _LIST_MARK)
+_PLAIN_FRACTION_RE = re.compile(rf"(?<!\d)({_NUMERATOR})/({_DENOMINATOR})")
+# `:` and `÷` are division signs as often as separators and are NOT a left boundary (`8:4/2`, like `8/4/2`, is not
+# rewritten); `:` after the denominator is only a division (`1/2:3` is `(1/2):3`) and stays a right boundary.
+_FRACTION_LEFT = frozenset("([{=+-*<>≤≥≠,;|±∓∈∉∪∩" + _LIST_MARK)
 _FRACTION_RIGHT = frozenset(")]}=+-*<>≤≥≠,;:|±∓∈∉∪∩")
+_FRACTION_SIGNS = "+-±∓"
 
 
 def _plain_fractions_to_frac(key: str) -> str:
     """``π/45`` -> ``\\frac{π}{45}`` when A and B are single atoms standing on their own.
 
     "On their own" = the neighbours are the start / end of the answer or an operator / bracket / separator, so
-    ``1/2x`` (is it ½x or 1/(2x)?), ``a/b/c``, ``x^1/2``, ``0.5/2`` and ``1,5/2`` (decimal comma) are never rewritten
-    and stay different from any ``\\frac``.  A numerator / denominator that is a sum, a product of several letters or a
-    power is never an atom, so ``(x+1)/2`` and ``\\frac{x+1}{2}`` keep different keys.
+    ``1/2x`` (is it ½x or 1/(2x)?), ``a/b/c``, ``8/-4/2``, ``8:4/2``, ``x^1/2``, ``0.5/2`` and ``1,5/2`` (decimal
+    comma) are never rewritten and stay different from any ``\\frac``.  A numerator / denominator that is a sum, a
+    product of several letters or a power is never an atom, so ``(x+1)/2`` and ``\\frac{x+1}{2}`` keep different keys.
     """
     def replace(m: "re.Match[str]") -> str:
         start, end = m.span()
@@ -172,7 +177,10 @@ def _plain_fractions_to_frac(key: str) -> str:
         after = key[end] if end < len(key) else ""
         if before and before not in _FRACTION_LEFT:
             return m.group(0)
-        if before == "-" and start >= 2 and key[start - 2] in "^_":          # x^-1/2: what is the exponent?
+        sign = start
+        while sign > 0 and key[sign - 1] in _FRACTION_SIGNS:
+            sign -= 1
+        if sign < start and sign > 0 and key[sign - 1] in "/÷:^_":         # 8/-4/2, x^-1/2: what binds to what?
             return m.group(0)
         if before == "," and start >= 2 and key[start - 2].isdigit() and m.group(1)[0].isdigit():
             return m.group(0)                                                 # 1,5/2 : decimal comma
@@ -200,6 +208,11 @@ def report_answer_key(value: object) -> str:
     (``$\\dfrac{\\pi}{45}$``, ``k \\in \\mathbb{Z}$``).  The same symbol spelled either way gets one key (``π`` =
     ``\\pi``, ``≤`` = ``\\le`` = ``\\leq``, ``ℤ`` = ``\\mathbb{Z}``, ``√3`` = ``\\sqrt{3}`` ...) and a fraction of two
     single atoms is the same as its slash form (``5π/2`` = ``\\frac{5\\pi}{2}``); see ``_equivalent_spellings``.
+
+    Keys are compared with keys, never fed back in: the key is NOT idempotent for a mixed number.  ``4 3/28`` keeps
+    its digit gap while the fractions are recognised (so it never becomes the fraction ``43/28``) and loses it in the
+    finished key ``43/28``; keying that key again would read it as the fraction ``\\frac{43}{28}``.  Every caller keys
+    raw stored values (answers, options, distractors) and compares the results only with each other.
     """
     text = str(value or "").replace("$", "")
     text = _SINGLE_TOKEN_BRACES_RE.sub(r"\1\2", text)
