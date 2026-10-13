@@ -172,6 +172,11 @@ def _distractor_explanation_latex(distractor: Any) -> Optional[str]:
     return str(value).strip() or None if value is not None else None
 
 
+def _log_answer_compare_failure(exc: Exception) -> None:
+    """Comparing a stored answer failed: the entry just gets no match.  Never logs the answer (messages quote it)."""
+    log.warning("report_answer_compare_failed error_type=%s", type(exc).__name__)
+
+
 def _find_matching_distractor(distractors: Any, student_answer: object) -> Optional[Dict[str, Any]]:
     """Find an exact stored distractor without changing historical answer facts.
 
@@ -181,12 +186,15 @@ def _find_matching_distractor(distractors: Any, student_answer: object) -> Optio
     explanation only after an exact canonical-value match; it must not infer a
     misconception from a merely incorrect answer.
     """
-    answer_key = report_answer_key(student_answer)
-    if not answer_key or not isinstance(distractors, list):
-        return None
-    for distractor in distractors:
-        if report_answer_key(_distractor_value(distractor)) == answer_key:
-            return distractor if isinstance(distractor, dict) else None
+    try:
+        answer_key = report_answer_key(student_answer)
+        if not answer_key or not isinstance(distractors, list):
+            return None
+        for distractor in distractors:
+            if report_answer_key(_distractor_value(distractor)) == answer_key:
+                return distractor if isinstance(distractor, dict) else None
+    except Exception as exc:                  # one unreadable answer must not cost the report its other context
+        _log_answer_compare_failure(exc)
     return None
 
 
@@ -256,12 +264,15 @@ def _task_option_pairs(task_data: Dict[str, Any], correct_answer: Optional[str],
 
 def _student_answer_latex(student_answer: Optional[str], option_pairs: List[Tuple[str, str]]) -> Optional[str]:
     """Only map a student answer to already stored display content, never LLM-rewrite it."""
-    key = report_answer_key(student_answer or "")
-    if not key:
-        return None
-    for value, display in option_pairs:
-        if report_answer_key(value) == key:
-            return display or value
+    try:
+        key = report_answer_key(student_answer or "")
+        if not key:
+            return None
+        for value, display in option_pairs:
+            if report_answer_key(value) == key:
+                return display or value
+    except Exception as exc:
+        _log_answer_compare_failure(exc)
     return None
 
 

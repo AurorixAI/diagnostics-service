@@ -9,13 +9,26 @@ from __future__ import annotations
 
 
 import ast
+import hashlib
 import json
 import re
 from fractions import Fraction
 from typing import Optional
 
-# A stored answer longer than this is never parsed as a wrapped value.
-_MAX_WRAPPED_ANSWER_CHARS = 2000
+# The longest answer text the service looks into: a student's answer (the API rejects longer ones with 422), a
+# stored key / option / distractor and a journal row alike.  Real content is well below it (bank of 12.10.2026: the
+# longest served choice is 1283 characters, 14 tasks exceed 500, nothing exceeds 1283); a chosen option is sent as its
+# full text, so the limit must stay above the longest option of the bank.  A longer text is never parsed, normalised
+# or solved: it only ever equals itself (see ``_oversize_key``).  Everything below is linear in the length, so this is
+# a bound on memory / bytes and not the thing that keeps the event loop free.
+MAX_ANSWER_CHARS = 2000
+_MAX_WRAPPED_ANSWER_CHARS = MAX_ANSWER_CHARS
+_OVERSIZE_PREFIX = "\ue002oversize:"      # private-use mark: no normalised key of a real answer starts with it
+
+
+def _oversize_key(text: str) -> str:
+    """Comparison key of a text longer than ``MAX_ANSWER_CHARS``: equal only to the identical text."""
+    return _OVERSIZE_PREFIX + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def display_student_answer(raw: object) -> object:
@@ -35,7 +48,7 @@ def display_student_answer(raw: object) -> object:
     value: object = None
     try:
         value = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):        # a deeply nested `{"a":{"a":...` is a RecursionError, not a ValueError
         try:
             value = ast.literal_eval(text)
         except Exception:                       # SyntaxError, ValueError, MemoryError, RecursionError, ...
@@ -48,6 +61,8 @@ def display_student_answer(raw: object) -> object:
 
 def answer_value_key(value: object) -> str:
     text = str(value or "").strip()
+    if len(text) > MAX_ANSWER_CHARS:
+        return _oversize_key(text)
     if len(text) >= 4 and text.startswith("$$") and text.endswith("$$"):
         text = text[2:-2].strip()
     elif len(text) >= 2 and text.startswith("$") and text.endswith("$"):
@@ -214,7 +229,10 @@ def report_answer_key(value: object) -> str:
     finished key ``43/28``; keying that key again would read it as the fraction ``\\frac{43}{28}``.  Every caller keys
     raw stored values (answers, options, distractors) and compares the results only with each other.
     """
-    text = str(value or "").replace("$", "")
+    text = str(value or "")
+    if len(text) > MAX_ANSWER_CHARS:
+        return _oversize_key(text.strip())
+    text = text.replace("$", "")
     text = _SINGLE_TOKEN_BRACES_RE.sub(r"\1\2", text)
     key = _plain_fractions_to_frac(answer_value_key(_equivalent_spellings(text)))
     return key.replace(_LIST_MARK, "").replace(_GAP_MARK, "")
@@ -229,13 +247,22 @@ _FUNC_ARG_BRACES_RE = re.compile(
     r"(\\(?:arcsin|arccos|arctan|arctg|arcctg|sin|cos|tan|tg|cot|ctg|sec|csc|ln|lg|log|exp)"
     r"(?:[_^](?:\{[^{}]*\}|[0-9A-Za-z]))*)\s*\{(\\?[A-Za-z]+|\d+)\}"
 )
-_TRAILING_PUNCT_RE = re.compile(r"[\s.;]+$")
 _THIN_SPACE_RE = re.compile(r"\\[,;!]|\\q?quad(?![A-Za-z])")
-_MIXED_LATEX_RE = re.compile(r"(-?)\s*(\d+)?\s*\\frac\{\s*(-?\d+)\s*\}\{\s*(\d+)\s*\}")
+# `\s*(\d+)?\s*` splits a run of spaces in N ways when the match fails (quadratic); `\s*(?:(\d+)\s*)?` accepts the same
+# texts and tries each position once.
+_MIXED_LATEX_RE = re.compile(r"(-?)\s*(?:(\d+)\s*)?\\frac\{\s*(-?\d+)\s*\}\{\s*(\d+)\s*\}")
 _MIXED_PLAIN_RE = re.compile(r"(-?)(\d+)\s+(\d+)\s*/\s*(\d+)")
 _FRACTION_RE = re.compile(r"(-?\d+)\s*/\s*(\d+)")
 _THOUSANDS_RE = re.compile(r"-?\d{1,3}(?: \d{3})+")
 _DECIMAL_RE = re.compile(r"-?\d+(?:[.,]\d+)?")
+
+
+def _strip_trailing_punct(text: str) -> str:
+    """Drop the closing whitespace / periods / semicolons (what ``[\\s.;]+$`` removed, without its quadratic scan)."""
+    end = len(text)
+    while end and (text[end - 1] in ".;" or text[end - 1].isspace()):
+        end -= 1
+    return text[:end]
 
 
 def _notation_key(value: object) -> str:
@@ -248,11 +275,14 @@ def _notation_key(value: object) -> str:
     between two digits is kept as a marker so the mixed number `3 4/9` never
     collapses into the different fraction `34/9`.
     """
-    text = str(value or "").replace("$", "").replace("−", "-")
+    text = str(value or "")
+    if len(text) > MAX_ANSWER_CHARS:
+        return _oversize_key(text.strip())
+    text = text.replace("$", "").replace("−", "-")
     text = _LEFT_RIGHT_RE.sub("", text)
     text = _FUNC_ARG_BRACES_RE.sub(r"\1 \2", text)
     text = _DECIMAL_COMMA_RE.sub(".", text)
-    text = _TRAILING_PUNCT_RE.sub("", text)
+    text = _strip_trailing_punct(text)
     text = _DIGIT_GAP_RE.sub("␣", text)
     return answer_value_key(text)
 
@@ -263,9 +293,21 @@ def exact_number(value: object) -> Optional[Fraction]:
     Recognises only unambiguous numeric forms; anything else (expressions,
     intervals, lists, percentages) returns None so it can never be matched
     by value. There is deliberately no floating-point tolerance: 1/3 and
-    0,33 are different answers.
+    0,33 are different answers.  Never raises: a text longer than ``MAX_ANSWER_CHARS`` is not a number, and
+    neither is one whose digits Python refuses to convert (``int`` / ``Fraction`` raise ``ValueError`` past
+    ``sys.get_int_max_str_digits()``).
     """
-    text = str(value or "").replace("$", "").replace("{,}", ",").replace("−", "-")
+    text = str(value or "")
+    if len(text) > MAX_ANSWER_CHARS:
+        return None
+    try:
+        return _exact_number(text)
+    except (ValueError, OverflowError, RecursionError, ZeroDivisionError, MemoryError):
+        return None
+
+
+def _exact_number(text: str) -> Optional[Fraction]:
+    text = text.replace("$", "").replace("{,}", ",").replace("−", "-")
     text = text.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac")
     text = _THIN_SPACE_RE.sub(" ", text).strip()
     m = _MIXED_LATEX_RE.fullmatch(text)
