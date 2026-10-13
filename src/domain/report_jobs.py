@@ -340,8 +340,15 @@ def write_snapshot_backup(path: str, rows: Sequence[Dict[str, Any]], *, stamp: s
     digest = hashlib.sha256(blob).hexdigest()
     if path == "-":
         try:
-            sys.stdout.write(blob.decode("utf-8"))
-            sys.stdout.flush()
+            # bytes, not text: the sha256 and the file must not depend on the locale / stdout encoding
+            buffer = getattr(sys.stdout, "buffer", None)
+            if buffer is not None:
+                sys.stdout.flush()
+                buffer.write(blob)
+                buffer.flush()
+            else:                                                  # a text-only stream (embedded / test harness)
+                sys.stdout.write(blob.decode("utf-8"))
+                sys.stdout.flush()
         except (OSError, ValueError) as exc:
             raise BackupError(f"cannot write the backup to stdout: {exc}") from exc
         return {"path": "-", "rows": len(lines), "sha256": digest, "stdout": True}
@@ -628,16 +635,18 @@ def restore_task_snapshots(
 
 def restore_latest_refresh(
     db: Session, *, session_ids: Sequence[uuid.UUID], task_ids: Sequence[str] = (), execute: bool = False,
-    deterministic: bool = True, requeue: bool = True,
+    deterministic: bool = True, requeue: bool = True, force_legacy: bool = False,
 ) -> Dict[str, int]:
     """Undo each selected answer's latest refresh from its OWN ``refresh_history`` (no backup file needed).
 
-    The pre-image kept in the row is verified against ``previous_sha256``; same guard, locks and re-queue as
-    ``restore_task_snapshots``.  Dry-run by default.
+    The pre-image kept in the row is verified against ``previous_sha256`` and the row against the entry's
+    ``result_sha256``: a row that was changed after the refresh (``diverged``) or whose history cannot be
+    verified (``unverifiable``) is left alone.  ``force_legacy`` accepts history entries written before
+    ``result_sha256`` existed.  Same guard, locks and re-queue as ``restore_task_snapshots``.  Dry-run by default.
     """
-    from src.domain.task_evidence import restore_previous_snapshot
+    from src.domain.task_evidence import SnapshotDiverged, restore_previous_snapshot
 
-    stats = {"rows": 0, "would_restore": 0, "restored": 0, "not_refreshed": 0, "unverifiable": 0,
+    stats = {"rows": 0, "would_restore": 0, "restored": 0, "not_refreshed": 0, "diverged": 0, "unverifiable": 0,
              "skipped_concurrent": 0, "busy": 0, "queued": 0}
     wanted = _unique(str(t).strip() for t in task_ids if str(t).strip())
     plan: List[Dict[str, Any]] = []
@@ -653,9 +662,13 @@ def restore_latest_refresh(
                 stats["not_refreshed"] += 1
                 continue
             try:
-                previous = restore_previous_snapshot(current)
+                previous = restore_previous_snapshot(current, force_legacy=force_legacy)
+            except SnapshotDiverged as exc:
+                log.warning("restore-last: answer %s diverged: %s", answer_id, exc)
+                stats["diverged"] += 1
+                continue
             except ValueError as exc:
-                log.warning("restore-last: answer %s: %s", answer_id, exc)
+                log.warning("restore-last: answer %s unverifiable: %s", answer_id, exc)
                 stats["unverifiable"] += 1
                 continue
             plan.append({"answer_id": answer_id, "session_id": session_id, "old_snapshot": current,

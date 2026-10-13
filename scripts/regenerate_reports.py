@@ -85,8 +85,14 @@ RUNBOOK for --refresh-task-content (it rewrites diag_answers.task_snapshot; outc
          docker exec <svc> python -m scripts.regenerate_reports <selectors> --refresh-task-content --execute --backup /tmp/b.jsonl
          docker cp "$HOSTNAME":/tmp/b.jsonl ./        (the script prints the exact command, rows and sha256)
      or stream it to the host:  docker exec <svc> python -m scripts.regenerate_reports ... --backup - > backup.jsonl
+     (stdout backup mode ONLY with DEBUG=false: SQLAlchemy echo writes to stdout and would corrupt the JSONL;
+     the script refuses --backup - when DEBUG is on.  Bytes are written through stdout.buffer, so the
+     sha256 does not depend on the locale.)
   4. The pre-image also stays in each row: snapshot.refresh_history[-1].previous_task (verified against
-     previous_sha256), so the backup file is a second copy, not the only one.
+     previous_sha256), so the backup file is a second copy, not the only one.  --restore-last undoes a
+     refresh only if the row is still exactly its result (task hashes to sha256 == result_sha256); a row
+     edited afterwards is "diverged" and never overwritten, a history entry without result_sha256 (earlier
+     build) is "unverifiable" unless --force-legacy.
   5. Undo: --restore-last with the same selectors (from the rows themselves), or --restore-from backup.jsonl
      (newest backup first; rows that changed since are "diverged" and left alone).  Both are dry-run by
      default, take the report lock, and re-queue the affected reports (deterministic).
@@ -114,6 +120,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.core.config import get_settings  # noqa: E402
 from src.core.database import SessionLocal  # noqa: E402
 from src.domain.report_generator import REPORT_SCHEMA_VERSION  # noqa: E402
 from src.domain.report_jobs import (  # noqa: E402
@@ -266,7 +273,7 @@ def run_restore(*, backup_path: str, execute: bool, with_narrative: bool = False
 
 def run_restore_last(
     *, session_ids: Sequence[uuid.UUID], task_ids: Sequence[str] = (), execute: bool, with_narrative: bool = False,
-    db: Any = None,
+    force_legacy: bool = False, db: Any = None,
 ) -> dict:
     """Undo the latest refresh of the selected answers from their own refresh_history (no file needed)."""
     own_session = db is None
@@ -274,7 +281,7 @@ def run_restore_last(
     try:
         stats = restore_latest_refresh(
             db, session_ids=_sessions_for(db, session_ids, task_ids), task_ids=task_ids, execute=execute,
-            deterministic=not with_narrative,
+            deterministic=not with_narrative, force_legacy=force_legacy,
         )
         return {"mode": "execute" if execute else "dry-run", "restore": stats, "exit_code": _restore_exit_code(stats)}
     finally:
@@ -309,7 +316,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--backup", metavar="PATH|-", default=None,
                         help="MANDATORY with --execute: JSONL backup of the snapshots about to be overwritten. A file "
                              "inside the container (then copy it out: docker cp \"$HOSTNAME\":PATH ./) or - for stdout "
-                             "(logs go to stderr): docker exec ... --backup - > backup.jsonl")
+                             "(logs go to stderr; needs DEBUG=false): docker exec ... --backup - > backup.jsonl")
     parser.add_argument("--allow-key-change", action="store_true",
                         help="refresh answers whose key / question changed or whose verdict would contradict the new "
                              "key - WITHOUT replacing key and question (default: such answers are skipped)")
@@ -318,6 +325,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--restore-from", metavar="BACKUP", default=None,
                         help="put the snapshots of a --backup file back (dry-run unless --execute); restore the newest "
                              "backup first; the affected reports are re-queued")
+    parser.add_argument("--force-legacy", action="store_true",
+                        help="with --restore-last: also undo refreshes whose history entry has no result_sha256 "
+                             "(written by an earlier build); only the row's internal hash is then checked")
     parser.add_argument("--restore-last", action="store_true",
                         help="undo the latest refresh of the selected answers (--session-id / --affected-by-tasks[-file]) "
                              "from the pre-image kept in each row's refresh_history - no backup file needed "
@@ -337,6 +347,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--backup PATH (or - for stdout) is mandatory with --refresh-task-content --execute")
     if args.restore_from and (targeted or args.refresh_task_content or args.restore_last):
         parser.error("--restore-from is a mode of its own")
+    if args.force_legacy and not args.restore_last:
+        parser.error("--force-legacy belongs to --restore-last")
+    if args.backup == "-" and get_settings().debug:
+        parser.error("--backup - writes to stdout: run it with DEBUG=false (SQLAlchemy echo also writes to stdout)")
     if args.restore_last and (args.refresh_task_content or not targeted):
         parser.error("--restore-last needs --session-id and/or --affected-by-tasks[-file] and is a mode of its own")
     # stdout may carry the backup (--backup -): every log line goes to stderr
@@ -348,7 +362,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             label = f"restore from {args.restore_from}"
         else:
             result = run_restore_last(session_ids=args.session_id, task_ids=task_ids, execute=args.execute,
-                                      with_narrative=args.with_narrative)
+                                      with_narrative=args.with_narrative, force_legacy=args.force_legacy)
             label = "restore-last (from refresh_history)"
         log.info("%s %s: %s", result["mode"], label, " ".join(f"{k}={v}" for k, v in result["restore"].items()))
         if not args.execute:

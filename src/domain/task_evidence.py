@@ -116,6 +116,8 @@ def refresh_snapshot(snapshot, task_id: str, live_task, *, source: str, refreshe
         'previous_provenance': snapshot.get('provenance'),
         # the pre-image itself (verifiable against previous_sha256): the refresh can be undone from the row alone
         'previous_task': copy.deepcopy(old_payload),
+        # digest of the payload this refresh wrote: a later non-refresh change of the row is detectable
+        'result_sha256': _digest(payload),
         'changed_fields': changed,
         'kept_key_and_question': bool(keep_key_and_question),
     })
@@ -162,11 +164,18 @@ def integrity_flags(old_payload: dict, new_payload: dict, student_answer, outcom
     return flags
 
 
-def restore_previous_snapshot(snapshot) -> dict:
+class SnapshotDiverged(ValueError):
+    """The row was changed after the refresh being undone (or is not internally consistent)."""
+
+
+def restore_previous_snapshot(snapshot, *, force_legacy: bool = False) -> dict:
     """The snapshot as it was before the LATEST refresh, rebuilt from the row's own ``refresh_history``.
 
-    Raises ``ValueError`` when the row was not refreshed, carries no pre-image, or the pre-image does not
-    hash to ``previous_sha256``.  Other envelope keys (e.g. ``backfill_source``) are kept as they are.
+    Refuses (``ValueError``; ``SnapshotDiverged`` when the row moved on) unless the row still IS the result of
+    that refresh: its ``task`` hashes to its ``sha256`` and that equals the entry's ``result_sha256``; the
+    pre-image must hash to ``previous_sha256``.  An entry without ``result_sha256`` (written before it
+    existed) is refused unless ``force_legacy``, which then relies on the internal hash check only.
+    Other envelope keys (e.g. ``backfill_source``) are kept as they are.
     """
     if not isinstance(snapshot, dict) or snapshot.get('provenance') != 'bank_refresh':
         raise ValueError('Not a refreshed snapshot')
@@ -179,6 +188,14 @@ def restore_previous_snapshot(snapshot) -> dict:
         raise ValueError('No stored pre-image')
     if _digest(previous) != last.get('previous_sha256'):
         raise ValueError('Pre-image does not match previous_sha256')
+    task = snapshot.get('task')
+    if not isinstance(task, dict) or _digest(task) != snapshot.get('sha256'):
+        raise SnapshotDiverged('The row is not internally consistent (task does not hash to sha256)')
+    if 'result_sha256' in last:
+        if snapshot['sha256'] != last['result_sha256']:
+            raise SnapshotDiverged('The row was changed after this refresh (sha256 differs from result_sha256)')
+    elif not force_legacy:
+        raise ValueError('Legacy history entry without result_sha256 (use --force-legacy)')
     restored = {k: v for k, v in snapshot.items() if k not in ('task', 'sha256', 'provenance', 'refresh_history')}
     restored.update({'version': 1, 'provenance': last.get('previous_provenance'), 'task': copy.deepcopy(previous),
                      'sha256': last['previous_sha256']})

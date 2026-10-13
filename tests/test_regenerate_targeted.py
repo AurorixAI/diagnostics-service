@@ -331,8 +331,8 @@ def test_execute_writes_the_backup_first_and_only_the_snapshot_column(db, tmp_pa
     old = before_snaps[(sid, "t1")]
     assert new["refresh_history"] == [{
         "at": new["refresh_history"][0]["at"], "source": report_jobs.REFRESH_SOURCE, "previous_sha256": old["sha256"],
-        "previous_provenance": "issued", "previous_task": old["task"], "changed_fields": ["distractor_meta"],
-        "kept_key_and_question": False,
+        "previous_provenance": "issued", "previous_task": old["task"], "result_sha256": new["sha256"],
+        "changed_fields": ["distractor_meta"], "kept_key_and_question": False,
     }]
     assert payload["id"] == "t1" and payload["irt_difficulty"] == 0.0
     assert payload["display_options"] == old["task"]["display_options"]
@@ -843,3 +843,82 @@ def test_the_documented_plain_sql_fallback_restores_the_previous_snapshot(db, fa
     db.execute(text(sql))
     db.commit()
     assert snapshots(db)[(sid, "t1")] == original                                                  # all of them
+
+
+# ── restore-last only undoes a row that is still the result of that refresh ───
+
+def _rehash(snapshot):
+    from src.domain.task_evidence import _digest
+    return {**snapshot, "sha256": _digest(snapshot["task"])}
+
+
+def test_restore_last_never_resurrects_old_content_over_a_later_change(db, tmp_path):
+    sid = add_session(db, tasks=("t1",), minute=1)
+    refresh(db, FakeRepo({"t1": repaired("t1")}), [sid], tmp_path)
+    row = db.query(DiagAnswer).one()
+    edited = json.loads(json.dumps(row.task_snapshot))
+    edited["task"]["question_text"] = "Исправлено вручную после обновления"
+    row.task_snapshot = _rehash(edited)                                     # a valid, internally consistent newer state
+    db.commit()
+    kept = snapshots(db)[(sid, "t1")]
+    result = script.run_restore_last(session_ids=[sid], execute=True, db=db)
+    assert result["restore"]["diverged"] == 1 and result["restore"]["restored"] == 0
+    assert result["exit_code"] == script.EXIT_FAILURES and snapshots(db)[(sid, "t1")] == kept
+
+    broken = json.loads(json.dumps(kept))
+    broken["task"]["question_text"] = "Правка без пересчёта хеша"
+    row = db.query(DiagAnswer).one()
+    row.task_snapshot = broken
+    db.commit()
+    assert script.run_restore_last(session_ids=[sid], execute=True, db=db)["restore"]["diverged"] == 1
+    assert snapshots(db)[(sid, "t1")] == broken
+
+
+def test_history_entries_without_result_sha256_are_unverifiable_unless_forced(db, tmp_path):
+    sid = add_session(db, tasks=("t1",), minute=1)
+    original = snapshots(db)[(sid, "t1")]
+    refresh(db, FakeRepo({"t1": repaired("t1")}), [sid], tmp_path)
+    row = db.query(DiagAnswer).one()
+    legacy = json.loads(json.dumps(row.task_snapshot))
+    del legacy["refresh_history"][-1]["result_sha256"]                      # as written by an earlier build
+    row.task_snapshot = legacy
+    db.commit()
+    refused = script.run_restore_last(session_ids=[sid], execute=True, db=db)
+    assert refused["restore"]["unverifiable"] == 1 and refused["restore"]["restored"] == 0
+    assert snapshots(db)[(sid, "t1")] == legacy
+    forced = script.run_restore_last(session_ids=[sid], execute=True, force_legacy=True, db=db)
+    assert forced["restore"]["restored"] == 1 and snapshots(db)[(sid, "t1")] == original
+    # --force-legacy still demands an internally consistent row
+    refresh(db, FakeRepo({"t1": repaired("t1")}), [sid], tmp_path, name="again.jsonl")
+    row = db.query(DiagAnswer).one()
+    tampered = json.loads(json.dumps(row.task_snapshot))
+    del tampered["refresh_history"][-1]["result_sha256"]
+    tampered["task"]["question_text"] = "без хеша"
+    row.task_snapshot = tampered
+    db.commit()
+    assert script.run_restore_last(session_ids=[sid], execute=True, force_legacy=True, db=db)["restore"]["diverged"] == 1
+
+
+def test_stdout_backup_is_written_as_bytes_independent_of_the_stdout_encoding(db, monkeypatch):
+    import io
+    import sys
+
+    sid = add_session(db, tasks=("t1",), minute=1)
+    raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="ascii", errors="strict"))   # a C / POSIX locale
+    result = refresh(db, FakeRepo({"t1": repaired("t1", distractors=(("3", "Объяснение: ёжик ∑"), ("4", "x")))}), [sid],
+                     backup_path="-")
+    sys.stdout.flush()
+    data = raw.getvalue()
+    assert hashlib.sha256(data).hexdigest() == result["refresh_details"]["backup"]["sha256"]
+    row = json.loads(data.decode("utf-8"))                                  # always UTF-8
+    assert row["task_snapshot"]["task"]["id"] == "t1" and "Сложил вместо вычитания" in json.dumps(row, ensure_ascii=False)
+
+
+def test_main_refuses_stdout_backup_with_debug_and_force_legacy_outside_restore_last(db, factory, monkeypatch):
+    sid = add_session(db, tasks=("t1",), minute=1)
+    monkeypatch.setattr(script, "get_settings", lambda: NS(debug=True))
+    with pytest.raises(SystemExit):
+        script.main(["--session-id", str(sid), "--refresh-task-content", "--execute", "--backup", "-"])
+    with pytest.raises(SystemExit):
+        script.main(["--session-id", str(sid), "--force-legacy"])
