@@ -1,0 +1,27 @@
+{
+ "stages": [
+  "stage3b",
+  "stage3c_s1",
+  "stage3c_s2"
+ ],
+ "result": {
+  "A3": {
+   "consistent": false,
+   "sources": [
+    [
+     "stage3b",
+     "A3"
+    ],
+    [
+     "stage3c_s1",
+     "B_A3_s1"
+    ],
+    [
+     "stage3c_s2",
+     "B_A3_s2"
+    ]
+   ],
+   "missing": []
+  }
+ }
+}

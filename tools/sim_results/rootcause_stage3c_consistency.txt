@@ -1,0 +1,7 @@
+consistency of finalists ['A3'] over ['stage3b', 'stage3c_s1', 'stage3c_s2'] (primary: same sign as required; guardrails: no breach)
+
+=== A3
+  stage3b      A3         P1 -50.31 | P2 -0.31 | P3 +4.45 | primary pass True | guardrails OK
+  stage3c_s1   B_A3_s1    P1 -50.31 | P2 -0.31 | P3 +5.51 | primary pass False | guardrails BREACH
+  stage3c_s2   B_A3_s2    P1 -48.46 | P2 -0.31 | P3 +4.89 | primary pass False | guardrails OK
+  -> NOT CONSISTENT
