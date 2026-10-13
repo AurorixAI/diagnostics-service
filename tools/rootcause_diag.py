@@ -3,6 +3,7 @@
 
   python tools/rootcause_diag.py --tag A0 --stage stage3a [--n-boot 2000]                 # one arm (stage 3a tables)
   python tools/rootcause_diag.py --base A0 --variants A1 A2 A3 A4 A5 --stage stage3b       # arms vs base + acceptance verdicts
+  python tools/rootcause_diag.py --consistency A3 A5                                       # finalists: stand A vs B vs seed 2
 
 Reads tools/sim_results/rootcause_<tag>_G<n>.json and writes tools/sim_results/rootcause_<stage>_diag.json + .txt
 (summary files; the per-grade result JSONs stay gitignored).
@@ -31,8 +32,8 @@ Metrics (rates are shares of students unless stated):
 
 Compare mode (stage 3b/3c): every metric of the variant minus the base on the SAME students (same weights in the same
 replicate, so the difference is paired), scopes ALL / theta tercile / grade / gap-L3 class (eligible, non_eligible, typical);
-the acceptance criteria of tools/rootcause_accept.json (non-inferiority margins on the 95% CI for guardrails; point effect
-AND a CI beyond 0 for gains) are evaluated on the ALL-grades cluster-bootstrap CIs and written into the .txt/.json.
+the acceptance criteria of tools/rootcause_accept.json (primary: effect AND a CI beyond 0; guardrails: non-inferiority
+margins on the 95% CI; secondary: reported; ADVANCE = every primary and every guardrail) are evaluated on the ALL-grades cluster-bootstrap CIs and written into the .txt/.json.
 
 Confidence intervals: per grade = student bootstrap (gap and gap-free students resampled separately within the grade, as in
 cat_sim.paired_bootstrap); ALL grades = cluster bootstrap by gap L3 (per grade, the gap L3 clusters are redrawn with
@@ -83,18 +84,19 @@ def load_tag(tag, results=RESULTS):
     return out
 
 
-def gap_parents(gaps):
-    """L2 parent of every gap L3 (read-only content DB)."""
+def hierarchy():
+    """L3 -> L2 and L2 -> L1 parents (read-only content DB): topics / sections measured per session."""
     from sqlalchemy import create_engine, text
     eng = create_engine(content_db_url(None))
     with eng.connect() as c:
-        rows = c.execute(text("select id, parent_id from knowledge_hierarchy where id = any(:ids)"),
-                         {"ids": sorted(gaps)}).all()
+        rows = c.execute(text("select id, level, parent_id from knowledge_hierarchy where level in ('L2','L3')")).all()
     eng.dispose()
-    return {r[0]: r[1] for r in rows}
+    l2 = {r[0]: r[2] for r in rows if r[1] == "L3"}
+    l1 = {r[0]: r[2] for r in rows if r[1] == "L2"}
+    return l2, l1
 
 
-def build_arrays(data, l2_of=None):
+def build_arrays(data, l2_of=None, hier=None):
     """data: grade -> loaded result file.  Returns dict of numpy arrays (one entry per student) + the cluster table."""
     recs, cols = [], []                                # cols: (grade, G) clusters in a fixed order
     for g, d in sorted(data.items()):
@@ -103,14 +105,15 @@ def build_arrays(data, l2_of=None):
         for r in d["arms"]["A"]["students"]:
             recs.append((g, r))
     col_ix = {c: j for j, c in enumerate(cols)}
-    l2_of = l2_of or gap_parents({G for _, G in cols})
+    hier = hier or hierarchy()
+    l2_of = l2_of or {G: hier[0].get(G) for _, G in cols}
     N, J = len(recs), len(cols)
     f = lambda: np.zeros(N)
     A = {k: f() for k in (
         "grade", "gap", "theta", "terc", "cluster", "scan", "ds_items", "nch", "chG", "conf", "topic", "entries", "wt", "ct",
         "dt", "V", "F", "S", "R", "Rany", "Rorig", "Rprobe", "Cprobe", "Q", "Fimp", "Fbud", "C", "budget_sig", "n_sig_scans", "budget_noise", "n_noise_scans",
         "sig_n", "noise_n", "n_cut", "n_terminal", "n_visits", "n_failed",
-        "acc", "sq", "items", "maxit", "cause", "detected", "named", "fp", "cls")}
+        "acc", "sq", "items", "maxit", "cause", "detected", "named", "fp", "cls", "topics", "sections", "l3n")}
     for rule in RULES:
         A[f"sig_{rule}"], A[f"noise_{rule}"], A[f"any_{rule}"], A[f"anysig_{rule}"] = f(), f(), f(), f()
     A["cluster"][:] = -1
@@ -127,6 +130,10 @@ def build_arrays(data, l2_of=None):
         A["scan"][i], A["ds_items"][i] = float(bool(r.get("scan_triggered"))), r["ds_items"]
         A["acc"][i], A["sq"][i] = float(r["cat_true"] == r["cat_hat"]), (r["theta_hat"] - r["theta"]) ** 2
         A["items"][i], A["maxit"][i] = r["items"], float(bool(r.get("hit_max_items")))
+        vis_l3 = {v["l3"] for v in r["l3_visits"] if v.get("n_items")}          # navigation L3s measured (warm-up is identical in all arms)
+        vis_l2 = {hier[0].get(x) for x in vis_l3} - {None}
+        A["l3n"][i], A["topics"][i] = len(vis_l3), len(vis_l2)
+        A["sections"][i] = len({hier[1].get(x) for x in vis_l2} - {None})
         A["items_oh"][i, min(int(r["items"]), 63)] = 1.0
         A["cause"][i], A["detected"][i], A["named"][i], A["fp"][i] = (float(bool(r["cause"])), float(bool(r["detected"])),
                                                                      float(bool(r["named"])), float(bool(r["fp"])))
@@ -262,6 +269,10 @@ def metrics(A, cols, W, scope):
         out[name] = mean(key, gap)
     out["fp_nogap"] = mean("fp", ng)
     out["signal_cause"] = out["detect_cause"] - out["fp_nogap"]
+    out["signal_root"] = out["detect_root"] - out["fp_nogap"]
+    out["topics_measured"] = mean("topics", scope)                       # distinct L2 topics with a navigation visit
+    out["sections_measured"] = mean("sections", scope)
+    out["l3_measured"] = mean("l3n", scope)
     out["scan_signal"] = out["scan_gap"] - out["scan_nogap"]
     out["chains_ps_signal"] = out["chains_ps_gap"] - out["chains_ps_nogap"]
     # lift over the matched gap-free base rate
@@ -345,11 +356,15 @@ def main():
     ap.add_argument("--base", help="compare mode: the base arm")
     ap.add_argument("--variants", nargs="+", help="compare mode: arms to compare with --base")
     ap.add_argument("--accept", type=Path, default=ACCEPT)
+    ap.add_argument("--consistency", nargs="+", metavar="ARM", help="finalists: check stand A / stand B seed 1 / seed 2 agree")
+    ap.add_argument("--stages", nargs="+", default=["stage3b", "stage3c_s1", "stage3c_s2"], help="compare stages read by --consistency")
     ap.add_argument("--stage", default="stage3a")
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=12345)
     ap.add_argument("--results", type=Path, default=RESULTS)
     a = ap.parse_args()
+    if a.consistency:
+        return consistency_main(a)
     if a.variants:
         if not a.base:
             ap.error("--variants needs --base")
@@ -471,10 +486,12 @@ COMPARE_ROWS = [
     ("chains_ps_nogap", "chains/stud no gap", 1, 2), ("p_chain_gap", "P(chain) gap (pp)", 100, 1),
     ("conf_gap", "conf_is_G gap (pp)", 100, 1), ("conf_diff", "  over base (pp)", 100, 1), ("topic_gap", "topic_named gap (pp)", 100, 1),
     ("detect_cause", "cause (pp)", 100, 1), ("detect_root", "root (pp)", 100, 1), ("fp_nogap", "fp no gap (pp)", 100, 1),
-    ("signal_cause", "sig_c = cause-fp (pp)", 100, 1), ("f_S", "funnel S (pp)", 100, 1), ("f_R", "funnel R (pp)", 100, 1),
+    ("signal_cause", "sig_c = cause-fp (pp)", 100, 1), ("signal_root", "sig_r = root-fp (pp)", 100, 1),
+    ("conf_lift", "conf_is_G lift (x)", 1, 2), ("topics_measured", "topics measured", 1, 2), ("sections_measured", "sections measured", 1, 2),
+    ("f_S", "funnel S (pp)", 100, 1), ("f_R", "funnel R (pp)", 100, 1),
     ("f_C", "funnel C (pp)", 100, 1), ("sh_ratio_act", "shadow ratio (act)", 1, 2),
 ]
-TERCILE_ROWS = ["p_chain_nogap", "chains_ps_nogap", "scan_nogap", "scan_gap", "chain_precision", "conf_gap", "ds_items_nogap"]
+TERCILE_ROWS = ["p_chain_nogap", "chains_ps_nogap", "scan_nogap", "scan_gap", "chain_precision", "conf_gap", "ds_items_nogap", "topics_measured"]
 CLASS_ROWS = ["scan_gap", "chain_precision", "conf_gap", "detect_cause", "f_S", "f_R", "f_C", "ds_items_gap"]
 
 
@@ -495,21 +512,49 @@ def delta(m_var, m_base, key):
     return m_var[key] - m_base[key]
 
 
-def evaluate_criteria(crit, diffs):
-    """diffs[scope][metric] = {'diff', 'ci95'}; returns the list of criterion results."""
+def _one(c, x):
+    """Result of one criterion on one scope entry x = {'base','var','diff','ci95'}."""
+    if x is None or x["diff"] is None or x["ci95"][0] is None:
+        return {"value": None, "ci": [None, None], "pass": False, "note": "metric not available"}
+    k = c.get("scale", 1)
+    v, lo, hi = x["diff"] * k, x["ci95"][0] * k, x["ci95"][1] * k
+    test = c.get("test", "effect")
+    base, var = (None if x["base"] is None else x["base"] * k), (None if x["var"] is None else x["var"] * k)
+    if test == "noninferior":                        # the CI bound on the bad side stays inside the margin
+        ok = lo >= c["margin"] if c["direction"] == "ge" else hi <= c["margin"]
+    elif test == "point_equal":                      # the point difference is (within tol of) zero
+        ok = abs(v) <= c.get("tol", 0.0)
+    elif test == "level":                            # the variant's own level (point estimate)
+        ok = var is not None and (var >= c["threshold"] if c["direction"] == "ge" else var <= c["threshold"])
+    elif test == "effect_positive":                  # direction of the point difference only
+        ok = v > 0 if c["direction"] == "ge" else v < 0
+    else:                                            # effect: large enough AND the CI beyond 0 in the right direction
+        if c["direction"] == "ge":
+            ok = v >= c["min_effect"] and lo > 0
+        else:
+            ok = v <= c["min_effect"] and hi < 0
+        if ok and c.get("min_ratio") is not None:
+            ok = base is not None and var is not None and var >= c["min_ratio"] * base
+        if ok and c.get("min_value") is not None:
+            ok = var is not None and var >= c["min_value"]
+    return {"value": v, "ci": [lo, hi], "base": base, "var": var, "pass": bool(ok)}
+
+
+def evaluate_criteria(crit, diffs, grades=()):
+    """diffs[scope][metric] = {'base','var','diff','ci95'}; returns one result per criterion.  scope EACH_GRADE: the criterion
+    must hold in every grade (student-bootstrap CI), the reported value is the worst grade."""
     out = []
     for c in crit["criteria"]:
-        x = diffs.get(c["scope"], {}).get(c["metric"])
-        if x is None or x["diff"] is None or x["ci95"][0] is None:
-            out.append({**c, "value": None, "ci": [None, None], "pass": False, "note": "metric not available"})
-            continue
-        k = c.get("scale", 1)
-        v, lo, hi = x["diff"] * k, x["ci95"][0] * k, x["ci95"][1] * k
-        if c["kind"] == "guardrail":                      # non-inferiority: the CI bound on the bad side stays within the margin
-            ok = lo >= c["margin"] if c["direction"] == "ge" else hi <= c["margin"]
-        else:                                             # gain: large enough AND the CI excludes 0
-            ok = (v >= c["min_effect"] and lo > 0) if c["direction"] == "ge" else (v <= c["min_effect"] and hi < 0)
-        out.append({**c, "value": v, "ci": [lo, hi], "pass": bool(ok)})
+        if c["scope"] == "EACH_GRADE":
+            rows = [(g, _one(c, diffs.get(f"G{g}", {}).get(c["metric"]))) for g in grades]
+            ok = bool(rows) and all(r["pass"] for _, r in rows)
+            worst = min((r for _, r in rows if r["value"] is not None), key=lambda r: r["ci"][0] if c["direction"] == "ge" else -r["ci"][1],
+                        default={"value": None, "ci": [None, None]})
+            bad = [f"G{g}" for g, r in rows if not r["pass"]]
+            out.append({**c, "value": worst["value"], "ci": worst["ci"], "pass": ok, "per_grade": {f"G{g}": r for g, r in rows},
+                        "note": ("fails in " + ", ".join(bad)) if bad else ""})
+        else:
+            out.append({**c, **_one(c, diffs.get(c["scope"], {}).get(c["metric"]))})
     return out
 
 
@@ -517,10 +562,9 @@ def compare_main(a):
     crit = json.loads(Path(a.accept).read_text())
     tags = [a.base] + list(a.variants)
     grades, data = load_common(tags, a.results)
-    l2, arrays = None, {}
+    hier, arrays = hierarchy(), {}
     for t in tags:
-        arrays[t], cols, aux = build_arrays(data[t], l2)
-        l2 = l2 or gap_parents({G for _, G in cols})
+        arrays[t], cols, aux = build_arrays(data[t], None, hier)
     base = arrays[a.base]
     for t in a.variants:
         if not same_students(base, arrays[t]):
@@ -538,6 +582,15 @@ def compare_main(a):
     for k, c in enumerate(CLASSES):                       # gap students of one class only (no gap-free students in the scope)
         if ((base["cls"] == k) & base["gapb"]).any():
             scopes[f"CLS_{c}"] = (((base["cls"] == k) & base["gapb"]), w_clu)
+    nog = ~base["gapb"]
+    dep = nog | (base["gapb"] & np.isin(base["cls"], [CLASSES.index("eligible"), CLASSES.index("non_eligible")]))
+    if (dep & base["gapb"]).any():
+        scopes["DEP"] = (dep, w_clu)                      # gaps WITH dependants (+ all gap-free students for fp)
+        if 9 in grades:
+            scopes["DEP_G9"] = (dep & (base["grade"] == 9), w_stu)
+    elig = nog | (base["gapb"] & (base["cls"] == CLASSES.index("eligible")))
+    if (elig & base["gapb"]).any():
+        scopes["ELIG"] = (elig, w_clu)                    # eligible-dependant gaps (+ gap-free students)
 
     def metr(A, scope):
         m, w = scopes[scope]
@@ -557,11 +610,12 @@ def compare_main(a):
                                 "var": float(pt_v[key][0]) if np.isfinite(pt_v[key][0]) else None,
                                 "diff": float(d_pt[0]) if np.isfinite(d_pt[0]) else None, "ci95": ci(d_bt)}
         results[t] = res
-        ev = evaluate_criteria(crit, res)
+        ev = evaluate_criteria(crit, res, grades)
+        prim_ok = all(e["pass"] for e in ev if e["kind"] == "primary")
         guard_ok = all(e["pass"] for e in ev if e["kind"] == "guardrail")
-        gains = sum(1 for e in ev if e["kind"] == "gain" and e["pass"])
-        verdicts[t] = {"criteria": ev, "guardrails_ok": guard_ok, "gains_passed": gains,
-                       "advance": bool(guard_ok and gains >= crit["min_gains"])}
+        verdicts[t] = {"criteria": ev, "primary_ok": prim_ok, "guardrails_ok": guard_ok,
+                       "secondary_passed": sum(1 for e in ev if e["kind"] == "secondary" and e["pass"]),
+                       "advance": bool(prim_ok and guard_ok)}
 
     heads = ["ALL"] + [f"G{g}" for g in grades]
     cell = lambda x, k, p, ci_on=True: ("n/a" if x is None or x["diff"] is None else
@@ -570,7 +624,8 @@ def compare_main(a):
     L = [f"{a.stage}: variants minus base {a.base}, grades {grades}, N={N} students ({int(base['gap'].sum())} with gap), n_boot={a.n_boot}",
          "paired (same students, same replicate); ALL / terciles / classes = cluster bootstrap by gap L3, G<n> = student bootstrap; "
          "diff[95% CI], * = CI excludes 0",
-         f"acceptance criteria: {a.accept} (min_gains={crit['min_gains']})"]
+         f"acceptance criteria: {a.accept} (ADVANCE only if every PRIMARY and every GUARDRAIL passes; SECONDARY is reported)"]
+    L += ["NOTE " + n for n in crit.get("notes", [])]
     for t in a.variants:
         res = results[t]
         L += ["", f"=== {t} vs {a.base}"]
@@ -579,7 +634,7 @@ def compare_main(a):
             L.append(f"{label:26s}" + "".join(f"{cell(res[h].get(key), k, p, ci_on=True):>26s}" for h in heads))
         L += ["", "  by theta tercile (ALL, cluster bootstrap; pp for rates)", f"{'metric':26s}" + "".join(f"{h:>26s}" for h in ("T1 weak", "T2", "T3 strong"))]
         for key in TERCILE_ROWS:
-            k = 1 if key.startswith(("chains_ps", "ds_items")) else 100
+            k = 1 if key.startswith(("chains_ps", "ds_items", "topics")) else 100
             L.append(f"{key:26s}" + "".join(f"{cell(res[f'ALL_{n}'].get(key), k, 2 if k == 1 else 1):>26s}" for n in ("T1", "T2", "T3")))
         cls_present = [c for c in CLASSES if f"CLS_{c}" in res]
         if cls_present:
@@ -588,18 +643,59 @@ def compare_main(a):
                 k = 1 if key.startswith("ds_items") else 100
                 L.append(f"{key:26s}" + "".join(f"{cell(res[f'CLS_{c}'].get(key), k, 2 if k == 1 else 1):>26s}" for c in cls_present))
         v = verdicts[t]
-        L += ["", f"  acceptance: guardrails {'OK' if v['guardrails_ok'] else 'FAIL'}, gains {v['gains_passed']}/"
-                  f"{sum(1 for e in v['criteria'] if e['kind'] == 'gain')} (need {crit['min_gains']}) -> "
+        L += ["", f"  acceptance: PRIMARY {'OK' if v['primary_ok'] else 'FAIL'}, GUARDRAILS {'OK' if v['guardrails_ok'] else 'FAIL'}, "
+                  f"secondary {v['secondary_passed']}/{sum(1 for e in v['criteria'] if e['kind'] == 'secondary')} -> "
                   f"{'ADVANCE' if v['advance'] else 'DROP'}"]
         for e in v["criteria"]:
-            val = "n/a" if e["value"] is None else f"{e['value']:+.2f}[{e['ci'][0]:+.2f},{e['ci'][1]:+.2f}]"
-            thr = e.get("margin", e.get("min_effect"))
-            L.append(f"   {'PASS' if e['pass'] else 'FAIL'} {e['id']:3s} {e['kind']:9s} {e['label']:58s} {val:>26s}  ({e['direction']} {thr})")
+            if e["value"] is None:
+                val = "n/a"
+            elif e.get("test") == "level":
+                val = f"level {e['var']:.2f}"
+            else:
+                val = f"{e['value']:+.2f}[{e['ci'][0]:+.2f},{e['ci'][1]:+.2f}]"
+            thr = e.get("margin", e.get("min_effect", e.get("threshold", e.get("tol", ""))))
+            extra = f" ratio>={e['min_ratio']} value>={e['min_value']} (var {e['var']:.2f}, base {e['base']:.2f})" if e.get("min_ratio") and e.get("var") is not None else ""
+            L.append(f"   {'PASS' if e['pass'] else 'FAIL'} {e['id']:3s} {e['kind']:9s} {e['label'][:70]:70s} {val:>28s}  ({e.get('direction', e.get('test'))} {thr}){extra} {e.get('note', '')}")
     text = "\n".join(L) + "\n"
     out = a.results / f"rootcause_{a.stage}_compare"
     json.dump({"base": a.base, "variants": a.variants, "grades": grades, "n_students": N, "n_boot": a.n_boot, "criteria_file": str(a.accept),
                "criteria": crit, "verdicts": verdicts, "results": results}, open(str(out) + ".json", "w"), ensure_ascii=False, indent=1)
     Path(str(out) + ".txt").write_text(text)
+    print(text)
+
+
+def consistency_main(a):
+    """Finalists: stand A, stand B seed 1 and stand B seed 2 must agree - every PRIMARY criterion has the right sign
+    in each comparison and no GUARDRAIL is breached in any of them."""
+    import re
+    crit = json.loads(Path(a.accept).read_text())
+    prim = [c for c in crit["criteria"] if c["kind"] == "primary"]
+    L, report = [f"consistency of finalists {a.consistency} over {a.stages} (primary: same sign as required; guardrails: no breach)"], {}
+    for arm in a.consistency:
+        pat = re.compile(rf"^(B_)?{re.escape(arm)}(_?s\d+)?$")
+        sources, missing = [], []
+        for stage in a.stages:
+            f = Path(a.results) / f"rootcause_{stage}_compare.json"
+            d = json.loads(f.read_text()) if f.exists() else {"verdicts": {}}
+            hit = [(k, v) for k, v in d["verdicts"].items() if pat.match(k)]
+            (sources.append((stage,) + hit[0]) if hit else missing.append(stage))
+        L += ["", f"=== {arm}" + (f"  MISSING comparisons: {missing}" if missing else "")]
+        ok = not missing and bool(sources)
+        for stage, var, v in sources:
+            cells, right = [], True
+            for c in prim:
+                e = next(x for x in v["criteria"] if x["id"] == c["id"])
+                good = e["value"] is not None and (e["value"] <= 0 if c["direction"] == "le" else e["value"] >= 0)
+                right &= good
+                cells.append(f"{c['id']} {'-' if e['value'] is None else format(e['value'], '+.2f')}{'' if good else ' WRONG SIGN'}")
+            L.append(f"  {stage:12s} {var:10s} " + " | ".join(cells) + f" | primary pass {v['primary_ok']} | guardrails {'OK' if v['guardrails_ok'] else 'BREACH'}")
+            ok &= right and v["guardrails_ok"]
+        report[arm] = {"consistent": bool(ok), "sources": [s_[:2] for s_ in sources], "missing": missing}
+        L.append(f"  -> {'CONSISTENT' if ok else 'NOT CONSISTENT'}")
+    text = "\n".join(L) + "\n"
+    out = Path(a.results) / "rootcause_stage3c_consistency"
+    Path(str(out) + ".txt").write_text(text)
+    json.dump({"stages": a.stages, "result": report}, open(str(out) + ".json", "w"), indent=1)
     print(text)
 
 

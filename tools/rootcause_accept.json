@@ -1,16 +1,196 @@
 {
- "note": "Stage-3b acceptance criteria, evaluated by tools/rootcause_diag.py --base A0 --variants ... on the ALL-grades cluster-bootstrap 95% CI of the paired variant-minus-base difference. ASSUMED thresholds (the written plan of 12.10 was not available to the author): edit this file to the plan's numbers. guardrail = non-inferiority: the CI bound on the bad side must stay inside `margin` (units = metric * scale). gain = point effect at least `min_effect` in the good direction AND the CI excludes 0. A variant ADVANCES iff every guardrail passes and at least `min_gains` gains pass. Baseline A0 (stage 3a, stand A, ALL): acc3 ~83.5%, scan gap/no gap 97.1/96.1%, chain_precision 3.9%, P(chain|no gap) 40.7% (T1 73.8%), chains/student no gap 0.43.",
- "min_gains": 2,
+ "note": "Stage-3b acceptance criteria (lead-approved plan of 12.10; primary goal = honesty of reports). Evaluated by tools/rootcause_diag.py --base A0 --variants ... on the paired variant-minus-base difference (units = metric * scale). ALL = cluster bootstrap by gap L3 (95% CI), per grade = student bootstrap. kind=primary: all must pass (effect at least min_effect AND the CI beyond 0 in the right direction; optional min_ratio/min_value on the variant's own value). kind=guardrail: all must pass (non-inferiority: the CI bound on the bad side stays inside `margin`; point_equal: the point difference is within `tol`). kind=secondary: reported, not required. Verdict per arm: ADVANCE only if every primary and every guardrail passes. Finalists must additionally pass the CONSISTENCY check (stand B and seed 2: same sign on every primary, no guardrail breach): python tools/rootcause_diag.py --consistency A3 A5. Reference A0 on stand A (stage 3a): P(any chain | no gap) T1 73.8%, chains/student no gap 0.43, chain_precision 3.9%, acc3 ~83.5%, scan gap/no gap 97.1/96.1%.",
+ "notes": [
+  "Coverage mechanism: a Deep Scan ends the topic - _finish_deep_scan/_next_deep_scan_task call _advance_topic(state, False), which marks the current topic failed and abandons its remaining L3s. A trigger that fires less often keeps the L3 binary search going inside the topic instead, so the set of topics/L3s measured per session changes (and, with fewer scan items, so does test length and theta precision). Topic coverage per session is therefore a guardrail (G9: topics_measured, delta >= -0.5).",
+  "A smoke run (D2 + D3, stand B, G10-G11, n=400) showed acc3 -5 pp with len -2.1 items: noise at that n, but it is the first thing to check when a guardrail fails."
+ ],
  "criteria": [
-  {"id": "G1", "kind": "guardrail", "label": "level accuracy (acc3) not worse than -1.0 pp", "scope": "ALL", "metric": "acc_category", "scale": 100, "direction": "ge", "margin": -1.0},
-  {"id": "G2", "kind": "guardrail", "label": "theta RMSE not worse than +0.015", "scope": "ALL", "metric": "rmse_theta", "scale": 1, "direction": "le", "margin": 0.015},
-  {"id": "G3", "kind": "guardrail", "label": "mean test length not longer than +0.5 items", "scope": "ALL", "metric": "len_mean", "scale": 1, "direction": "le", "margin": 0.5},
-  {"id": "G4", "kind": "guardrail", "label": "sessions hitting max_items not more than +3 pp", "scope": "ALL", "metric": "hit_max_items", "scale": 100, "direction": "le", "margin": 3.0},
-  {"id": "G5", "kind": "guardrail", "label": "gap still confirmed: confirmed_gap_is_G not worse than -3 pp", "scope": "ALL", "metric": "conf_gap", "scale": 100, "direction": "ge", "margin": -3.0},
-  {"id": "P1", "kind": "gain", "label": "noise: chains per gap-free student fall by >= 0.10", "scope": "ALL", "metric": "chains_ps_nogap", "scale": 1, "direction": "le", "min_effect": -0.10},
-  {"id": "P2", "kind": "gain", "label": "weak students (T1): P(any chain | no gap) falls by >= 10 pp", "scope": "ALL_T1", "metric": "p_chain_nogap", "scale": 100, "direction": "le", "min_effect": -10.0},
-  {"id": "P3", "kind": "gain", "label": "chain_precision (root == G) rises by >= 3 pp", "scope": "ALL", "metric": "chain_precision", "scale": 100, "direction": "ge", "min_effect": 3.0},
-  {"id": "P4", "kind": "gain", "label": "scan selectivity: (scan gap - scan no gap) rises by >= 3 pp", "scope": "ALL", "metric": "scan_signal", "scale": 100, "direction": "ge", "min_effect": 3.0},
-  {"id": "P5", "kind": "gain", "label": "net signal cause(gap) - fp(no gap) rises by >= 3 pp", "scope": "ALL", "metric": "signal_cause", "scale": 100, "direction": "ge", "min_effect": 3.0}
+  {
+   "id": "P1",
+   "kind": "primary",
+   "test": "effect",
+   "label": "weak students (T1): P(any chain | no gap) falls by >= 20 pp (A0 73.8%)",
+   "scope": "ALL_T1",
+   "metric": "p_chain_nogap",
+   "scale": 100,
+   "direction": "le",
+   "min_effect": -20.0
+  },
+  {
+   "id": "P2",
+   "kind": "primary",
+   "test": "effect",
+   "label": "ALL: chains per gap-free student fall",
+   "scope": "ALL",
+   "metric": "chains_ps_nogap",
+   "scale": 1,
+   "direction": "le",
+   "min_effect": 0.0
+  },
+  {
+   "id": "P3",
+   "kind": "primary",
+   "test": "effect",
+   "label": "chain_precision (root == G) >= 2x A0 and >= 8%",
+   "scope": "ALL",
+   "metric": "chain_precision",
+   "scale": 100,
+   "direction": "ge",
+   "min_effect": 0.0,
+   "min_ratio": 2.0,
+   "min_value": 8.0
+  },
+  {
+   "id": "G1",
+   "kind": "guardrail",
+   "test": "noninferior",
+   "label": "acc3 ALL: CI lower bound >= -1.0 pp",
+   "scope": "ALL",
+   "metric": "acc_category",
+   "scale": 100,
+   "direction": "ge",
+   "margin": -1.0
+  },
+  {
+   "id": "G2",
+   "kind": "guardrail",
+   "test": "noninferior",
+   "label": "acc3 every grade: CI lower bound >= -3 pp",
+   "scope": "EACH_GRADE",
+   "metric": "acc_category",
+   "scale": 100,
+   "direction": "ge",
+   "margin": -3.0
+  },
+  {
+   "id": "G3",
+   "kind": "guardrail",
+   "test": "noninferior",
+   "label": "theta RMSE: CI upper bound <= +0.01",
+   "scope": "ALL",
+   "metric": "rmse_theta",
+   "scale": 1,
+   "direction": "le",
+   "margin": 0.01
+  },
+  {
+   "id": "G4",
+   "kind": "guardrail",
+   "test": "noninferior",
+   "label": "mean test length: CI upper bound <= +0.5 items",
+   "scope": "ALL",
+   "metric": "len_mean",
+   "scale": 1,
+   "direction": "le",
+   "margin": 0.5
+  },
+  {
+   "id": "G5",
+   "kind": "guardrail",
+   "test": "point_equal",
+   "label": "p90 of test length unchanged",
+   "scope": "ALL",
+   "metric": "len_p90",
+   "scale": 1,
+   "tol": 0.0
+  },
+  {
+   "id": "G6",
+   "kind": "guardrail",
+   "test": "noninferior",
+   "label": "sessions hitting max_items: CI upper bound <= +1 pp",
+   "scope": "ALL",
+   "metric": "hit_max_items",
+   "scale": 100,
+   "direction": "le",
+   "margin": 1.0
+  },
+  {
+   "id": "G7",
+   "kind": "guardrail",
+   "test": "noninferior",
+   "label": "false root-cause claims fp_nogap: CI upper bound <= +0.5 pp",
+   "scope": "ALL",
+   "metric": "fp_nogap",
+   "scale": 100,
+   "direction": "le",
+   "margin": 0.5
+  },
+  {
+   "id": "G8",
+   "kind": "guardrail",
+   "test": "noninferior",
+   "label": "confirmed_gap_is_G lift over base rate not below A0 by more than 0.2x (CI lower bound)",
+   "scope": "ALL",
+   "metric": "conf_lift",
+   "scale": 1,
+   "direction": "ge",
+   "margin": -0.2
+  },
+  {
+   "id": "G9",
+   "kind": "guardrail",
+   "test": "noninferior",
+   "label": "topic coverage: topics measured per session, CI lower bound >= -0.5",
+   "scope": "ALL",
+   "metric": "topics_measured",
+   "scale": 1,
+   "direction": "ge",
+   "margin": -0.5
+  },
+  {
+   "id": "S1",
+   "kind": "secondary",
+   "test": "effect",
+   "label": "sig_r (root(gap) - fp) on dependent gaps rises by >= 2.0 pp, ALL lower bound > 0",
+   "scope": "DEP",
+   "metric": "signal_root",
+   "scale": 100,
+   "direction": "ge",
+   "min_effect": 2.0
+  },
+  {
+   "id": "S2",
+   "kind": "secondary",
+   "test": "effect_positive",
+   "label": "sig_r on dependent gaps, grade 9: difference > 0",
+   "scope": "DEP_G9",
+   "metric": "signal_root",
+   "scale": 100,
+   "direction": "ge"
+  },
+  {
+   "id": "S3",
+   "kind": "secondary",
+   "test": "level",
+   "label": "trigger discrimination scan_gap - scan_nogap >= 10 pp on the eligible class (variant level)",
+   "scope": "ELIG",
+   "metric": "scan_signal",
+   "scale": 100,
+   "direction": "ge",
+   "threshold": 10.0
+  },
+  {
+   "id": "S4",
+   "kind": "secondary",
+   "test": "level",
+   "label": "scan_nogap <= 70% (variant level)",
+   "scope": "ALL",
+   "metric": "scan_nogap",
+   "scale": 100,
+   "direction": "le",
+   "threshold": 70.0
+  },
+  {
+   "id": "S5",
+   "kind": "secondary",
+   "test": "level",
+   "label": "Deep Scan items per gap-free student <= 3.5 (variant level)",
+   "scope": "ALL",
+   "metric": "ds_items_nogap",
+   "scale": 1,
+   "direction": "le",
+   "threshold": 3.5
+  }
  ]
 }

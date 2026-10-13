@@ -12,6 +12,7 @@ before and after every run (a run whose bank changed underneath it is flagged IN
 
   # the comparison table with the acceptance verdicts (also printed by `plan`)
   python tools/rootcause_diag.py --base A0 --variants A1 A2 A3 A4 A5 --stage stage3b
+  python tools/rootcause_diag.py --consistency A3 A5          # finalists: stand A vs stand B seed 1 vs seed 2 (run after stage 3c)
 
 Arms: tools/rootcause_arms.json (cat_sim --setting overrides per arm).  Tags: stand A seed 1 -> <arm>; stand A other seed ->
 <arm>s<seed>; stand B -> B_<arm>_s<seed>.  Result files: tools/sim_results/rootcause_<tag>_G<n>.json (gitignored).
@@ -126,6 +127,8 @@ def cmd_run(a):
     for seed in a.seeds:
         stage = f"stage3{'c' if a.stand == 'B' else 'b'}" + (f"_s{seed}" if a.stand == "B" or seed != 1 else "")
         subprocess.run(compare_cmd(a.stand, base, names[1:], seed, stage), cwd=str(DIAG))
+    if a.stand == "B" and len(names) > 1:           # finalists: stand A vs stand B seed 1 vs seed 2 (needs the stage3b stand-A comparison)
+        subprocess.run([sys.executable, "tools/rootcause_diag.py", "--consistency", *names[1:]], cwd=str(DIAG))
 
 
 def main():
