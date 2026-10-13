@@ -522,7 +522,7 @@ def test_first_scan_freezes_the_session_flags(monkeypatch):
                                       "trigger_mode": "hard_prereq",
                                       "importance_threshold": ss.settings.deep_scan_importance_threshold,
                                       "session_budget": ss.settings.deep_scan_session_budget,
-                                      "max_items": ss.settings.deep_scan_max_items}
+                                      "max_items": ss.settings.deep_scan_max_items, **STAGE3B_DEFAULTS}
     stored = dict(state.deep_scan_params)
     # the settings change later (config redeploy / env edit): the session keeps its own values
     monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", 1, raising=False)
@@ -634,7 +634,7 @@ def test_create_session_freezes_the_flags_before_any_navigation(monkeypatch):
                      "trigger_mode": "hard_prereq",
                      "importance_threshold": ss.settings.deep_scan_importance_threshold,
                      "session_budget": ss.settings.deep_scan_session_budget,
-                     "max_items": ss.settings.deep_scan_max_items}]
+                     "max_items": ss.settings.deep_scan_max_items, **STAGE3B_DEFAULTS}]
 
 
 def test_negative_offset_target_is_clamped_to_the_upper_bound(monkeypatch):
@@ -648,8 +648,10 @@ def test_negative_offset_target_is_clamped_to_the_upper_bound(monkeypatch):
 
 # ── every flag is frozen at creation; nothing in the session flow reads the live settings ─────────────────
 
-SIX_KEYS = {"confirm_probes", "probe_difficulty_offset", "trigger_mode",
-            "importance_threshold", "session_budget", "max_items"}
+ALL_KEYS = {"confirm_probes", "probe_difficulty_offset", "trigger_mode",
+            "importance_threshold", "session_budget", "max_items",
+            "trigger_rule", "residual_min", "probe_min_p"}                  # stage 3b added the last three
+STAGE3B_DEFAULTS = {"trigger_rule": "current", "residual_min": 1.0, "probe_min_p": 0.0}
 
 
 def set_live(monkeypatch, **flags):
@@ -657,7 +659,7 @@ def set_live(monkeypatch, **flags):
         monkeypatch.setattr(ss.settings, f"deep_scan_{name}", value, raising=False)
 
 
-def test_create_session_freezes_all_six_flags(monkeypatch):
+def test_create_session_freezes_all_flags(monkeypatch):
     set_live(monkeypatch, confirm_probes=3, probe_difficulty_offset=0.75, trigger_mode="hard_prereq",
              importance_threshold=9, session_budget=4, max_items=3)
     service = object.__new__(SessionService)
@@ -675,8 +677,8 @@ def test_create_session_freezes_all_six_flags(monkeypatch):
     with pytest.raises(Stop):
         service.create_session(student_id="u", grade_level=8)
     assert seen == [{"confirm_probes": 3, "probe_difficulty_offset": 0.75, "trigger_mode": "hard_prereq",
-                     "importance_threshold": 9, "session_budget": 4, "max_items": 3}]
-    assert set(seen[0]) == SIX_KEYS
+                     "importance_threshold": 9, "session_budget": 4, "max_items": 3, **STAGE3B_DEFAULTS}]
+    assert set(seen[0]) == ALL_KEYS
 
 
 def test_frozen_importance_threshold_is_used_after_the_setting_changes(monkeypatch):
@@ -759,7 +761,7 @@ def test_partially_stored_params_fall_back_to_live_settings_without_mutation(mon
     # first real use freezes the missing keys; stored ones are kept as they were
     set_live(monkeypatch, importance_threshold=5)
     frozen = SessionService._scan_params(state)
-    assert set(frozen) == SIX_KEYS and frozen["importance_threshold"] == 5 and frozen["confirm_probes"] == 2
+    assert set(frozen) == ALL_KEYS and frozen["importance_threshold"] == 5 and frozen["confirm_probes"] == 2
     set_live(monkeypatch, importance_threshold=9)
     assert SessionService._scan_params(state)["importance_threshold"] == 5
 
@@ -845,7 +847,7 @@ def test_answer_handling_freezes_a_pre_flag_session_before_any_preview(monkeypat
     service = answering_service(state, seen)
     result = service._submit_answer_locked(session_id="sid", task_id="T", student_answer="1", time_ms=1)
     assert result == "DONE"
-    assert len(seen) == 1 and set(seen[0]) == SIX_KEYS                  # frozen BEFORE the preview ran
+    assert len(seen) == 1 and set(seen[0]) == ALL_KEYS                  # frozen BEFORE the preview ran
     assert state.deep_scan_params["importance_threshold"] == 8
     # the config changes afterwards: the frozen values keep deciding
     set_live(monkeypatch, importance_threshold=3)
@@ -877,4 +879,4 @@ def test_a_new_session_freezes_the_oc15_defaults(monkeypatch):
     state = SessionState(session_id="s", student_id="u", grade_level=8)
     assert SessionService._scan_params(state) == {
         "confirm_probes": 2, "probe_difficulty_offset": 1.5, "trigger_mode": "importance",
-        "importance_threshold": 8, "session_budget": 6, "max_items": 6}
+        "importance_threshold": 8, "session_budget": 6, "max_items": 6, **STAGE3B_DEFAULTS}

@@ -68,7 +68,7 @@ class SessionState:
     deep_scan_unconfirmed: List[str] = field(default_factory=list)
     # Deep Scan flags FIXED for this session at create_session:
     # {"confirm_probes", "probe_difficulty_offset", "trigger_mode",
-    #  "importance_threshold", "session_budget", "max_items"}.  The trigger rule, the scan
+    #  "importance_threshold", "session_budget", "max_items", "trigger_rule", "residual_min", "probe_min_p"}.  The trigger rule, the scan
     # engine, probe selection and the report all read the session's own values, so a
     # config change later (mid-session, or before the report is rebuilt) never changes
     # what the session did or how its chains are read.  None = a session created before
@@ -82,6 +82,11 @@ class SessionState:
     # than the navigator is pointing at, so its answer is attributed to the real
     # skill but the cursor-side context must go back afterwards.
     fallback_nav_context: Optional[dict] = None
+
+    # p_hat of every navigation answer of the CURRENT L3 visit (3PL probability of a correct answer at the
+    # theta before the answer), reset when a visit starts.  DEEP_SCAN_TRIGGER_RULE=d2 reads the residual
+    # sum(p_hat - x) from it; recorded for every session so a rule can be switched on without a state change.
+    visit_p_hats: List[float] = field(default_factory=list)
 
     # Why the diagnostic ended.  This is persisted into the final session and
     # report so a max-length result is never presented as a precision result.
@@ -125,6 +130,7 @@ class SessionState:
             "deep_scan_unconfirmed": self.deep_scan_unconfirmed,
             "deep_scan_params": self.deep_scan_params,
             "fallback_nav_context": self.fallback_nav_context,
+            "visit_p_hats": self.visit_p_hats,
             "stop_reason": self.stop_reason,
         }
 
@@ -169,5 +175,6 @@ class SessionState:
             deep_scan_unconfirmed=data.get("deep_scan_unconfirmed", []),
             deep_scan_params=data.get("deep_scan_params"),
             fallback_nav_context=data.get("fallback_nav_context"),
+            visit_p_hats=list(data.get("visit_p_hats") or []),
             stop_reason=data.get("stop_reason"),
         )
