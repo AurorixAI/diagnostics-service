@@ -89,7 +89,7 @@ def build_arrays(data, l2_of=None):
     f = lambda: np.zeros(N)
     A = {k: f() for k in (
         "grade", "gap", "theta", "terc", "cluster", "scan", "ds_items", "nch", "chG", "conf", "topic", "entries", "wt", "ct",
-        "dt", "V", "F", "S", "R", "Rany", "Q", "Fimp", "Fbud", "C", "budget_sig", "n_sig_scans", "budget_noise", "n_noise_scans",
+        "dt", "V", "F", "S", "R", "Rany", "Rorig", "Rprobe", "Cprobe", "Q", "Fimp", "Fbud", "C", "budget_sig", "n_sig_scans", "budget_noise", "n_noise_scans",
         "sig_n", "noise_n", "n_cut", "n_terminal", "n_visits", "n_failed")}
     for rule in RULES:
         A[f"sig_{rule}"], A[f"noise_{rule}"], A[f"any_{rule}"], A[f"anysig_{rule}"] = f(), f(), f(), f()
@@ -122,6 +122,9 @@ def build_arrays(data, l2_of=None):
             A["S"][i] = any(s["origin_sig"] for s in sc)
             A["R"][i] = any(s["origin_sig"] and (s["G_origin"] or s["G_probed"]) for s in sc)
             A["Rany"][i] = any(s["G_origin"] or s["G_probed"] for s in sc)
+            A["Rorig"][i] = any(s["G_origin"] for s in sc)                      # the failed L3 was G itself
+            A["Rprobe"][i] = any(s["G_probed"] and not s["G_origin"] for s in sc)  # G probed as a prerequisite
+            A["Cprobe"][i] = any(s["G_confirmed"] and not s["G_origin"] for s in sc)
             A["Q"][i] = any(s["G_in_queue"] for s in sc)
             A["C"][i] = A["conf"][i]
             shd = [s for s in r["shadow_triggers"] if s["sig"]]
@@ -236,7 +239,7 @@ def metrics(A, cols, W, scope):
         out[f"{name}_lift"] = _div(pos, matched)
         out[f"{name}_diff"] = out[f"{name}_gap"] - out[f"{name}_base"]
     # funnel (gap students)
-    for k in ("V", "F", "S", "R", "Rany", "Q", "C", "Fimp", "Fbud"):
+    for k in ("V", "F", "S", "R", "Rany", "Rorig", "Rprobe", "Cprobe", "Q", "C", "Fimp", "Fbud"):
         out[f"f_{k}"] = _div(s(A[k], gap), s(np.ones(len(gap)), gap))
     # budget at the start of a scan
     for k in ("sig", "noise"):
@@ -361,14 +364,16 @@ def main():
             rows.append((f"{name} {label}", [f_(sc) for sc in heads]))
     L += table("2. by true-theta tercile (ALL with cluster-bootstrap CI, grades: point estimates)", rows, heads)
 
-    L += table("3. funnel, share of gap students (V->F->S->R->C nested by definition; Rany/Q over ANY scan)", [
+    L += table("3. funnel, share of gap students (V>=F>=S>=R nested; C and Rany/Q count ANY scan, a noise-origin scan can descend to G)", [
         row("V visited a signal L3", pct("f_V")), row("F failed a signal L3", pct("f_F")),
         row("  Fimp: ...with importance>=8", pct("f_Fimp")), row("  Fbud: ...found the budget spent", pct("f_Fbud")),
         row("S scan started from it", pct("f_S")), row("R G reached in such a scan", pct("f_R")),
         row("C confirmed_gap_is_G", pct("f_C")), row("Rany G reached, any scan", pct("f_Rany")),
+        row("  Rorig: the failed L3 was G itself", pct("f_Rorig")), row("  Rprobe: G probed as prerequisite", pct("f_Rprobe")),
+        row("  Cprobe: G confirmed by a probe", pct("f_Cprobe")),
         row("Q G in initial queue, any scan", pct("f_Q")),
         row("S|F  (share of F)", lambda sc: f"{_r(res[sc], 'f_S', 'f_F'):.1f}"),
-        row("R|S", lambda sc: f"{_r(res[sc], 'f_R', 'f_S'):.1f}"), row("C|R", lambda sc: f"{_r(res[sc], 'f_C', 'f_R'):.1f}"),
+        row("R|S", lambda sc: f"{_r(res[sc], 'f_R', 'f_S'):.1f}"), row("C|Rany", lambda sc: f"{_r(res[sc], 'f_C', 'f_Rany'):.1f}"),
         row("budget used at scan start: sig/noise", lambda sc: f"{fv(res[sc]['budget_start_sig'], 2)}/{fv(res[sc]['budget_start_noise'], 2)}"),
     ], heads)
 
