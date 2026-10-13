@@ -309,6 +309,44 @@ def enqueue_forced_report_generations(
             db.close()
 
 
+class BackupError(RuntimeError):
+    """The backup of the snapshots about to be overwritten could not be written: nothing is changed."""
+
+
+# What makes a refresh of one answer fail (the operator must look at it); an inactive task is only skipped.
+REFRESH_FAILURES = ("fetch_errors", "missing_task", "build_errors", "invalid_snapshot", "invalid_live_task")
+
+
+def default_backup_path(now: Optional[datetime] = None) -> str:
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d_%H%M%S")
+    return f"/app/backups/task_snapshots_before_refresh_{stamp}.jsonl"
+
+
+def write_snapshot_backup(path: str, rows: Sequence[Dict[str, Any]], *, stamp: str) -> int:
+    """JSONL of (answer_id, session_id, task_id, task_snapshot) as they are NOW; exclusive create, fsync, read back."""
+    import json
+    import os
+
+    try:
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)
+        with open(path, "x", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps({
+                    "answer_id": str(row["answer_id"]), "session_id": str(row["session_id"]),
+                    "task_id": row["task_id"], "task_snapshot": row["old_snapshot"], "backed_up_at": stamp,
+                }, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        with open(path, "r", encoding="utf-8") as handle:
+            written = sum(1 for _ in handle)
+    except OSError as exc:
+        raise BackupError(f"cannot write the backup {path}: {exc}") from exc
+    if written != len(rows):
+        raise BackupError(f"backup {path} holds {written} of {len(rows)} rows")
+    return written
+
+
 def refresh_answer_task_snapshots(
     db: Session,
     task_repo: Any,
@@ -316,79 +354,224 @@ def refresh_answer_task_snapshots(
     session_ids: Sequence[uuid.UUID],
     task_ids: Sequence[str] = (),
     execute: bool = False,
+    allow_key_change: bool = False,
+    allow_partial: bool = False,
+    backup_path: Optional[str] = None,
     now: Optional[datetime] = None,
-) -> Dict[str, int]:
+) -> Dict[str, Any]:
     """Refresh the report-facing fields of ``diag_answers.task_snapshot`` from the current bank.
 
     A report is built from the snapshot stored with each answer (the live bank is read only for answers
     without one), so a content repair reaches a rebuilt report only after this refresh.  Only the
-    ``task_snapshot`` column is written - never ``outcome``, ``student_answer`` or any other column of the
-    append-only journal.  With ``task_ids`` only answers to those tasks are refreshed, otherwise every
-    answer of the given sessions.  Answers without a snapshot are left as they are (the rebuild reads
-    them live).  Dry-run (``execute=False``) fetches and counts but writes nothing.
+    ``task_snapshot`` column is written (``UPDATE ... WHERE id AND task_snapshot = <what was read>``) -
+    never ``outcome``, ``student_answer`` or any other column of the append-only journal.
+
+    * every task is fetched BEFORE any write transaction; inactive tasks and live tasks with an empty
+      question or key are skipped; a missing task, a fetch error, an unreadable snapshot or a build error
+      are failures: the answers of such a session are not written and the session is not queued
+      (``allow_partial`` proceeds with what can be refreshed);
+    * an answer is refreshed only if the new content cannot contradict its stored verdict
+      (``task_evidence.integrity_flags``); flagged answers are listed and skipped, or with
+      ``allow_key_change`` refreshed WITHOUT replacing key and question;
+    * before the first write the old snapshots go to a JSONL backup (``write_snapshot_backup``); no
+      backup, no write; ``restore_task_snapshots`` puts them back;
+    * the report rows of the sessions are locked (``FOR UPDATE SKIP LOCKED``, the worker's own claim
+      lock) during the write: a ``generating`` or locked report is "busy" - not rewritten, run again when
+      the worker is idle; a ``pending`` job simply reads the new snapshots when it is claimed.
+    Dry-run (``execute=False``) fetches and plans but writes nothing.
     """
-    from src.domain.task_display import build_diag_answer_options
-    from src.domain.task_evidence import refresh_snapshot
+    from src.domain.task_evidence import integrity_flags, live_task_problem, read_task, refresh_snapshot
 
-    stats = {
-        "examined": 0, "refreshed": 0, "would_refresh": 0, "unchanged": 0, "null_snapshot": 0,
-        "missing_task": 0, "fetch_errors": 0, "build_errors": 0, "invalid_snapshot": 0,
-        "display_options_kept": 0,
-    }
     stamp = (now or datetime.now(timezone.utc)).isoformat()
+    stats = {
+        "examined": 0, "would_refresh": 0, "refreshed": 0, "unchanged": 0, "null_snapshot": 0,
+        "inactive_task": 0, "flagged_skipped": 0, "flagged_refreshed_safe": 0, "held_back": 0, "busy": 0,
+        "skipped_concurrent": 0, "fetch_errors": 0, "missing_task": 0, "build_errors": 0, "invalid_snapshot": 0,
+        "invalid_live_task": 0,
+    }
     wanted = _unique(str(t).strip() for t in task_ids if str(t).strip())
-    live: Dict[str, Any] = {}
 
-    def fetch(task_id: str):
-        if task_id not in live:
+    # 1. read the answers, then release the read transaction before any HTTP call
+    answers = []
+    for chunk in _chunks(_unique(session_ids)):
+        query = db.query(
+            DiagAnswer.id, DiagAnswer.session_id, DiagAnswer.task_id, DiagAnswer.student_answer,
+            DiagAnswer.outcome, DiagAnswer.task_snapshot,
+        ).filter(DiagAnswer.session_id.in_(chunk))
+        if wanted:
+            query = query.filter(DiagAnswer.task_id.in_(wanted))
+        answers.extend(query.order_by(DiagAnswer.session_id, DiagAnswer.id).all())
+    db.rollback()
+
+    # 2. prefetch every distinct task (None == 404, Ellipsis == transport / server error)
+    live: Dict[str, Any] = {}
+    for _id, _sid, task_id, _sa, _oc, snapshot in answers:
+        if snapshot and task_id not in live:
             try:
-                live[task_id] = task_repo.get_by_id(task_id)             # None == 404
+                live[task_id] = task_repo.get_by_id(task_id)
             except Exception as exc:
                 log.warning("refresh: cannot fetch task %s: %s", task_id, exc)
                 live[task_id] = Ellipsis
-        return live[task_id]
 
-    for chunk in _chunks(_unique(session_ids)):
-        query = db.query(DiagAnswer.id, DiagAnswer.session_id, DiagAnswer.task_id, DiagAnswer.task_snapshot).filter(
-            DiagAnswer.session_id.in_(chunk)
-        )
-        if wanted:
-            query = query.filter(DiagAnswer.task_id.in_(wanted))
-        for answer_id, session_id, task_id, snapshot in query.order_by(DiagAnswer.id).all():
-            stats["examined"] += 1
-            if not snapshot:
-                stats["null_snapshot"] += 1
-                continue
-            task = fetch(task_id)
-            if task is Ellipsis:
-                stats["fetch_errors"] += 1
-                continue
-            if task is None:
-                stats["missing_task"] += 1
-                continue
-            try:
-                options, options_latex = build_diag_answer_options(task, seed=f"{session_id}:{task.id}")
-                refreshed, info = refresh_snapshot(
-                    snapshot, task_id, task, options, options_latex, source=REFRESH_SOURCE, refreshed_at=stamp,
+    # 3. plan every answer
+    items: List[Dict[str, Any]] = []
+    for answer_id, session_id, task_id, student_answer, outcome, snapshot in answers:
+        stats["examined"] += 1
+        item = {"answer_id": answer_id, "session_id": session_id, "task_id": task_id, "status": "", "changed": [],
+                "flags": [], "old_snapshot": snapshot, "new_snapshot": None, "reason": ""}
+        items.append(item)
+        if not snapshot:
+            item["status"] = "null_snapshot"
+            continue
+        task = live[task_id]
+        if task is Ellipsis:
+            item["status"], item["reason"] = "fetch_errors", "content-service error / timeout"
+            continue
+        if task is None:
+            item["status"], item["reason"] = "missing_task", "task not found (404)"
+            continue
+        problem = live_task_problem(task)
+        if problem:
+            item["status"] = problem
+            item["reason"] = "task is inactive" if problem == "inactive_task" else "live task has no question or no key"
+            continue
+        try:
+            old_payload = read_task(snapshot, task_id)
+        except ValueError as exc:
+            item["status"], item["reason"] = "invalid_snapshot", str(exc)
+            continue
+        try:
+            new_snapshot, changed = refresh_snapshot(snapshot, task_id, task, source=REFRESH_SOURCE, refreshed_at=stamp)
+            flags = integrity_flags(old_payload, new_snapshot["task"], student_answer, outcome) if new_snapshot else []
+            if new_snapshot and flags and allow_key_change:
+                new_snapshot, changed = refresh_snapshot(
+                    snapshot, task_id, task, source=REFRESH_SOURCE, refreshed_at=stamp, keep_key_and_question=True,
                 )
-            except ValueError as exc:                                     # invalid envelope / hash mismatch
-                log.warning("refresh: answer %s has an unreadable snapshot: %s", answer_id, exc)
-                stats["invalid_snapshot"] += 1
-                continue
-            except Exception as exc:
-                log.warning("refresh: cannot rebuild answer %s task %s: %s", answer_id, task_id, exc)
-                stats["build_errors"] += 1
-                continue
-            if info["display_options_kept"]:
-                stats["display_options_kept"] += 1
-            if refreshed is None:
-                stats["unchanged"] += 1
-                continue
-            if not execute:
-                stats["would_refresh"] += 1
-                continue
-            db.execute(update(DiagAnswer).where(DiagAnswer.id == answer_id).values(task_snapshot=refreshed))
-            stats["refreshed"] += 1
+        except Exception as exc:
+            item["status"], item["reason"] = "build_errors", f"{type(exc).__name__}: {exc}"
+            continue
+        item["flags"], item["changed"] = flags, changed
+        if new_snapshot is None:
+            item["status"] = "unchanged"
+        elif flags and not allow_key_change:
+            item["status"] = "flagged_skipped"
+        else:
+            item["status"] = "refresh"
+            item["new_snapshot"] = new_snapshot
+
+    # 4. a failure holds the whole session back (unless allow_partial)
+    failed_sessions = {i["session_id"] for i in items if i["status"] in REFRESH_FAILURES}
+    excluded = set() if allow_partial else set(failed_sessions)
+    for item in items:
+        if item["status"] == "refresh" and item["session_id"] in excluded:
+            item["status"] = "held_back"
+
+    # 5. write (backup first, report rows locked)
+    busy_sessions: List[uuid.UUID] = []
+    backup = None
+    to_write = [i for i in items if i["status"] == "refresh"]
+    if to_write:
+        sessions_to_write = _unique(i["session_id"] for i in to_write)
+        reports = {}
+        for chunk in _chunks(sessions_to_write):
+            for report in db.query(DiagReport).filter(DiagReport.session_id.in_(chunk)).all():
+                reports[report.session_id] = report
+        db.rollback()
+        # predicted in dry-run, decided under the lock in execute
+        busy_sessions = [sid for sid in sessions_to_write if sid in reports and reports[sid].generation_status == "generating"]
+        if execute:
+            backup = backup_path or default_backup_path(now)
+            write_snapshot_backup(backup, [i for i in to_write if i["session_id"] not in busy_sessions], stamp=stamp)
+            try:
+                for sid in sessions_to_write:
+                    if sid in busy_sessions or sid not in reports:
+                        continue
+                    locked = (
+                        db.query(DiagReport).filter(DiagReport.session_id == sid)
+                        .with_for_update(skip_locked=True).first()
+                    )
+                    if locked is None or locked.generation_status == "generating":
+                        busy_sessions.append(sid)
+                for item in to_write:
+                    if item["session_id"] in busy_sessions:
+                        item["status"] = "busy"
+                        continue
+                    result = db.execute(
+                        update(DiagAnswer)
+                        .where(DiagAnswer.id == item["answer_id"], DiagAnswer.task_snapshot == item["old_snapshot"])
+                        .values(task_snapshot=item["new_snapshot"])
+                    )
+                    item["status"] = "refreshed" if result.rowcount else "skipped_concurrent"
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+        else:
+            for item in to_write:
+                item["status"] = "busy" if item["session_id"] in busy_sessions else "would_refresh"
+
+    for item in items:
+        status = item["status"]
+        stats[status] = stats.get(status, 0) + 1
+        if status in ("refreshed", "would_refresh") and item["flags"]:
+            stats["flagged_refreshed_safe"] += 1
+    return {
+        "stats": stats,
+        "items": items,
+        "failed": [{"answer_id": str(i["answer_id"]), "session_id": str(i["session_id"]), "task_id": i["task_id"],
+                    "status": i["status"], "reason": i["reason"]} for i in items if i["status"] in REFRESH_FAILURES],
+        "inactive_tasks": sorted({i["task_id"] for i in items if i["status"] == "inactive_task"}),
+        "failed_sessions": sorted(str(s) for s in failed_sessions),
+        "excluded_sessions": set(excluded) | set(busy_sessions),
+        "busy_sessions": list(dict.fromkeys(busy_sessions)),
+        "backup": backup,
+    }
+
+
+def restore_task_snapshots(db: Session, backup_path: str, *, execute: bool = False) -> Dict[str, int]:
+    """Put the snapshots of a ``write_snapshot_backup`` file back (dry-run by default).
+
+    A row is restored only if the answer still carries the snapshot this refresh produced
+    (``refresh_history[-1].previous_sha256`` equals the backed-up hash) - after a later refresh or a manual
+    change it is ``diverged`` and left alone (restore the newest backup first).  The write has the same
+    guard as the refresh: ``WHERE id AND task_snapshot = <current>``.
+    """
+    import json
+
+    stats = {"rows": 0, "would_restore": 0, "restored": 0, "already_restored": 0, "diverged": 0,
+             "missing_answer": 0, "invalid_rows": 0, "skipped_concurrent": 0}
+    with open(backup_path, "r", encoding="utf-8") as handle:
+        lines = [line for line in handle.read().splitlines() if line.strip()]
+    for line in lines:
+        stats["rows"] += 1
+        try:
+            row = json.loads(line)
+            answer_id = uuid.UUID(row["answer_id"])
+            old = row["task_snapshot"]
+            assert isinstance(old, dict) and isinstance(old.get("sha256"), str)
+        except Exception:
+            stats["invalid_rows"] += 1
+            continue
+        current = db.query(DiagAnswer.task_snapshot).filter(DiagAnswer.id == answer_id).first()
+        if current is None:
+            stats["missing_answer"] += 1
+            continue
+        current = current[0]
+        if current == old:
+            stats["already_restored"] += 1
+            continue
+        history = current.get("refresh_history") if isinstance(current, dict) else None
+        if not (isinstance(current, dict) and current.get("provenance") == "bank_refresh" and history
+                and history[-1].get("previous_sha256") == old.get("sha256")):
+            stats["diverged"] += 1
+            continue
+        if not execute:
+            stats["would_restore"] += 1
+            continue
+        result = db.execute(
+            update(DiagAnswer).where(DiagAnswer.id == answer_id, DiagAnswer.task_snapshot == current).values(task_snapshot=old)
+        )
+        stats["restored" if result.rowcount else "skipped_concurrent"] += 1
     if execute:
         db.commit()
     else:

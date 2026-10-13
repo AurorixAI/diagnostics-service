@@ -55,14 +55,24 @@ def test_snapshot_is_detached_from_source_and_next_issuance():
     assert st.current_task_snapshot['task']['id']=='next'
 
 
-@pytest.mark.parametrize('edit',['key','id','hash','version','provenance'])
+@pytest.mark.parametrize('edit',['key','id','hash','version','no_provenance','empty_provenance','non_string_provenance'])
 def test_corrupt_or_foreign_evidence_is_rejected(edit):
     snapshot=capture_task(task(),['2','1'],['$2$','$1$'],'mcq')
     if edit=='key':snapshot['task']['correct_answer']='99'
     elif edit=='id':snapshot['task']['id']='foreign'
     elif edit=='hash':snapshot['sha256']='invalid'
     elif edit=='version':snapshot['version']=99
-    else:snapshot['provenance']='invented_legacy_backfill'
+    elif edit=='no_provenance':del snapshot['provenance']
+    elif edit=='empty_provenance':snapshot['provenance']='  '
+    else:snapshot['provenance']=7
+    with pytest.raises(ValueError):read_task(snapshot,'evidence?task')
+
+
+def test_an_unknown_or_future_provenance_label_does_not_blank_the_question():
+    # integrity is identity + hash; the label is informational (a mixed deploy must not lose questions)
+    snapshot=capture_task(task(),['2','1'],['$2$','$1$'],'mcq',provenance='some_future_label')
+    assert read_task(snapshot,'evidence?task')['correct_answer']==task().correct_answer
+    snapshot['task']['correct_answer']='99'                     # tampering is still caught by the hash
     with pytest.raises(ValueError):read_task(snapshot,'evidence?task')
 
 
