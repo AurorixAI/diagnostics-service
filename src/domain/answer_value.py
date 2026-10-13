@@ -71,6 +71,25 @@ def answer_value_key(value: object) -> str:
     return text.casefold()
 
 
+_SINGLE_TOKEN_BRACES_RE = re.compile(r"([\^_])\{\s*([^\W_])\s*\}")
+
+
+def report_answer_key(value: object) -> str:
+    """Key for matching a STORED student answer to the options / distractors of a (since repaired) task.
+
+    REPORT SIDE ONLY: scoring at answer time keeps using ``answer_value_key`` and the stored outcome.
+    On top of ``answer_value_key`` (``\\dfrac`` = ``\\frac``, whitespace ignored) every ``$`` is dropped
+    and a braced group that holds a SINGLE character is the same as the bare character:
+    ``x^{3}`` = ``x^3``, ``a_{2}`` = ``a_2`` (content waves rewrite stored values this way).  A group of
+    several characters is never unwrapped, so ``x^{13}`` (exponent 13) stays different from ``x^13``
+    (``x^1`` followed by ``3``) and from ``x^1 3``.  Mirrors the front's ``canonicalAnswerKey`` for these
+    cases without its broader brace stripping.
+    """
+    text = str(value or "").replace("$", "")
+    text = _SINGLE_TOKEN_BRACES_RE.sub(r"\1\2", text)
+    return answer_value_key(text)
+
+
 _LEFT_RIGHT_RE = re.compile(r"\\(?:left|right)(?![A-Za-z])")
 _DIGIT_GAP_RE = re.compile(r"(?<=\d)\s+(?=\d)")
 _DECIMAL_COMMA_RE = re.compile(r"(?<=\d)(?:\{,\}|,)(?=\d)")

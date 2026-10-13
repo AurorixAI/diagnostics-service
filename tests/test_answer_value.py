@@ -5,7 +5,7 @@ from fractions import Fraction
 import pytest
 
 from src.domain.answer_evaluator import AnswerEvaluator
-from src.domain.answer_value import answer_value_key, answers_equivalent, display_student_answer, exact_number
+from src.domain.answer_value import answer_value_key, answers_equivalent, display_student_answer, exact_number, report_answer_key
 
 
 @pytest.mark.parametrize("first, second", [
@@ -122,3 +122,47 @@ def test_display_answer_passes_non_strings_through_and_caps_the_input():
     assert len(long_dict) > 2000 and display_student_answer(long_dict) == long_dict
     nested = "{'text': " + "[" * 500 + "1" + "]" * 500 + "}"                 # deep nesting must not raise
     assert display_student_answer(nested) == nested
+
+
+# ── report-side matching of a stored answer to a repaired task ─────────────────
+
+@pytest.mark.parametrize("stored, current", [
+    ("x^3 < y^3", "$x^{3} < y^{3}$"),                    # prod session b5b3e418 / ds_llm_c93d5c1c9ba6 after wave w35
+    ("a_2", "a_{2}"), ("$a_{2}$", "a_2"), ("x^{3}", "x^3"), ("x^{ 3 }", "x^3"), ("e^{x}", "e^x"),
+    (r"\dfrac{1}{2}", r"\frac{1}{2}"), ("$ x ^ 3 $", "x^{3}"), ("x_{i}^{2}", "x_i^2"),
+])
+def test_report_key_treats_single_token_braces_dollars_and_dfrac_as_equal(stored, current):
+    assert report_answer_key(stored) == report_answer_key(current)
+
+
+@pytest.mark.parametrize("first, second", [
+    ("x^{13}", "x^13"), ("x^{13}", "x^1 3"), ("x^{13}", "x^3"), ("a_{12}", "a_1 2"), ("x^{-1}", "x^-1"),
+    (r"x^{\alpha}", r"x^\alpha"), ("x^{3}", "x^4"),
+])
+def test_report_key_never_unwraps_a_multi_character_group(first, second):
+    assert report_answer_key(first) != report_answer_key(second)
+
+
+def test_scoring_key_is_unchanged_the_report_key_is_separate():
+    assert answer_value_key("x^3 < y^3") != answer_value_key("$x^{3} < y^{3}$")     # answer-time grading untouched
+    assert answer_value_key("$ 5 $") == report_answer_key("$5$") == "5"
+
+
+@pytest.mark.parametrize("value, expected", [
+    (None, ""), ("", ""), ("   ", ""), ("$$", ""), ("$ $", ""),
+    ("x^{}", "x^{}"), ("x^{ }", "x^{}"),                         # an empty group is not a single token
+    ("x^{{3}}", "x^{{3}}"), ("x^{3}{4}", "x^3{4}"),              # nested / consecutive groups: only the plain single group
+    ("x^{_}", "x^{_}"), ("x^{;}", "x^{;}"),                      # underscore / punctuation is not a character of the answer
+    ("x^{α}", "x^α"), ("a_{п}", "a_п"),                          # a single non-ASCII letter is a character
+    ("x^{3}", "x^3"), ("x_{i}^{2}", "x_i^2"), ("e^{x}+e^{-x}", "e^x+e^{-x}"),
+    ("10^{5}", "10^5"), ("10^{15}", "10^{15}"), ("2^{n}-1", "2^n-1"),
+    ("\\left(x^{2}\\right)", "(x^2)"), ("\\frac{a^{2}}{b}", "\\frac{a^2}{b}"),
+])
+def test_report_key_edge_cases(value, expected):
+    assert report_answer_key(value) == expected
+
+
+def test_report_key_is_idempotent_and_does_not_collapse_different_values():
+    for value in ("$x^{3} < y^{3}$", "x^{13}", "a_{12}", "x^{-1}", r"\dfrac{1}{2}", "e^{x}"):
+        assert report_answer_key(report_answer_key(value)) == report_answer_key(value)
+    assert len({report_answer_key(v) for v in ("x^3", "x^13", "x^{13}", "x_3", "x^-3", "x^{-3}")}) >= 5
