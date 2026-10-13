@@ -104,7 +104,8 @@ PROD_SETTINGS = {
 }
 # Deep Scan flags whose defaults live in the diagnostic-service Settings (variant OC15 since 2026-10-12);
 # not pinned here, only reported with the effective settings.
-VARIANT_FLAGS = ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE")
+VARIANT_FLAGS = ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE",
+                 "DEEP_SCAN_TRIGGER_RULE", "DEEP_SCAN_RESIDUAL_MIN", "DEEP_SCAN_PROBE_MIN_P")
 TOKEN = "cat-sim-internal-token"
 EFFECTIVE_SETTINGS: Dict[str, Dict[str, Any]] = {}     # arm label -> settings reported by the workers
 
@@ -357,13 +358,17 @@ class _Trace:
         imp_ok = v["importance"] is not None and v["importance"] >= params["importance_threshold"]
         cur = bool(imp_ok and failing)                                   # current rule, budget ignored
         budget_spent = P.deep_scan_items_total >= params["session_budget"]
+        d1 = bool(n_wrong >= 2 or (v["n_l4"] == 1 and n_wrong >= 1))
+        d2 = bool(resid >= 1.0)
+        rule = params.get("trigger_rule", "current")                      # the service's own frozen rule (stage 3b)
+        rule_ok = d1 if rule == "d1" else ((resid >= params.get("residual_min", 1.0)) if rule == "d2" else True)
         observed = None
         if not terminal and Q is not None:
             q_scan = (Q.phase == "deep_scan" and bool(Q.deep_scan)
                       and Q.deep_scan.get("origin_skill_id") == failing)
             q_empty = (not q_scan) and len(Q.confirmed_gaps) > len(P.confirmed_gaps)   # trigger fired, nothing to probe
             observed = q_scan or q_empty
-            if observed != (cur and not budget_spent):
+            if observed != (cur and rule_ok and not budget_spent):
                 self.aux["trigger_mismatch"] += 1
             if observed:
                 queue = [pid for pid in svc._prereq_l4_ids(failing)
@@ -380,7 +385,7 @@ class _Trace:
             self.aux["no_state"] += 1
         self.shadow.append({
             "l3": v["l3"], "importance": v["importance"], "sig": sig, "score": score, "imp_ok": imp_ok,
-            "cur": cur, "d1": bool(n_wrong >= 2 or (v["n_l4"] == 1 and n_wrong >= 1)), "d2": bool(resid >= 1.0),
+            "cur": cur, "d1": d1, "d2": d2,
             "budget_spent": bool(budget_spent), "actual": observed, "terminal": terminal})
 
     def finish(self, rows, required: int) -> None:

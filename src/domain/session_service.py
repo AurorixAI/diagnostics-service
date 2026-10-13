@@ -47,6 +47,7 @@ from src.domain.alpha_engine import (
     ThetaState,
     theta_to_level,
     level_confidence,
+    p_correct,
     update_theta,
 )
 from src.domain.navigators.skill_navigator import DeepScanState, SkillEntry, SkillNavigator
@@ -95,6 +96,9 @@ _SCAN_PARAM_SOURCES = {
     "importance_threshold": ("deep_scan_importance_threshold", int),
     "session_budget": ("deep_scan_session_budget", int),
     "max_items": ("deep_scan_max_items", int),
+    "trigger_rule": ("deep_scan_trigger_rule", str),
+    "residual_min": ("deep_scan_residual_min", float),
+    "probe_min_p": ("deep_scan_probe_min_p", float),
 }
 
 
@@ -378,6 +382,9 @@ class SessionService:
                 b=float(task.irt_difficulty or 0.0),
                 c=float(task.irt_guessing or 0.0),
             )
+            if state.phase == "navigation" and state.current_skill_nav:
+                # what the model expected of this answer, for the L3-level residual (DEEP_SCAN_TRIGGER_RULE=d2)
+                state.visit_p_hats.append(p_correct(theta_before, params))
             state.theta = update_theta(state.theta, params, outcome)
 
         # 5. Update per-topic alpha
@@ -724,6 +731,33 @@ class SessionService:
             return bool(self.prereq_repo.get_prerequisites(subtopic.subtopic_id, hard_only=True))
         return subtopic.importance >= params["importance_threshold"]
 
+    @staticmethod
+    def _visit_residual(state: SessionState, skills: SkillNavigator) -> float:
+        """sum(p_hat - x) over the answers of the L3 visit that ``skills`` just finished (or is in).
+
+        p_hat of each navigation answer is in ``state.visit_p_hats`` (appended in submit order); x is
+        1 for a correct and 0 for a wrong L4 result, in the navigator's answer order.  When the two
+        lists differ in length (a visit that started before the list existed, or a fallback item) the
+        most recent pairs are used."""
+        xs = list(skills.state.results.values())
+        n = min(len(xs), len(state.visit_p_hats))
+        if n == 0:
+            return 0.0
+        return float(sum(state.visit_p_hats[-n:]) - sum(1.0 for ok in xs[-n:] if ok))
+
+    def _visit_triggers(self, state: SessionState, skills: SkillNavigator) -> bool:
+        """DEEP_SCAN_TRIGGER_RULE for a FINISHED L3 visit (pass/fail, importance and budget are checked by
+        the caller).  Reads the session's frozen flags without storing anything (preview-safe), so the
+        answer path and ``_has_pending_critical_probe`` ask the same question."""
+        params = self._peek_scan_params(state)
+        rule = params["trigger_rule"]
+        if rule == "d1":
+            n_wrong = sum(1 for ok in skills.state.results.values() if not ok)
+            return n_wrong >= 2 or (len(skills.state.skills) == 1 and n_wrong >= 1)
+        if rule == "d2":
+            return self._visit_residual(state, skills) >= params["residual_min"]
+        return True            # "current": a failed important L3 with a failing skill is enough
+
     def _has_pending_critical_probe(self, state: SessionState, correct: bool) -> bool:
         """Preview the current L4 answer without mutating persisted navigation."""
         if state.phase != "navigation" or not state.current_skill_nav or not state.current_subtopic_nav:
@@ -742,10 +776,11 @@ class SessionService:
             return False
         if next_skill is not None:
             # Finish measuring this important failed subtopic before deciding
-            # whether its prerequisites need a causal probe.
+            # whether its prerequisites need a causal probe.  (Whether the stricter
+            # DEEP_SCAN_TRIGGER_RULE will fire is only known when the visit ends: stay conservative.)
             return True
         # mastery_threshold is intentionally live: a general CAT setting, not a Deep Scan flag.
-        return skills.subtopic_score() < settings.mastery_threshold
+        return skills.subtopic_score() < settings.mastery_threshold and self._visit_triggers(state, skills)
 
     def _should_stop(self, state: SessionState, *, pending_critical_probe: bool = False) -> bool:
         if state.items_answered >= settings.max_items:
@@ -847,6 +882,7 @@ class SessionService:
                     and skill_nav.get_failing_skill()
                     and failed_sub is not None
                     and self._l3_warrants_deep_scan(state, failed_sub)
+                    and self._visit_triggers(state, skill_nav)
                 ):
                     failing_skill = skill_nav.get_failing_skill()
                     log.info(
@@ -958,6 +994,7 @@ class SessionService:
 
         skill_nav = SkillNavigator.create(current_sub.subtopic_id, skills)
         state.current_skill_nav = skill_nav.to_dict()
+        state.visit_p_hats = []          # a new L3 visit starts (see SessionState.visit_p_hats)
 
         mid_skill = skill_nav.peek_current()
         if mid_skill is None:
@@ -1362,7 +1399,8 @@ class SessionService:
                 log.info("Deep scan: no unused task to confirm %s, gap not confirmed", next_skill_id)
                 scan.unconfirmed.append(next_skill_id)
             else:
-                log.warning("Deep scan: no unused task for %s, skipping to next branch", next_skill_id)
+                log.warning("Deep scan: no usable task for %s (none unused, or all too hard for "
+                            "DEEP_SCAN_PROBE_MIN_P), skipping to next branch", next_skill_id)
             if next_skill_id not in scan.tested:
                 scan.tested.append(next_skill_id)
         scan.current_skill_id = None
@@ -1439,9 +1477,26 @@ class SessionService:
         task = self._select_task_for_skill(state, skill_id)
         if task is None:
             return None
+        if state.is_in_deep_scan and self._probe_too_hard(state, task):
+            log.info("Deep scan: probe %s for %s skipped (expected p of a correct answer below %s)",
+                     task.id, skill_id, self._scan_params(state)["probe_min_p"])
+            return None
         state.current_task_id = task.id
         state.current_skill_id = skill_id
         return self._task_to_out(task, state)
+
+    def _probe_too_hard(self, state: SessionState, task) -> bool:
+        """DEEP_SCAN_PROBE_MIN_P: the selected probe's expected probability of a correct answer (3PL at the
+        student's current theta) is below the session's frozen threshold.  0 = off (nothing is read)."""
+        min_p = self._scan_params(state)["probe_min_p"]
+        if min_p <= 0:
+            return False
+        p = p_correct(state.theta.theta, IRTParams(
+            a=float(getattr(task, "irt_discrimination", None) or 1.0),
+            b=float(getattr(task, "irt_difficulty", None) or 0.0),
+            c=float(getattr(task, "irt_guessing", None) or 0.0),
+        ))
+        return p < min_p
 
     # ── Fallback when a navigation skill has no unanswered task ────────────
 
