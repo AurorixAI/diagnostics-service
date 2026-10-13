@@ -65,6 +65,11 @@ def _p3pl(theta: float, a: float, b: float, c: float) -> float:
     return c + (1.0 - c) / (1.0 + math.exp(-a * (theta - b)))
 
 
+def p_correct(theta: float, params: IRTParams) -> float:
+    """Model probability of a correct answer to an item with ``params`` at ability ``theta``."""
+    return _p3pl(theta, params.a, params.b, params.c)
+
+
 def _likelihood(outcome: float, p: float) -> float:
     """
     Response likelihood for 3PL (binary scoring).

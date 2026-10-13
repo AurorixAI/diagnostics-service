@@ -87,6 +87,31 @@ class Settings(BaseSettings):
     #   "hard_prereq" - the failed L3 has at least one HARD prerequisite edge,
     #                   whatever its importance.
     deep_scan_trigger_mode: Literal["importance", "hard_prereq"] = "importance"
+    # ── Deep Scan trigger discrimination (DIAG-1 stage 3b) ───────────────────────
+    # The defaults reproduce the previous behaviour exactly.  Measured on the stage-3a baseline:
+    # the current rule fires for 93-100 % of students with and without a gap because ONE wrong
+    # answer in an important L3 fails it; the rules below ask for more evidence.
+    #
+    # DEEP_SCAN_TRIGGER_RULE: what a FAILED L3 (score < mastery) must also show to start a scan; it is
+    # applied on top of the DEEP_SCAN_TRIGGER_MODE gate (importance / hard prerequisite), not instead of it.
+    #   "current" - nothing more (a failing skill is enough);
+    #   "d1"      - >= 2 wrong answers in the L3, or 1 when the L3 has a single L4 skill;
+    #   "d2"      - residual sum(p_hat - x) over the L3's answers >= DEEP_SCAN_RESIDUAL_MIN, where p_hat is the
+    #               3PL probability of a correct answer at the theta BEFORE that answer (x = 1 correct, 0 wrong):
+    #               the student did worse than the model expected, not merely failed an L3.
+    deep_scan_trigger_rule: Literal["current", "d1", "d2"] = "current"
+    # gt=0 on purpose: 0 does NOT switch the rule off (a residual >= 0 would fire for most failed visits; "off" is
+    # DEEP_SCAN_TRIGGER_RULE=current), unlike PROBE_MIN_P and HARD_PREREQ_MIN_GRADE where 0 means "off".
+    deep_scan_residual_min: float = Field(default=1.0, gt=0, allow_inf_nan=False)
+    # DEEP_SCAN_PROBE_MIN_P (D3): a Deep Scan probe whose expected probability of a correct answer
+    # (3PL at the student's current theta and the selected item's parameters) is below this value is
+    # not spent: the skill is skipped like a skill without an unused item.  0 = off.
+    deep_scan_probe_min_p: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False)
+    # DEEP_SCAN_HARD_PREREQ_MIN_GRADE (DIAG-1 grade gate): with TRIGGER_MODE="hard_prereq", the grade
+    # from which that mode applies.  A session whose grade_level is below this value uses the default
+    # mode ("importance") instead.  0 = no grade limit (hard_prereq in every grade, the previous behaviour).
+    # Frozen per session like the other Deep Scan flags.
+    deep_scan_hard_prereq_min_grade: int = Field(default=0, ge=0, le=11)
     mastery_threshold: float = 0.6   # min fraction correct to move UP a topic
 
     # CORS

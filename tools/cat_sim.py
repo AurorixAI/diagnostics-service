@@ -92,7 +92,9 @@ PROD_SETTINGS = {
 }
 # Deep Scan flags whose defaults live in the diagnostic-service Settings (variant OC15 since 2026-10-12);
 # not pinned here, only reported with the effective settings.
-VARIANT_FLAGS = ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE")
+VARIANT_FLAGS = ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE",
+                 "DEEP_SCAN_HARD_PREREQ_MIN_GRADE", "DEEP_SCAN_TRIGGER_RULE", "DEEP_SCAN_RESIDUAL_MIN",
+                 "DEEP_SCAN_PROBE_MIN_P")
 TOKEN = "cat-sim-internal-token"
 EFFECTIVE_SETTINGS: Dict[str, Dict[str, Any]] = {}     # arm label -> settings reported by the workers
 
