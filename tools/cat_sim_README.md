@@ -96,3 +96,7 @@ after each answer.
 
 `tools/rootcause_diag.py --tag A0 --stage stage3a` turns them into the metric tables (cluster bootstrap by gap L3 for ALL
 grades, student bootstrap per grade); `tools/rootcause_stand_b.py` generates stand B (8 seeded gap L3 per grade).
+
+`served` (per student): every item served, in order - `{task_id, skill_id, phase, is_deep_scan, correct}`. `tools/exposure_report.py --tag A0`
+aggregates it into `tools/sim_results/exposure_<tag>.tsv` (per task: exposure, share of sessions, phases) and `exposure_<tag>_coverage.tsv`
+(per grade: distinct tasks, and how many cover 50/80/95% of the served items).

@@ -48,7 +48,8 @@ failed, decided L3: would the current rule trigger ignoring the budget - importa
 the offline alternatives D1 = (>=2 wrong in the L3, or 1 wrong when the L3 has a single L4) and D2 = (residual
 sum(p_hat - x) >= 1.0)), ``scan_log`` (each scan: budget at start, origin L3, initial prerequisite queue, whether the
 injected gap L3 G is in it and where, steps = probed skill / outcome / gap_confirmed), the chain roots/sources, the
-confirmed L3s and the report's L2 topics (base rates).  p_hat = alpha_engine._p3pl(theta_before, a, b, c) with the
+confirmed L3s and the report's L2 topics (base rates), and ``served`` = every item served (task, skill, phase, deep-scan flag,
+correct; read by tools/exposure_report.py).  p_hat = alpha_engine._p3pl(theta_before, a, b, c) with the
 session's theta before the answer (``DiagAnswer.theta_before``) and the served item's IRT parameters.  The session state is
 only READ from the fake redis after each answer; tools/rootcause_diag.py turns these fields into metrics.
 
@@ -544,6 +545,9 @@ def simulate_student(ctx, i: int, seed: int, grade: int, gap_list: List[str],
         "confirmed_l3s": confirmed_l3s, "named_l2s": sorted({e["skill_id"] for e in weak_blk + crit_blk}),
         "n_weak_topics": len(weak_blk), "n_crit_topics": len(crit_blk), "n_detail_skills": entries - len(weak_blk) - len(crit_blk),
         "trace_aux": trace.aux,
+        # every item the student was served, in order (tools/exposure_report.py): task, skill, phase, deep-scan flag, outcome
+        "served": [{"task_id": a_.task_id, "skill_id": a_.skill_id, "phase": a_.phase, "is_deep_scan": bool(a_.is_deep_scan),
+                    "correct": bool(lp.is_correct(a_.outcome))} for a_ in rows],
     }
 
 
