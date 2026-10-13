@@ -73,6 +73,117 @@ def answer_value_key(value: object) -> str:
 
 _SINGLE_TOKEN_BRACES_RE = re.compile(r"([\^_])\{\s*([^\W_])\s*\}")
 
+# --- equivalent spellings, REPORT SIDE ONLY ---------------------------------------------------------------------
+# A task's stored options were shown to the student in one spelling (older snapshots: plain Unicode) while the
+# bank's distractor_meta was later rewritten in another (LaTeX).  Only 1:1 spellings of the same symbol are merged
+# here; nothing is parsed, simplified or solved.  When in doubt the two spellings stay different: a missed match
+# falls back to the generic report text, a false match shows the student someone else's explanation.
+_GREEK = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "zeta": "ζ", "eta": "η", "theta": "θ", "iota": "ι",
+    "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ",
+    "upsilon": "υ", "chi": "χ", "psi": "ψ", "omega": "ω",
+    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π", "Sigma": "Σ", "Phi": "Φ",
+    "Psi": "Ψ", "Omega": "Ω",
+}   # not merged on purpose: phi/varphi, epsilon/varepsilon, vartheta ... (two different glyphs share one Unicode letter)
+_COMMAND_SYMBOLS = {
+    **_GREEK, "infty": "∞", "in": "∈", "notin": "∉", "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥", "ne": "≠", "neq": "≠",
+    "pm": "±", "mp": "∓", "emptyset": "∅", "varnothing": "∅",
+}
+_FUNCTION_NAMES = frozenset(
+    "sin cos tan tg cot ctg sec csc arcsin arccos arctan arctg arccot arcctg sinh cosh tanh coth lg ln log exp max min".split()
+)
+_NUMBER_SETS = {"N": "ℕ", "Z": "ℤ", "Q": "ℚ", "R": "ℝ"}
+_UNICODE_SPELLINGS = str.maketrans({"\u2212": "-", "·": "*", "⋅": "*", "×": "*", "²": "^2", "³": "^3"})
+_GREEK_LETTERS = "".join(_GREEK.values())
+
+_COMMAND_RE = re.compile(r"(?<!\\)\\([A-Za-z]+)(?![A-Za-z])")
+_OPERATORNAME_RE = re.compile(r"\\operatorname\s*\{\s*([A-Za-z]+)\s*\}")
+_MATHBB_RE = re.compile(r"\\mathbb\s*(?:\{\s*([NZQR])\s*\}|([NZQR])(?![A-Za-z]))")
+_BARE_SET_AFTER_IN_RE = re.compile(r"([∈∉])\s*([NZQR])(?![A-Za-z0-9])")
+_DEGREE_RE = re.compile(r"\^\s*(?:\{\s*\\circ\s*\}|\\circ(?![A-Za-z]))")
+_ASCII_LE_RE, _ASCII_GE_RE = re.compile(r"<=(?!>)"), re.compile(r">=")
+# `\sqrt3` is TeX for "the root of the next token"; `√3` / `√x` / `√(x+1)` is the same root.  `√2x`, `√12.5`, `√x^2`
+# (radicand or what the exponent belongs to is a guess) and nested parentheses are left alone.
+_BARE_SQRT_RE = re.compile(rf"\\sqrt\s*([0-9A-Za-z{_GREEK_LETTERS}])")
+_UNI_SQRT_ATOM_RE = re.compile(
+    rf"√\s*(\d+|[A-Za-z{_GREEK_LETTERS}])(?!\s*[A-Za-z0-9{_GREEK_LETTERS}^_(\\√]|[.,]\d)"
+)
+_UNI_SQRT_PAREN_RE = re.compile(r"√\s*\(([^()]+)\)(?!\s*[A-Za-z0-9^_(\\√])")
+# `6, 5π/6`: a comma + space between digits is a list separator (a decimal comma has no space).  The key drops all
+# whitespace, so the separator is remembered with a private marker until fractions are recognised.
+_LIST_COMMA_RE = re.compile(r"(?<=\d),\s+(?=\d)")
+_LIST_MARK = "\ue000"
+# `1 3/25` is the mixed number 1 3/25, not the fraction 13/25: a gap between two digits is remembered the same way so
+# that neither neighbour can become a fraction atom.  Both markers are removed again from the finished key, so for
+# everything except fractions the key still ignores spaces exactly as ``answer_value_key`` does.
+_FRACTION_GAP_RE = re.compile(r"(?<=\d)(?:\s|~|\\[,;:! ])+(?=\d)")
+_GAP_MARK = "\ue001"
+
+
+def _equivalent_spellings(text: str) -> str:
+    """Rewrite 1:1 alternative spellings of one symbol to a single form (before ``answer_value_key``)."""
+    text = text.translate(_UNICODE_SPELLINGS)
+    text = _ASCII_LE_RE.sub("≤", text)
+    text = _ASCII_GE_RE.sub("≥", text)
+    text = _DEGREE_RE.sub("°", text)
+    text = _OPERATORNAME_RE.sub(lambda m: m.group(1) if m.group(1) in _FUNCTION_NAMES else m.group(0), text)
+    text = _MATHBB_RE.sub(lambda m: _NUMBER_SETS[m.group(1) or m.group(2)], text)
+
+    def command(m: "re.Match[str]") -> str:
+        name = m.group(1)
+        if name in _COMMAND_SYMBOLS:
+            return _COMMAND_SYMBOLS[name]
+        return name if name in _FUNCTION_NAMES else m.group(0)
+
+    text = _COMMAND_RE.sub(command, text)
+    text = _BARE_SQRT_RE.sub(r"\\sqrt{\1}", text)
+    text = _UNI_SQRT_ATOM_RE.sub(r"\\sqrt{\1}", text)
+    text = _UNI_SQRT_PAREN_RE.sub(r"\\sqrt{\1}", text)
+    # a bare N/Z/Q/R is the number set ONLY right after a membership sign (`k ∈ Z`); anywhere else it is just a letter
+    text = _BARE_SET_AFTER_IN_RE.sub(lambda m: m.group(1) + _NUMBER_SETS[m.group(2)], text)
+    text = _LIST_COMMA_RE.sub("," + _LIST_MARK, text)
+    return _FRACTION_GAP_RE.sub(_GAP_MARK, text)
+
+
+# A numerator is one "atom": an integer, a single letter, `\sqrt` of one of those, or an integer coefficient in front of a
+# letter / root (`5π`, `2x`, `3√2`); a denominator is the same WITHOUT a coefficient (`1/2π` may be ½π or 1/(2π), so
+# `2π` is never taken as a denominator).  `2πk` and `x+1` are not atoms.  Applied to the already normalised key
+# (lower case, no spaces).
+_SYM = rf"(?:[a-z{_GREEK_LETTERS.lower()}])"
+_ROOT = rf"(?:\\sqrt\{{(?:\d+|{_SYM})\}})"
+_NUMERATOR = rf"(?:\d+(?:{_SYM}|{_ROOT})?|{_SYM}|{_ROOT})"
+_DENOMINATOR = rf"(?:\d+|{_SYM}|{_ROOT})"
+_PLAIN_FRACTION_RE = re.compile(rf"({_NUMERATOR})/({_DENOMINATOR})")
+_FRACTION_LEFT = frozenset("([{=+-*<>≤≥≠,;:|±∓∈∉∪∩" + _LIST_MARK)
+_FRACTION_RIGHT = frozenset(")]}=+-*<>≤≥≠,;:|±∓∈∉∪∩")
+
+
+def _plain_fractions_to_frac(key: str) -> str:
+    """``π/45`` -> ``\\frac{π}{45}`` when A and B are single atoms standing on their own.
+
+    "On their own" = the neighbours are the start / end of the answer or an operator / bracket / separator, so
+    ``1/2x`` (is it ½x or 1/(2x)?), ``a/b/c``, ``x^1/2``, ``0.5/2`` and ``1,5/2`` (decimal comma) are never rewritten
+    and stay different from any ``\\frac``.  A numerator / denominator that is a sum, a product of several letters or a
+    power is never an atom, so ``(x+1)/2`` and ``\\frac{x+1}{2}`` keep different keys.
+    """
+    def replace(m: "re.Match[str]") -> str:
+        start, end = m.span()
+        before = key[start - 1] if start else ""
+        after = key[end] if end < len(key) else ""
+        if before and before not in _FRACTION_LEFT:
+            return m.group(0)
+        if before == "-" and start >= 2 and key[start - 2] in "^_":          # x^-1/2: what is the exponent?
+            return m.group(0)
+        if before == "," and start >= 2 and key[start - 2].isdigit() and m.group(1)[0].isdigit():
+            return m.group(0)                                                 # 1,5/2 : decimal comma
+        if after and after not in _FRACTION_RIGHT and not (after == "." and end + 1 == len(key)):
+            return m.group(0)
+        if after == "," and key[end + 1:end + 2].isdigit():                  # 1/2,5 : decimal comma
+            return m.group(0)
+        return "\\frac{%s}{%s}" % (m.group(1), m.group(2))
+
+    return _PLAIN_FRACTION_RE.sub(replace, key)
+
 
 def report_answer_key(value: object) -> str:
     """Key for matching a STORED student answer to the options / distractors of a (since repaired) task.
@@ -84,10 +195,16 @@ def report_answer_key(value: object) -> str:
     several characters is never unwrapped, so ``x^{13}`` (exponent 13) stays different from ``x^13``
     (``x^1`` followed by ``3``) and from ``x^1 3``.  Mirrors the front's ``canonicalAnswerKey`` for these
     cases without its broader brace stripping.
+
+    Older snapshots show options in plain Unicode (``$π/45$``, ``k ∈ Z``) while the bank was rewritten in LaTeX
+    (``$\\dfrac{\\pi}{45}$``, ``k \\in \\mathbb{Z}$``).  The same symbol spelled either way gets one key (``π`` =
+    ``\\pi``, ``≤`` = ``\\le`` = ``\\leq``, ``ℤ`` = ``\\mathbb{Z}``, ``√3`` = ``\\sqrt{3}`` ...) and a fraction of two
+    single atoms is the same as its slash form (``5π/2`` = ``\\frac{5\\pi}{2}``); see ``_equivalent_spellings``.
     """
     text = str(value or "").replace("$", "")
     text = _SINGLE_TOKEN_BRACES_RE.sub(r"\1\2", text)
-    return answer_value_key(text)
+    key = _plain_fractions_to_frac(answer_value_key(_equivalent_spellings(text)))
+    return key.replace(_LIST_MARK, "").replace(_GAP_MARK, "")
 
 
 _LEFT_RIGHT_RE = re.compile(r"\\(?:left|right)(?![A-Za-z])")
