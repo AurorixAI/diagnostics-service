@@ -758,18 +758,26 @@ class SessionService:
             return 0.0
         return float(sum(state.visit_p_hats[-n:]) - sum(1.0 for ok in xs[-n:] if ok))
 
-    def _visit_triggers(self, state: SessionState, skills: SkillNavigator) -> bool:
-        """DEEP_SCAN_TRIGGER_RULE for a FINISHED L3 visit (pass/fail, importance and budget are checked by
-        the caller).  Reads the session's frozen flags without storing anything (preview-safe), so the
-        answer path and ``_has_pending_critical_probe`` ask the same question."""
+    def _visit_rule(self, state: SessionState, skills: SkillNavigator) -> Tuple[bool, str]:
+        """DEEP_SCAN_TRIGGER_RULE for a FINISHED L3 visit: (does the rule fire, the evidence for the log).
+        Pass/fail, importance and budget are checked by the caller.  Reads the session's frozen flags without
+        storing anything (preview-safe).  The evidence is "" for "current", "wrong=1<2" for d1, "residual=0.74<1.0"
+        for d2 (the numbers the decision was made from)."""
         params = self._peek_scan_params(state)
         rule = params["trigger_rule"]
         if rule == "d1":
             n_wrong = sum(1 for ok in skills.state.results.values() if not ok)
-            return n_wrong >= 2 or (len(skills.state.skills) == 1 and n_wrong >= 1)
+            need = 1 if len(skills.state.skills) == 1 else 2
+            return n_wrong >= need, f"wrong={n_wrong}{'>=' if n_wrong >= need else '<'}{need}"
         if rule == "d2":
-            return self._visit_residual(state, skills) >= params["residual_min"]
-        return True            # "current": a failed important L3 with a failing skill is enough
+            residual, minimum = self._visit_residual(state, skills), params["residual_min"]
+            return residual >= minimum, f"residual={residual:.2f}{'>=' if residual >= minimum else '<'}{minimum}"
+        return True, ""        # "current": a failed important L3 with a failing skill is enough
+
+    def _visit_triggers(self, state: SessionState, skills: SkillNavigator) -> bool:
+        """DEEP_SCAN_TRIGGER_RULE for a FINISHED L3 visit; the answer path and ``_has_pending_critical_probe``
+        ask this one question (see ``_visit_rule``)."""
+        return self._visit_rule(state, skills)[0]
 
     def _has_pending_critical_probe(self, state: SessionState, correct: bool) -> bool:
         """Preview the current L4 answer without mutating persisted navigation."""
@@ -785,15 +793,18 @@ class SessionService:
         next_skill = skills.move(correct)
         if not skills.get_failing_skill():
             return False
-        if not self._l3_warrants_deep_scan(state, current):
-            return False
         if next_skill is not None:
             # Finish measuring this important failed subtopic before deciding
             # whether its prerequisites need a causal probe.  (Whether the stricter
             # DEEP_SCAN_TRIGGER_RULE will fire is only known when the visit ends: stay conservative.)
-            return True
-        # mastery_threshold is intentionally live: a general CAT setting, not a Deep Scan flag.
-        return skills.subtopic_score() < settings.mastery_threshold and self._visit_triggers(state, skills)
+            return self._l3_warrants_deep_scan(state, current)
+        # The visit ends with this answer.  mastery_threshold is intentionally live: a general CAT setting, not a
+        # Deep Scan flag.  The cheap local checks come before the gate, which may query the prerequisite edges.
+        return (
+            skills.subtopic_score() < settings.mastery_threshold
+            and self._visit_triggers(state, skills)
+            and self._l3_warrants_deep_scan(state, current)
+        )
 
     def _should_stop(self, state: SessionState, *, pending_critical_probe: bool = False) -> bool:
         if state.items_answered >= settings.max_items:
@@ -889,21 +900,31 @@ class SessionService:
                 # The rule (_l3_warrants_deep_scan) reads the FAILED L3 itself: its own
                 # importance (8–10), or in "hard_prereq" mode its hard prerequisite edges.
                 failed_sub = sub_nav.failed_subtopic()
-                if (
+                scan_visit = (
                     not subtopic_pass
                     and not self._deep_scan_budget_spent(state)
-                    and skill_nav.get_failing_skill()
+                    and bool(skill_nav.get_failing_skill())
                     and failed_sub is not None
-                    and self._l3_warrants_deep_scan(state, failed_sub)
-                    and self._visit_triggers(state, skill_nav)
-                ):
+                )
+                rule_fires, evidence = self._visit_rule(state, skill_nav) if scan_visit else (False, "")
+                rule_text = f"rule={self._peek_scan_params(state)['trigger_rule']} {evidence}".strip()
+                if scan_visit and not rule_fires:
+                    # the rule is the cheap check, so it runs before the gate (which may query prerequisite edges)
+                    log.info(
+                        "Deep scan not triggered: %s grade=%s session=%s (failed subtopic %s, gate not evaluated)",
+                        rule_text, state.grade_level, state.session_id, sub_nav.state.boundary_subtopic_id,
+                    )
+                if rule_fires and self._l3_warrants_deep_scan(state, failed_sub):
                     failing_skill = skill_nav.get_failing_skill()
                     log.info(
-                        "Deep scan triggered for skill %s (failed subtopic %s, trigger mode %s, grade %s)",
+                        "Deep scan triggered for skill %s (failed subtopic %s, trigger mode %s, grade %s, "
+                        "%s, session=%s)",
                         failing_skill,
                         sub_nav.state.boundary_subtopic_id,
                         self._effective_trigger_mode(state, self._peek_scan_params(state)),
                         state.grade_level,
+                        rule_text,
+                        state.session_id,
                     )
                     state.phase = "deep_scan"
                     state.is_in_deep_scan = True

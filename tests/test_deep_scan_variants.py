@@ -86,6 +86,8 @@ def test_flag_defaults_are_variant_oc15(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     cfg = Settings(_env_file=None)
     assert cfg.deep_scan_hard_prereq_min_grade == 0                    # grade gate off: previous behaviour
+    monkeypatch.setenv("DEEP_SCAN_HARD_PREREQ_MIN_GRADE", "11")
+    assert Settings(_env_file=None).deep_scan_hard_prereq_min_grade == 11     # the highest grade is allowed
     assert cfg.deep_scan_probe_difficulty_offset == 1.5
     assert cfg.deep_scan_confirm_probes == 2
     assert cfg.deep_scan_trigger_mode == "importance"                  # unchanged by OC15
@@ -113,6 +115,7 @@ def test_flags_are_overridable_from_the_environment(monkeypatch):
     ("DEEP_SCAN_CONFIRM_PROBES", "0"),
     ("DEEP_SCAN_TRIGGER_MODE", "always"),
     ("DEEP_SCAN_HARD_PREREQ_MIN_GRADE", "-1"),
+    ("DEEP_SCAN_HARD_PREREQ_MIN_GRADE", "12"),
     ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "nan"),
 ])
 def test_invalid_flag_values_are_rejected(monkeypatch, name, value):

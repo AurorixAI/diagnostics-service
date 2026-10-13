@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     #               3PL probability of a correct answer at the theta BEFORE that answer (x = 1 correct, 0 wrong):
     #               the student did worse than the model expected, not merely failed an L3.
     deep_scan_trigger_rule: Literal["current", "d1", "d2"] = "current"
+    # gt=0 on purpose: 0 does NOT switch the rule off (a residual >= 0 would fire for most failed visits; "off" is
+    # DEEP_SCAN_TRIGGER_RULE=current), unlike PROBE_MIN_P and HARD_PREREQ_MIN_GRADE where 0 means "off".
     deep_scan_residual_min: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     # DEEP_SCAN_PROBE_MIN_P (D3): a Deep Scan probe whose expected probability of a correct answer
     # (3PL at the student's current theta and the selected item's parameters) is below this value is
@@ -109,7 +111,7 @@ class Settings(BaseSettings):
     # from which that mode applies.  A session whose grade_level is below this value uses the default
     # mode ("importance") instead.  0 = no grade limit (hard_prereq in every grade, the previous behaviour).
     # Frozen per session like the other Deep Scan flags.
-    deep_scan_hard_prereq_min_grade: int = Field(default=0, ge=0)
+    deep_scan_hard_prereq_min_grade: int = Field(default=0, ge=0, le=11)
     mastery_threshold: float = 0.6   # min fraction correct to move UP a topic
 
     # CORS

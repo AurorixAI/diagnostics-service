@@ -67,9 +67,9 @@ class SessionState:
     # answers short of the required number and no unused item left).  Not gaps.
     deep_scan_unconfirmed: List[str] = field(default_factory=list)
     # Deep Scan flags FIXED for this session at create_session:
-    # {"confirm_probes", "probe_difficulty_offset", "trigger_mode",
-    #  "importance_threshold", "session_budget", "max_items", "trigger_rule", "residual_min", "probe_min_p", "hard_prereq_min_grade"}.  The trigger rule, the scan
-    # engine, probe selection and the report all read the session's own values, so a
+    # {"confirm_probes", "probe_difficulty_offset", "trigger_mode", "importance_threshold", "session_budget",
+    #  "max_items", "trigger_rule", "residual_min", "probe_min_p", "hard_prereq_min_grade"}.
+    # The trigger rule, the scan engine, probe selection and the report all read the session's own values, so a
     # config change later (mid-session, or before the report is rebuilt) never changes
     # what the session did or how its chains are read.  None = a session created before
     # the flags existed (the report then uses the old rules, confirm_probes = 1; the

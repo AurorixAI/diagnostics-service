@@ -246,6 +246,9 @@ def test_visit_residual_helper():
     assert SessionService._visit_residual(state, nav) == pytest.approx(0.4)
     state.visit_p_hats = []
     assert SessionService._visit_residual(state, nav) == 0.0
+    # a list LONGER than the results (leftover entries from before the visit): only the most recent n pairs count
+    state.visit_p_hats = [0.9, 0.9, 0.8, 0.4]
+    assert SessionService._visit_residual(state, nav) == pytest.approx((0.8 - 1) + 0.4)      # not (0.9 - 1) + 0.9
 
 
 # ── combination with the importance / hard-prerequisite gate ───────────────────
@@ -289,6 +292,104 @@ def test_rule_d2_is_applied_on_top_of_the_grade_gated_hard_prereq_mode(monkeypat
     assert stubbed(edges)._advance_navigation(weak, False) == "TOPIC"
 
 
+A9_ENV = {"DEEP_SCAN_TRIGGER_RULE": "d2", "DEEP_SCAN_RESIDUAL_MIN": "1.0", "DEEP_SCAN_TRIGGER_MODE": "hard_prereq",
+          "DEEP_SCAN_HARD_PREREQ_MIN_GRADE": "6"}
+
+
+@pytest.mark.parametrize("grade,importance,edges,strong,fires", [
+    (5, 9, {}, True, True),                 # grade 5: importance gate + d2
+    (5, 9, {}, False, False),               #   ... weak residual: the rule says no
+    (5, 5, {"L3": [EDGE]}, True, False),    #   ... a hard edge alone is not a gate below the grade
+    (6, 5, {"L3": [EDGE]}, True, True),     # grade 6: hard_prereq gate + d2
+    (6, 5, {"L3": [EDGE]}, False, False),
+    (6, 9, {}, True, False),                #   ... importance alone is not a gate from the grade
+    (8, 5, {"L3": [EDGE]}, True, True),
+])
+def test_variant_a9_end_to_end_from_the_environment(monkeypatch, grade, importance, edges, strong, fires):
+    """The A9 env -> the real Settings -> the session's frozen _scan_params -> the trigger decision of the session."""
+    for name, value in A9_ENV.items():
+        monkeypatch.setenv(name, value)
+    cfg = Settings(_env_file=None)
+    monkeypatch.setattr(ss, "settings", cfg)
+    state = visit_state(3, [False, False], 1, [0.7, 0.7] if strong else [0.2, 0.2], importance=importance)   # 1.4 / 0.4
+    state.grade_level = grade
+    frozen = SessionService._scan_params(state)                                       # what create_session stores
+    assert (frozen["trigger_rule"], frozen["residual_min"], frozen["trigger_mode"], frozen["hard_prereq_min_grade"]) \
+        == ("d2", 1.0, "hard_prereq", 6)
+    service = stubbed(edges)
+    assert service._has_pending_critical_probe(state, False) is fires
+    assert (service._advance_navigation(state, False) == "SCAN:S0") is fires
+    assert state.is_in_deep_scan is fires
+
+
+# ── observability: the log carries the rule and the numbers it decided on ──────
+
+def infos(caplog, text):
+    return [r.getMessage() for r in caplog.records if r.levelname == "INFO" and text in r.getMessage()]
+
+
+def run_visit(caplog, edges=None, **kw):
+    caplog.clear()
+    service = stubbed(edges)
+    with caplog.at_level("INFO", logger=ss.log.name):
+        result = service._advance_navigation(visit_state(**kw), False)
+    return service, result
+
+
+def test_d2_suppression_is_logged_once_with_residual_grade_and_session(monkeypatch, caplog):
+    set_live(monkeypatch, trigger_rule="d2", residual_min=1.0, importance_threshold=8, trigger_mode="importance")
+    _, result = run_visit(caplog, n_l4=3, seq=[True, False], k=1, p_hats=[0.7, 0.7])      # residual 1.4 - 1 = 0.4
+    assert result == "TOPIC"
+    assert infos(caplog, "Deep scan triggered") == []
+    (line,) = infos(caplog, "Deep scan not triggered")
+    assert "rule=d2 residual=0.40<1.0 grade=8 session=s" in line
+
+
+def test_trigger_log_carries_rule_and_residual_or_wrong_count(monkeypatch, caplog):
+    set_live(monkeypatch, trigger_rule="d2", residual_min=1.0, importance_threshold=8, trigger_mode="importance")
+    _, result = run_visit(caplog, n_l4=3, seq=[False, False], k=1, p_hats=[0.7, 0.7])       # residual 1.4
+    assert result == "SCAN:S0" and infos(caplog, "Deep scan not triggered") == []
+    (line,) = infos(caplog, "Deep scan triggered")
+    assert "trigger mode importance, grade 8, rule=d2 residual=1.40>=1.0, session=s" in line
+    set_live(monkeypatch, trigger_rule="d1")
+    _, result = run_visit(caplog, n_l4=3, seq=[False, False], k=1, p_hats=[0.7, 0.7])
+    assert result == "SCAN:S0" and "rule=d1 wrong=2>=2" in infos(caplog, "Deep scan triggered")[0]
+    _, result = run_visit(caplog, n_l4=3, seq=[True, False], k=1, p_hats=[0.7, 0.7])
+    assert result == "TOPIC" and "rule=d1 wrong=1<2" in infos(caplog, "Deep scan not triggered")[0]
+    _, result = run_visit(caplog, n_l4=1, seq=[False], k=0, p_hats=[0.7])                    # single-L4 L3: one wrong is enough
+    assert result == "SCAN:S0" and "rule=d1 wrong=1>=1" in infos(caplog, "Deep scan triggered")[0]
+
+
+def test_current_rule_logs_no_suppression_and_names_itself(monkeypatch, caplog):
+    set_live(monkeypatch, trigger_rule="current", importance_threshold=8, trigger_mode="importance")
+    _, result = run_visit(caplog, n_l4=3, seq=[False, False], k=1, p_hats=[0.7, 0.7])
+    assert result == "SCAN:S0" and infos(caplog, "Deep scan not triggered") == []
+    assert "grade 8, rule=current, session=s" in infos(caplog, "Deep scan triggered")[0]        # no evidence to add
+    _, result = run_visit(caplog, n_l4=3, seq=[False, False], k=1, p_hats=[0.7, 0.7], importance=5)   # the gate says no
+    assert result == "TOPIC" and infos(caplog, "Deep scan") == []                                     # nothing to report
+
+
+def test_a_gate_that_says_no_is_not_reported_as_a_rule_suppression(monkeypatch, caplog):
+    set_live(monkeypatch, trigger_rule="d2", residual_min=1.0, importance_threshold=8, trigger_mode="importance")
+    _, result = run_visit(caplog, n_l4=3, seq=[False, False], k=1, p_hats=[0.7, 0.7], importance=5)   # rule fires, gate does not
+    assert result == "TOPIC" and infos(caplog, "Deep scan") == []
+
+
+def test_the_cheap_rule_runs_before_the_prerequisite_lookup(monkeypatch, caplog):
+    """hard_prereq mode asks the content API for the L3's edges: a visit the rule rejects must not cost that request,
+    in the answer path and in the early-stop preview alike - with the same results as before."""
+    set_live(monkeypatch, trigger_rule="d2", residual_min=1.0, trigger_mode="hard_prereq", hard_prereq_min_grade=0)
+    service, result = run_visit(caplog, edges={"L3": [EDGE]}, n_l4=3, seq=[True, False], k=1, p_hats=[0.7, 0.7])   # 0.4 < 1.0
+    assert result == "TOPIC" and service.calls == []
+    weak = visit_state(3, [True, False], 1, [0.7, 0.7])
+    assert service._has_pending_critical_probe(weak, False) is False and service.calls == []
+    service, result = run_visit(caplog, edges={"L3": [EDGE]}, n_l4=3, seq=[False, False], k=1, p_hats=[0.7, 0.7])  # 1.4 >= 1.0
+    assert result == "SCAN:S0" and service.calls == [("L3", True)]
+    mid = visit_state(3, [False, False], 0, [0.7, 0.7])                                   # mid-visit: conservative, gate only
+    service = stubbed({"L3": [EDGE]})
+    assert service._has_pending_critical_probe(mid, False) is True and service.calls == [("L3", True)]
+
+
 def test_budget_still_blocks_every_rule(monkeypatch):
     for rule in ("current", "d1", "d2"):
         set_live(monkeypatch, trigger_rule=rule, importance_threshold=8, trigger_mode="importance", session_budget=2)
@@ -323,6 +424,31 @@ def test_frozen_rule_decides_after_the_setting_changes(monkeypatch):
     SessionService._scan_params(other)
     set_live(monkeypatch, trigger_rule="d1")                                    # live d1 would not scan; frozen current does
     assert stubbed()._advance_navigation(other, False) == "SCAN:S2"
+
+
+def test_frozen_residual_min_decides_after_the_setting_changes(monkeypatch):
+    set_live(monkeypatch, trigger_rule="d2", residual_min=1.0, importance_threshold=8, trigger_mode="importance")
+    state = visit_state(3, [False, False], 1, [0.55, 0.55])                      # residual 1.1
+    SessionService._scan_params(state)
+    set_live(monkeypatch, residual_min=5.0)                                      # live would not scan; frozen 1.0 does
+    assert stubbed()._has_pending_critical_probe(state, False) is True
+    assert stubbed()._advance_navigation(state, False) == "SCAN:S0"
+    other = visit_state(3, [False, False], 1, [0.55, 0.55])
+    set_live(monkeypatch, residual_min=5.0)
+    SessionService._scan_params(other)
+    set_live(monkeypatch, residual_min=0.1)                                      # live would scan; frozen 5.0 does not
+    assert stubbed()._has_pending_critical_probe(other, False) is False
+    assert stubbed()._advance_navigation(other, False) == "TOPIC"
+
+
+def test_frozen_probe_min_p_off_is_not_switched_on_by_a_later_setting(monkeypatch):
+    set_live(monkeypatch, probe_min_p=0.0)
+    state = SessionState(session_id="s", student_id="u", grade_level=8)
+    state.theta = ThetaState(theta=0.0)
+    SessionService._scan_params(state)
+    set_live(monkeypatch, probe_min_p=0.9)                                             # live on, frozen off
+    state.is_in_deep_scan = True
+    assert scan_service(Bank({"A": [(1.0, 3.0, 0.0)]}))._pick_task_for_skill(state, "A") == "A.0"
 
 
 def test_preview_never_freezes_a_pre_flag_session_and_uses_live_rule(monkeypatch):
