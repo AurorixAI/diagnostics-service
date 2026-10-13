@@ -269,6 +269,26 @@ def test_rule_is_applied_on_top_of_the_importance_gate(monkeypatch):
         assert stubbed()._has_pending_critical_probe(state, False) is gate
 
 
+@pytest.mark.parametrize("grade,importance,edges,gate", [
+    (5, 9, {}, True),                   # A9 below the gate grade: importance gate (hard edges are not looked at)
+    (5, 5, {"L3": [EDGE]}, False),
+    (6, 5, {"L3": [EDGE]}, True),       # from the gate grade: hard_prereq gate
+    (6, 9, {}, False),
+    (8, 5, {"L3": [EDGE]}, True),
+])
+def test_rule_d2_is_applied_on_top_of_the_grade_gated_hard_prereq_mode(monkeypatch, grade, importance, edges, gate):
+    """A9: TRIGGER_RULE=d2, RESIDUAL_MIN=1.0, TRIGGER_MODE=hard_prereq, HARD_PREREQ_MIN_GRADE=6."""
+    set_live(monkeypatch, trigger_rule="d2", residual_min=1.0, trigger_mode="hard_prereq", hard_prereq_min_grade=6)
+    strong = visit_state(3, [False, False], 1, [0.7, 0.7], importance=importance)       # residual 1.4 >= 1.0
+    strong.grade_level = grade
+    service = stubbed(edges)
+    assert service._has_pending_critical_probe(strong, False) is gate
+    assert (service._advance_navigation(strong, False) == "SCAN:S0") is gate
+    weak = visit_state(3, [True, False], 1, [0.7, 0.7], importance=importance)           # residual 0.4 < 1.0
+    weak.grade_level = grade
+    assert stubbed(edges)._advance_navigation(weak, False) == "TOPIC"
+
+
 def test_budget_still_blocks_every_rule(monkeypatch):
     for rule in ("current", "d1", "d2"):
         set_live(monkeypatch, trigger_rule=rule, importance_threshold=8, trigger_mode="importance", session_budget=2)

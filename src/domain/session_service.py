@@ -99,6 +99,7 @@ _SCAN_PARAM_SOURCES = {
     "trigger_rule": ("deep_scan_trigger_rule", str),
     "residual_min": ("deep_scan_residual_min", float),
     "probe_min_p": ("deep_scan_probe_min_p", float),
+    "hard_prereq_min_grade": ("deep_scan_hard_prereq_min_grade", int),
 }
 
 
@@ -716,18 +717,30 @@ class SessionService:
                 params[key] = cast(getattr(settings, attr))
         return params
 
+    @staticmethod
+    def _effective_trigger_mode(state: SessionState, params: dict) -> str:
+        """The trigger mode this session actually uses: the frozen DEEP_SCAN_TRIGGER_MODE, except
+        that "hard_prereq" applies only from grade DEEP_SCAN_HARD_PREREQ_MIN_GRADE (frozen too):
+        below it the default mode ("importance") is used.  min grade 0 = no limit."""
+        mode = params["trigger_mode"]
+        min_grade = params["hard_prereq_min_grade"]
+        if mode == "hard_prereq" and min_grade > 0 and state.grade_level < min_grade:
+            return "importance"
+        return mode
+
     def _l3_warrants_deep_scan(self, state: SessionState, subtopic) -> bool:
-        """Trigger rule for a failed L3 (DEEP_SCAN_TRIGGER_MODE).
+        """Trigger rule for a failed L3 (DEEP_SCAN_TRIGGER_MODE, per grade: DEEP_SCAN_HARD_PREREQ_MIN_GRADE).
 
         "importance" (default): the L3's importance reaches the threshold (8).
         "hard_prereq": the L3 has at least one HARD prerequisite edge, whatever
-        its importance.  The trigger and ``_has_pending_critical_probe`` both ask
+        its importance (only from grade ``hard_prereq_min_grade``; below it: "importance").
+        The trigger and ``_has_pending_critical_probe`` both ask
         this one question, so an early stop can never skip a scan that would start.
-        The mode and the threshold are the session's frozen ones, read without storing
-        anything (``_peek_scan_params``) because the preview must not mutate the state.
+        The mode, the grade gate and the threshold are the session's frozen ones, read without
+        storing anything (``_peek_scan_params``) because the preview must not mutate the state.
         """
         params = self._peek_scan_params(state)
-        if params["trigger_mode"] == "hard_prereq":
+        if self._effective_trigger_mode(state, params) == "hard_prereq":
             return bool(self.prereq_repo.get_prerequisites(subtopic.subtopic_id, hard_only=True))
         return subtopic.importance >= params["importance_threshold"]
 
@@ -886,10 +899,11 @@ class SessionService:
                 ):
                     failing_skill = skill_nav.get_failing_skill()
                     log.info(
-                        "Deep scan triggered for skill %s (failed subtopic %s, trigger mode %s)",
+                        "Deep scan triggered for skill %s (failed subtopic %s, trigger mode %s, grade %s)",
                         failing_skill,
                         sub_nav.state.boundary_subtopic_id,
-                        self._peek_scan_params(state)["trigger_mode"],
+                        self._effective_trigger_mode(state, self._peek_scan_params(state)),
+                        state.grade_level,
                     )
                     state.phase = "deep_scan"
                     state.is_in_deep_scan = True

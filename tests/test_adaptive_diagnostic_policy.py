@@ -45,6 +45,7 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
             deep_scan_trigger_rule="current",
             deep_scan_residual_min=1.0,
             deep_scan_probe_min_p=0.0,
+            deep_scan_hard_prereq_min_grade=0,
             mastery_threshold=0.6,
         )
         self.settings_patch = patch.object(

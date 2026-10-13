@@ -3,6 +3,7 @@
   DEEP_SCAN_PROBE_DIFFICULTY_OFFSET  probe items target theta - offset
   DEEP_SCAN_CONFIRM_PROBES           a gap needs N wrong answers on different items
   DEEP_SCAN_TRIGGER_MODE             "importance" (current) | "hard_prereq"
+  DEEP_SCAN_HARD_PREREQ_MIN_GRADE    "hard_prereq" applies only from this grade (0 = every grade)
 
 The shipped defaults are variant OC15 (offset 1.5, 2 confirmation probes, importance trigger;
 owner-approved 2026-10-12).  The pre-OC15 behaviour (offset 0, 1 probe) is selected explicitly
@@ -80,9 +81,11 @@ def chains_of(answers, confirm=None, grade=8):
 # ── config: defaults and environment ──────────────────────────────────────────
 
 def test_flag_defaults_are_variant_oc15(monkeypatch):
-    for name in ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE"):
+    for name in ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE",
+                 "DEEP_SCAN_HARD_PREREQ_MIN_GRADE"):
         monkeypatch.delenv(name, raising=False)
     cfg = Settings(_env_file=None)
+    assert cfg.deep_scan_hard_prereq_min_grade == 0                    # grade gate off: previous behaviour
     assert cfg.deep_scan_probe_difficulty_offset == 1.5
     assert cfg.deep_scan_confirm_probes == 2
     assert cfg.deep_scan_trigger_mode == "importance"                  # unchanged by OC15
@@ -109,6 +112,7 @@ def test_flags_are_overridable_from_the_environment(monkeypatch):
 @pytest.mark.parametrize("name,value", [
     ("DEEP_SCAN_CONFIRM_PROBES", "0"),
     ("DEEP_SCAN_TRIGGER_MODE", "always"),
+    ("DEEP_SCAN_HARD_PREREQ_MIN_GRADE", "-1"),
     ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "nan"),
 ])
 def test_invalid_flag_values_are_rejected(monkeypatch, name, value):
@@ -522,7 +526,8 @@ def test_first_scan_freezes_the_session_flags(monkeypatch):
                                       "trigger_mode": "hard_prereq",
                                       "importance_threshold": ss.settings.deep_scan_importance_threshold,
                                       "session_budget": ss.settings.deep_scan_session_budget,
-                                      "max_items": ss.settings.deep_scan_max_items, **STAGE3B_DEFAULTS}
+                                      "max_items": ss.settings.deep_scan_max_items, **STAGE3B_DEFAULTS,
+                                      "hard_prereq_min_grade": 0}
     stored = dict(state.deep_scan_params)
     # the settings change later (config redeploy / env edit): the session keeps its own values
     monkeypatch.setattr(ss.settings, "deep_scan_confirm_probes", 1, raising=False)
@@ -634,7 +639,8 @@ def test_create_session_freezes_the_flags_before_any_navigation(monkeypatch):
                      "trigger_mode": "hard_prereq",
                      "importance_threshold": ss.settings.deep_scan_importance_threshold,
                      "session_budget": ss.settings.deep_scan_session_budget,
-                     "max_items": ss.settings.deep_scan_max_items, **STAGE3B_DEFAULTS}]
+                     "max_items": ss.settings.deep_scan_max_items, **STAGE3B_DEFAULTS,
+                     "hard_prereq_min_grade": 0}]
 
 
 def test_negative_offset_target_is_clamped_to_the_upper_bound(monkeypatch):
@@ -650,7 +656,8 @@ def test_negative_offset_target_is_clamped_to_the_upper_bound(monkeypatch):
 
 ALL_KEYS = {"confirm_probes", "probe_difficulty_offset", "trigger_mode",
             "importance_threshold", "session_budget", "max_items",
-            "trigger_rule", "residual_min", "probe_min_p"}                  # stage 3b added the last three
+            "trigger_rule", "residual_min", "probe_min_p",                  # stage 3b added these three
+            "hard_prereq_min_grade"}                                        # DIAG-1 grade gate
 STAGE3B_DEFAULTS = {"trigger_rule": "current", "residual_min": 1.0, "probe_min_p": 0.0}
 
 
@@ -661,7 +668,7 @@ def set_live(monkeypatch, **flags):
 
 def test_create_session_freezes_all_flags(monkeypatch):
     set_live(monkeypatch, confirm_probes=3, probe_difficulty_offset=0.75, trigger_mode="hard_prereq",
-             importance_threshold=9, session_budget=4, max_items=3)
+             importance_threshold=9, session_budget=4, max_items=3, hard_prereq_min_grade=6)
     service = object.__new__(SessionService)
     service.session_repo = NS(get_by_invite_code=lambda _code: None)
     seen = []
@@ -677,7 +684,8 @@ def test_create_session_freezes_all_flags(monkeypatch):
     with pytest.raises(Stop):
         service.create_session(student_id="u", grade_level=8)
     assert seen == [{"confirm_probes": 3, "probe_difficulty_offset": 0.75, "trigger_mode": "hard_prereq",
-                     "importance_threshold": 9, "session_budget": 4, "max_items": 3, **STAGE3B_DEFAULTS}]
+                     "importance_threshold": 9, "session_budget": 4, "max_items": 3, **STAGE3B_DEFAULTS,
+                     "hard_prereq_min_grade": 6}]
     assert set(seen[0]) == ALL_KEYS
 
 
@@ -873,10 +881,185 @@ def test_answer_handling_leaves_complete_params_untouched(monkeypatch):
 
 def test_a_new_session_freezes_the_oc15_defaults(monkeypatch):
     for name in ("DEEP_SCAN_PROBE_DIFFICULTY_OFFSET", "DEEP_SCAN_CONFIRM_PROBES", "DEEP_SCAN_TRIGGER_MODE",
-                 "DEEP_SCAN_IMPORTANCE_THRESHOLD", "DEEP_SCAN_SESSION_BUDGET", "DEEP_SCAN_MAX_ITEMS"):
+                 "DEEP_SCAN_IMPORTANCE_THRESHOLD", "DEEP_SCAN_SESSION_BUDGET", "DEEP_SCAN_MAX_ITEMS",
+                 "DEEP_SCAN_HARD_PREREQ_MIN_GRADE"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(ss, "settings", Settings(_env_file=None))
     state = SessionState(session_id="s", student_id="u", grade_level=8)
     assert SessionService._scan_params(state) == {
         "confirm_probes": 2, "probe_difficulty_offset": 1.5, "trigger_mode": "importance",
-        "importance_threshold": 8, "session_budget": 6, "max_items": 6, **STAGE3B_DEFAULTS}
+        "importance_threshold": 8, "session_budget": 6, "max_items": 6, **STAGE3B_DEFAULTS,
+        "hard_prereq_min_grade": 0}
+
+
+# ── DIAG-1 grade gate: DEEP_SCAN_HARD_PREREQ_MIN_GRADE ────────────────────────
+# "hard_prereq" applies only from the gate grade; below it the default ("importance") rule decides.
+# The mode and the gate are frozen per session; 0 = no gate = the behaviour before the setting existed.
+
+GATE_GRADES = (5, 6, 8, 11)
+
+
+def at_grade(state, grade):
+    state.grade_level = grade
+    return state
+
+
+def gate_decisions(grade):
+    """(unimportant L3 with a hard edge fires, important L3 without edges fires) for a session of ``grade``."""
+    service = service_with_edges({"L3_edge": [EDGE]})
+    state = at_grade(state_with_theta(0.0, scanning=False), grade)
+    return (service._l3_warrants_deep_scan(state, NS(subtopic_id="L3_edge", importance=5)),
+            service._l3_warrants_deep_scan(state, NS(subtopic_id="L3_imp", importance=9)))
+
+
+@pytest.mark.parametrize("grade", GATE_GRADES)
+def test_gate_zero_keeps_hard_prereq_in_every_grade(monkeypatch, grade):
+    set_live(monkeypatch, trigger_mode="hard_prereq", hard_prereq_min_grade=0)
+    assert gate_decisions(grade) == (True, False)                      # exactly the pre-gate hard_prereq rule
+
+
+@pytest.mark.parametrize("grade", GATE_GRADES)
+@pytest.mark.parametrize("gate", [0, 6, 9])
+def test_importance_mode_ignores_the_gate_in_every_grade(monkeypatch, grade, gate):
+    set_live(monkeypatch, trigger_mode="importance", hard_prereq_min_grade=gate)
+    assert gate_decisions(grade) == (False, True)                      # the gate only limits hard_prereq
+
+
+@pytest.mark.parametrize("grade,expected", [
+    (4, (False, True)),             # below the gate: the default importance rule
+    (5, (False, True)),
+    (6, (True, False)),             # from the gate grade: hard_prereq
+    (7, (True, False)),
+    (8, (True, False)),
+    (11, (True, False)),
+])
+def test_gate_six_limits_hard_prereq_to_grade_six_and_up(monkeypatch, grade, expected):
+    set_live(monkeypatch, trigger_mode="hard_prereq", hard_prereq_min_grade=6)
+    assert gate_decisions(grade) == expected
+
+
+def test_below_the_gate_the_importance_threshold_is_the_frozen_one(monkeypatch):
+    set_live(monkeypatch, trigger_mode="hard_prereq", hard_prereq_min_grade=6, importance_threshold=8)
+    service = service_with_edges({})
+    state = at_grade(state_with_theta(0.0, scanning=False), 5)
+    SessionService._scan_params(state)
+    set_live(monkeypatch, importance_threshold=3)
+    assert not service._l3_warrants_deep_scan(state, NS(subtopic_id="L3", importance=7))
+    assert service._l3_warrants_deep_scan(state, NS(subtopic_id="L3", importance=8))
+    assert service.calls == []                                         # importance rule: no edge lookup
+
+
+@pytest.mark.parametrize("grade,importance,edges,fires", [
+    (5, 5, {"L3": [EDGE]}, False),      # gate 6, grade 5: a hard edge alone does not start a scan
+    (5, 9, {}, True),                   # ... the importance rule does
+    (6, 5, {"L3": [EDGE]}, True),       # grade 6: hard_prereq
+    (6, 9, {}, False),
+    (9, 5, {"L3": [EDGE]}, True),
+    (9, 9, {}, False),
+])
+def test_gate_trigger_and_pending_probe_agree(monkeypatch, grade, importance, edges, fires):
+    set_live(monkeypatch, trigger_mode="hard_prereq", hard_prereq_min_grade=6)
+    service = service_with_edges(edges)
+    service._advance_topic = lambda state, passed: "TOPIC"
+    service._init_deep_scan = lambda state, skill: f"SCAN:{skill}"
+    service._pick_task_for_navigation = lambda state, skill: f"NAV:{skill}"
+    service._pick_task_from_subtopic = lambda state, nav: "NEXT_L3"
+
+    state = at_grade(navigation_state(importance), grade)
+    assert service._has_pending_critical_probe(state, False) is fires      # early stop is blocked iff a scan will start
+    assert service._has_pending_critical_probe(state, True) is False
+    result = service._advance_navigation(state, False)
+    assert (result == "SCAN:S1") is fires
+    assert state.is_in_deep_scan is fires
+    if not fires:
+        assert result == "TOPIC"
+
+
+def test_gate_is_frozen_at_session_start_not_read_live(monkeypatch):
+    set_live(monkeypatch, trigger_mode="hard_prereq", hard_prereq_min_grade=6)
+    service = service_with_edges({"L3_edge": [EDGE]})
+    grade5 = at_grade(state_with_theta(0.0, scanning=False), 5)
+    grade8 = at_grade(state_with_theta(0.0, scanning=False), 8)
+    SessionService._scan_params(grade5)
+    SessionService._scan_params(grade8)
+    sub = NS(subtopic_id="L3_edge", importance=5)
+    assert not service._l3_warrants_deep_scan(grade5, sub) and service._l3_warrants_deep_scan(grade8, sub)
+    for live_gate in (0, 3, 9):                                        # config edited mid-session
+        set_live(monkeypatch, hard_prereq_min_grade=live_gate)
+        assert not service._l3_warrants_deep_scan(grade5, sub)
+        assert service._l3_warrants_deep_scan(grade8, sub)
+    assert grade5.deep_scan_params["hard_prereq_min_grade"] == 6
+    # the other direction: a session frozen with gate 0 keeps hard_prereq in grade 5 when the gate is switched on
+    set_live(monkeypatch, hard_prereq_min_grade=0)
+    old = at_grade(state_with_theta(0.0, scanning=False), 5)
+    SessionService._scan_params(old)
+    set_live(monkeypatch, hard_prereq_min_grade=6)
+    assert service._l3_warrants_deep_scan(old, sub)
+    # the frozen mode itself is untouched by the gate: it is still reported as the session's trigger_mode
+    assert grade5.deep_scan_params["trigger_mode"] == "hard_prereq"
+
+
+def test_session_stored_without_the_gate_key_reads_the_live_default_and_is_not_mutated(monkeypatch):
+    """A session stored before the setting existed (the six older keys): like every newer flag, the
+    missing key comes from the settings - the default 0 keeps hard_prereq in all grades."""
+    set_live(monkeypatch, hard_prereq_min_grade=0)
+    six_old = {"confirm_probes": 2, "probe_difficulty_offset": 1.5, "trigger_mode": "hard_prereq",
+               "importance_threshold": 8, "session_budget": 6, "max_items": 6}
+    service = service_with_edges({"L3_edge": [EDGE]})
+    sub = NS(subtopic_id="L3_edge", importance=5)
+    state = at_grade(state_with_theta(0.0, scanning=False), 5)
+    state.deep_scan_params = dict(six_old)
+    assert SessionService._peek_scan_params(state)["hard_prereq_min_grade"] == 0
+    assert service._l3_warrants_deep_scan(state, sub)                  # default 0: hard_prereq as before
+    assert state.deep_scan_params == six_old                           # previews store nothing
+    # first real use freezes the missing key; later config changes no longer matter
+    frozen = SessionService._scan_params(state)
+    assert set(frozen) == ALL_KEYS and frozen["hard_prereq_min_grade"] == 0
+    set_live(monkeypatch, hard_prereq_min_grade=6)
+    assert service._l3_warrants_deep_scan(state, sub)
+    # an importance-mode session stored without the key is unaffected whatever the live gate is
+    importance = at_grade(state_with_theta(0.0, scanning=False), 5)
+    importance.deep_scan_params = dict(six_old, trigger_mode="importance")
+    assert not service._l3_warrants_deep_scan(importance, sub)
+    assert service._l3_warrants_deep_scan(importance, NS(subtopic_id="L3_imp", importance=9))
+
+
+def test_pre_flag_session_without_any_params_uses_the_live_gate_without_freezing(monkeypatch):
+    set_live(monkeypatch, trigger_mode="hard_prereq", hard_prereq_min_grade=6)
+    service = service_with_edges({"L3_edge": [EDGE]})
+    state = at_grade(navigation_state(5, "L3_edge"), 5)
+    assert state.deep_scan_params is None
+    assert not service._l3_warrants_deep_scan(state, NS(subtopic_id="L3_edge", importance=5))
+    assert state.deep_scan_params is None
+
+
+def test_applied_trigger_mode_and_grade_are_logged(monkeypatch, caplog):
+    set_live(monkeypatch, trigger_mode="hard_prereq", hard_prereq_min_grade=6)
+    messages = {}
+    for grade in (5, 8):
+        service = service_with_edges({"L3": [EDGE]} if grade == 8 else {})
+        service._advance_topic = lambda state, passed: "TOPIC"
+        service._init_deep_scan = lambda state, skill: "SCAN"
+        state = at_grade(navigation_state(9 if grade == 5 else 5), grade)
+        caplog.clear()
+        with caplog.at_level("INFO", logger=ss.log.name):
+            assert service._advance_navigation(state, False) == "SCAN"
+        messages[grade] = [r.getMessage() for r in caplog.records if "Deep scan triggered" in r.getMessage()]
+    assert len(messages[5]) == 1 and "trigger mode importance, grade 5" in messages[5][0]
+    assert len(messages[8]) == 1 and "trigger mode hard_prereq, grade 8" in messages[8][0]
+
+
+def test_gate_is_read_from_the_environment_and_reaches_the_session(monkeypatch):
+    """The A9 grade rule through the real settings object: HARD_PREREQ_MIN_GRADE=6 with TRIGGER_MODE=hard_prereq."""
+    monkeypatch.setenv("DEEP_SCAN_TRIGGER_MODE", "hard_prereq")
+    monkeypatch.setenv("DEEP_SCAN_HARD_PREREQ_MIN_GRADE", "6")
+    cfg = Settings(_env_file=None)
+    assert (cfg.deep_scan_trigger_mode, cfg.deep_scan_hard_prereq_min_grade) == ("hard_prereq", 6)
+    monkeypatch.setattr(ss, "settings", cfg)
+    service = service_with_edges({"L3_edge": [EDGE]})
+    sub = NS(subtopic_id="L3_edge", importance=5)
+    states = {g: at_grade(state_with_theta(0.0, scanning=False), g) for g in (5, 6)}
+    for state in states.values():
+        assert SessionService._scan_params(state)["hard_prereq_min_grade"] == 6
+    assert not service._l3_warrants_deep_scan(states[5], sub)
+    assert service._l3_warrants_deep_scan(states[6], sub)

@@ -105,6 +105,11 @@ class Settings(BaseSettings):
     # (3PL at the student's current theta and the selected item's parameters) is below this value is
     # not spent: the skill is skipped like a skill without an unused item.  0 = off.
     deep_scan_probe_min_p: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False)
+    # DEEP_SCAN_HARD_PREREQ_MIN_GRADE (DIAG-1 grade gate): with TRIGGER_MODE="hard_prereq", the grade
+    # from which that mode applies.  A session whose grade_level is below this value uses the default
+    # mode ("importance") instead.  0 = no grade limit (hard_prereq in every grade, the previous behaviour).
+    # Frozen per session like the other Deep Scan flags.
+    deep_scan_hard_prereq_min_grade: int = Field(default=0, ge=0)
     mastery_threshold: float = 0.6   # min fraction correct to move UP a topic
 
     # CORS
