@@ -1,0 +1,78 @@
+stage3b_drift: variants minus base A0, grades [5, 6, 7, 8, 9, 10, 11], N=10500 students (5054 with gap), n_boot=2000
+paired (same students, same replicate); ALL / terciles / classes = cluster bootstrap by gap L3, G<n> = student bootstrap; diff[95% CI], * = CI excludes 0
+acceptance criteria: /Users/arslan/Desktop/ALGO/diagnostic-service-diag1/tools/rootcause_accept.json (ADVANCE only if every PRIMARY and every GUARDRAIL passes; SECONDARY is reported)
+NOTE Coverage mechanism: a Deep Scan ends the topic - _finish_deep_scan/_next_deep_scan_task call _advance_topic(state, False), which marks the current topic failed and abandons its remaining L3s. A trigger that fires less often keeps the L3 binary search going inside the topic instead, so the set of topics/L3s measured per session changes (and, with fewer scan items, so does test length and theta precision). Topic coverage per session is therefore a guardrail (G9: topics_measured, delta >= -0.5).
+NOTE A smoke run (D2 + D3, stand B, G10-G11, n=400) showed acc3 -5 pp with len -2.1 items: noise at that n, but it is the first thing to check when a guardrail fails.
+
+=== A0n vs A0
+metric                                           ALL                        G5                        G6                        G7                        G8                        G9                       G10                       G11
+acc3 (pp)                            -0.2[-0.7,+0.3]           +0.0[+0.0,+0.0]           +0.1[-0.3,+0.5]           -0.1[-1.7,+1.3]           -0.4[-2.0,+1.2]           -0.8[-2.4,+0.7]           -0.4[-2.1,+1.2]           +0.3[-1.3,+1.9]
+RMSE                           +0.003[-0.000,+0.006]     +0.000[+0.000,+0.000]     -0.001[-0.003,+0.001]     +0.007[-0.003,+0.017]     +0.002[-0.009,+0.012]     +0.002[-0.011,+0.015]     +0.012[-0.001,+0.024]     -0.004[-0.015,+0.007]
+len                               -0.00[-0.07,+0.07]        +0.00[+0.00,+0.00]       +0.04[+0.00,+0.08]*        -0.15[-0.38,+0.10]        +0.10[-0.11,+0.32]        -0.13[-0.38,+0.13]        +0.13[-0.10,+0.35]        -0.01[-0.21,+0.19]
+p90                                  +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]
+max_items (pp)                       -0.2[-0.8,+0.4]           +0.0[+0.0,+0.0]           +0.2[-0.1,+0.5]           -0.9[-2.9,+1.1]           +0.9[-1.3,+3.1]           -1.5[-3.7,+0.9]           +0.6[-1.8,+2.9]           -0.6[-2.7,+1.5]
+ds items gap                      -0.01[-0.03,+0.01]        +0.00[+0.00,+0.00]        +0.01[+0.00,+0.01]        +0.05[-0.05,+0.16]        +0.01[-0.04,+0.06]        -0.10[-0.21,+0.01]        +0.01[-0.03,+0.04]        -0.04[-0.10,+0.02]
+ds items no gap                   -0.01[-0.03,+0.02]        +0.00[+0.00,+0.00]        +0.00[+0.00,+0.01]        -0.07[-0.17,+0.03]        +0.00[-0.06,+0.06]        +0.06[-0.05,+0.16]        +0.01[-0.03,+0.05]        -0.05[-0.11,+0.01]
+scan gap (pp)                        -0.1[-0.4,+0.2]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.3[-0.6,+1.1]           +0.3[-0.1,+0.8]           -1.1[-2.8,+0.6]           +0.3[+0.0,+0.7]           -0.4[-1.1,+0.1]
+scan no gap (pp)                     +0.0[-0.3,+0.3]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.1[-0.9,+1.3]           +0.1[-0.9,+1.2]           +0.4[-1.0,+1.8]           +0.1[+0.0,+0.4]           -0.5[-1.2,+0.1]
+scan gap-nogap (pp)                  -0.1[-0.5,+0.3]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.1[-1.3,+1.6]           +0.1[-1.0,+1.4]           -1.5[-3.6,+0.7]           +0.1[-0.3,+0.7]           +0.1[-0.8,+1.0]
+chain_precision (pp)                 +0.2[-0.2,+0.5]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.1[-0.8,+1.0]           +0.8[-0.3,+2.0]           +0.0[+0.0,+0.0]           +1.0[-1.6,+3.8]           -1.0[-3.2,+1.1]
+P(chain) no gap (pp)                 -0.1[-0.8,+0.7]           +0.0[+0.0,+0.0]           +0.1[+0.0,+0.4]           -1.3[-3.5,+1.0]           -0.3[-2.2,+1.7]           -0.5[-3.1,+2.2]           +1.0[-1.7,+3.7]           +0.3[-1.3,+1.8]
+chains/stud no gap                -0.00[-0.01,+0.01]        +0.00[+0.00,+0.00]        +0.00[+0.00,+0.00]        -0.01[-0.04,+0.01]        +0.00[-0.02,+0.02]        -0.02[-0.04,+0.01]        +0.01[-0.02,+0.04]        +0.00[-0.01,+0.02]
+P(chain) gap (pp)                    -0.3[-0.8,+0.3]           +0.0[+0.0,+0.0]           +0.3[+0.0,+0.7]           -1.2[-3.6,+1.2]           +0.0[-2.1,+1.9]           +0.4[-2.4,+3.2]           -0.7[-3.7,+2.4]           -0.6[-2.4,+1.2]
+conf_is_G gap (pp)                   +0.1[-0.3,+0.6]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.4[-1.1,+2.1]           +1.0[-0.1,+2.2]           +0.0[-1.7,+1.8]           +0.4[-1.5,+2.4]           -1.0[-2.5,+0.6]
+  over base (pp)                     +0.3[-0.3,+0.9]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.6[-1.2,+2.3]           +1.1[-0.1,+2.3]           +0.8[-1.1,+2.7]           +0.2[-1.9,+2.1]           -0.8[-2.4,+0.8]
+topic_named gap (pp)                +1.0[+0.3,+1.8]*           +0.0[+0.0,+0.0]           +0.1[+0.0,+0.4]           -0.3[-2.1,+1.5]           +0.8[-1.2,+2.9]           +1.7[-1.4,+4.7]           +2.8[-0.1,+5.7]           +2.2[+0.0,+4.6]
+cause (pp)                           +0.1[-0.2,+0.3]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[-0.4,+0.4]           +0.6[-0.1,+1.4]           +0.0[+0.0,+0.0]           +0.6[-1.2,+2.4]           -0.7[-1.7,+0.3]
+root (pp)                            +0.1[-0.1,+0.2]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[-0.4,+0.4]           +0.4[-0.1,+1.1]           +0.0[+0.0,+0.0]           +0.4[-1.4,+2.2]           -0.4[-1.4,+0.4]
+fp no gap (pp)                       +0.0[-0.2,+0.2]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.3[-1.2,+1.7]           -0.1[-0.5,+0.3]
+sig_c = cause-fp (pp)                +0.0[-0.3,+0.4]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[-0.4,+0.4]           +0.6[-0.1,+1.4]           +0.0[+0.0,+0.0]           +0.3[-2.0,+2.6]           -0.6[-1.7,+0.4]
+sig_r = root-fp (pp)                 +0.0[-0.2,+0.3]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.0[-0.4,+0.4]           +0.4[-0.1,+1.1]           +0.0[+0.0,+0.0]           +0.2[-2.1,+2.4]           -0.3[-1.3,+0.7]
+conf_is_G lift (x)                +0.05[-0.05,+0.22]        +0.00[+0.00,+0.00]        +0.00[+0.00,+0.00]        +0.10[-0.18,+0.36]        +0.06[-0.01,+0.14]        +0.17[-0.09,+0.46]        -0.39[-2.09,+1.17]        -0.16[-0.60,+0.29]
+topics measured                   +0.01[-0.00,+0.02]        +0.00[+0.00,+0.00]        +0.00[+0.00,+0.00]        +0.00[-0.01,+0.01]       +0.03[+0.00,+0.05]*        +0.00[-0.06,+0.06]        +0.02[-0.03,+0.07]        -0.00[-0.03,+0.03]
+sections measured                 -0.00[-0.01,+0.01]        +0.00[+0.00,+0.00]        +0.00[+0.00,+0.00]        +0.00[-0.01,+0.01]        +0.01[-0.01,+0.03]        -0.01[-0.04,+0.03]        -0.01[-0.05,+0.02]        +0.00[-0.02,+0.02]
+funnel S (pp)                        +0.0[-0.4,+0.4]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.4[-1.1,+1.9]           +0.8[-0.4,+2.1]           -0.1[-1.9,+1.7]           -0.8[-3.5,+1.7]           -0.1[-1.7,+1.4]
+funnel R (pp)                        +0.1[-0.3,+0.6]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.4[-1.1,+1.9]           +1.1[-0.1,+2.4]           -0.1[-1.9,+1.7]           -0.6[-2.8,+1.7]           +0.0[-1.4,+1.5]
+funnel C (pp)                        +0.1[-0.3,+0.6]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]           +0.4[-1.1,+2.1]           +1.0[-0.1,+2.2]           +0.0[-1.7,+1.8]           +0.4[-1.5,+2.4]           -1.0[-2.5,+0.6]
+shadow ratio (act)                -0.02[-0.05,+0.01]        +0.00[+0.00,+0.00]        +0.00[+0.00,+0.00]        -0.01[-0.18,+0.16]        +0.01[-0.10,+0.13]        -0.02[-0.12,+0.06]        -0.08[-0.19,+0.03]        -0.00[-0.07,+0.06]
+
+  by theta tercile (ALL, cluster bootstrap; pp for rates)
+metric                                       T1 weak                        T2                 T3 strong
+p_chain_nogap                        +0.3[-0.9,+1.4]           -1.2[-2.5,+0.2]           +0.8[-0.4,+2.1]
+chains_ps_nogap                   +0.00[-0.01,+0.01]        -0.01[-0.03,+0.00]        +0.01[-0.01,+0.02]
+scan_nogap                           +0.1[+0.0,+0.2]           +0.3[-0.2,+0.8]           -0.3[-1.1,+0.4]
+scan_gap                             +0.0[+0.0,+0.0]           -0.5[-1.0,+0.2]           +0.2[-0.5,+0.9]
+chain_precision                      -0.1[-0.5,+0.1]           +0.9[-0.2,+1.9]           +0.4[-0.6,+1.4]
+conf_gap                             -0.2[-0.9,+0.3]           +0.4[-0.5,+1.4]           +0.2[-0.4,+0.7]
+ds_items_nogap                    +0.01[-0.02,+0.03]        -0.00[-0.05,+0.04]        -0.02[-0.08,+0.03]
+topics_measured                   -0.00[-0.02,+0.02]        +0.02[-0.00,+0.04]        +0.00[-0.02,+0.02]
+
+  by gap-L3 class (gap students only)
+metric                                      eligible              non_eligible                   typical
+scan_gap                             +0.2[-0.3,+0.8]           -0.2[-0.7,+0.2]           -0.1[-0.6,+0.4]
+chain_precision                      +1.1[-0.7,+2.2]           +0.0[-0.0,+0.0]           +0.0[+0.0,+0.0]
+conf_gap                             +0.8[-1.2,+2.6]           +0.0[-0.8,+0.9]           -0.0[-0.3,+0.3]
+detect_cause                         +0.3[-1.2,+1.7]           +0.0[+0.0,+0.0]           +0.0[+0.0,+0.0]
+f_S                                  +0.3[-1.1,+1.9]           -0.1[-0.9,+0.8]           -0.0[-0.3,+0.3]
+f_R                                  +0.9[-0.8,+2.7]           -0.1[-0.9,+0.8]           -0.0[-0.3,+0.3]
+f_C                                  +0.8[-1.2,+2.6]           +0.0[-0.8,+0.9]           -0.0[-0.3,+0.3]
+ds_items_gap                      -0.01[-0.06,+0.05]        -0.03[-0.07,+0.01]        +0.00[-0.02,+0.02]
+
+  acceptance: PRIMARY FAIL, GUARDRAILS OK, secondary 0/5 -> DROP
+   FAIL P1  primary   weak students (T1): P(any chain | no gap) falls by >= 20 pp (A0 73.8%)           +0.28[-0.90,+1.42]  (le -20.0) 
+   FAIL P2  primary   ALL: chains per gap-free student fall                                            -0.00[-0.01,+0.01]  (le 0.0) 
+   FAIL P3  primary   chain_precision (root == G) >= 2x A0 and >= 8%                                   +0.16[-0.17,+0.49]  (ge 0.0) ratio>=2.0 value>=8.0 (var 3.93, base 3.78) 
+   PASS G1  guardrail acc3 ALL: CI lower bound >= -1.0 pp                                              -0.18[-0.67,+0.28]  (ge -1.0) 
+   PASS G2  guardrail acc3 every grade: CI lower bound >= -3 pp                                        -0.80[-2.40,+0.73]  (ge -3.0) 
+   PASS G3  guardrail theta RMSE: CI upper bound <= +0.01                                              +0.00[-0.00,+0.01]  (le 0.01) 
+   PASS G4  guardrail mean test length: CI upper bound <= +0.5 items                                   -0.00[-0.07,+0.07]  (le 0.5) 
+   PASS G5  guardrail p90 of test length unchanged                                                     +0.00[+0.00,+0.00]  (point_equal 0.0) 
+   PASS G6  guardrail sessions hitting max_items: CI upper bound <= +1 pp                              -0.19[-0.81,+0.45]  (le 1.0) 
+   PASS G7  guardrail false root-cause claims fp_nogap: CI upper bound <= +0.5 pp                      +0.02[-0.18,+0.22]  (le 0.5) 
+   PASS G8  guardrail confirmed_gap_is_G lift over base rate not below A0 by more than 0.2x            +0.05[-0.05,+0.22]  (ge -0.2) 
+   PASS G9  guardrail topic coverage: topics measured per session, CI lower bound >= -0.5              +0.01[-0.00,+0.02]  (ge -0.5) 
+   FAIL S1  secondary sig_r (root(gap) - fp) on dependent gaps rises by >= 2.0 pp, ALL lower           +0.10[-0.28,+0.47]  (ge 2.0) 
+   FAIL S2  secondary sig_r on dependent gaps, grade 9: difference > 0                                 +0.00[+0.00,+0.00]  (ge ) 
+   FAIL S3  secondary trigger discrimination scan_gap - scan_nogap >= 10 pp on the eligible                    level 2.13  (ge 10.0) 
+   FAIL S4  secondary scan_nogap <= 70% (variant level)                                                       level 96.09  (le 70.0) 
+   FAIL S5  secondary Deep Scan items per gap-free student <= 3.5 (variant level)                              level 5.06  (le 3.5) 

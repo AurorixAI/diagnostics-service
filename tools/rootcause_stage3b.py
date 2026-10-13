@@ -9,6 +9,7 @@ before and after every run (a run whose bank changed underneath it is flagged IN
   # run (sequential, 8 workers each; ~23 min per arm for 7 grades x n=1500; run in the background)
   python tools/rootcause_stage3b.py run --stand A --log tools/sim_results/stage3b_progress.log
   python tools/rootcause_stage3b.py run --stand B --seeds 1 2 --arms A0 A3 A5 --log ...
+  python tools/rootcause_stage3b.py run --stand A --arms A0 A6 A7 A8 --reuse-base --log ...   # extra arms vs an existing A0
 
   # the comparison table with the acceptance verdicts (also printed by `plan`)
   python tools/rootcause_diag.py --base A0 --variants A1 A2 A3 A4 A5 --stage stage3b
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -81,7 +83,7 @@ def build(a):
     for n in names:
         if n not in arms:
             raise SystemExit(f"unknown arm {n} (known: {list(arms)})")
-    runs = [(seed, n) for seed in a.seeds for n in names]
+    runs = [(seed, n) for seed in a.seeds for n in (names[1:] if getattr(a, "reuse_base", False) else names)]
     return arms, names, runs
 
 
@@ -114,6 +116,8 @@ def cmd_run(a):
         before = fingerprint()
         say(f"=== {tag} start {time.strftime('%F %T')} fp_before: {before}")
         t0 = time.time()
+        if shutil.which("caffeinate"):                    # macOS: a sleeping machine expires the fake-redis sessions (seen in 3c)
+            cmd = ["caffeinate", "-i", *cmd]
         r = subprocess.run(cmd, cwd=str(DIAG), capture_output=True, text=True)
         after = fingerprint()
         say(f"=== {tag} end {time.strftime('%F %T')} {time.time() - t0:.0f}s rc={r.returncode} fp_after: {after}")
@@ -125,8 +129,8 @@ def cmd_run(a):
             sys.exit(2)
     base = names[0]
     for seed in a.seeds:
-        stage = f"stage3{'c' if a.stand == 'B' else 'b'}" + (f"_s{seed}" if a.stand == "B" or seed != 1 else "")
-        subprocess.run(compare_cmd(a.stand, base, names[1:], seed, stage), cwd=str(DIAG))
+        stage = a.stage or (f"stage3{'c' if a.stand == 'B' else 'b'}" + (f"_s{seed}" if a.stand == "B" or seed != 1 else ""))
+        subprocess.run(compare_cmd(a.stand, base, list(a.also or []) + names[1:], seed, stage), cwd=str(DIAG))
     if a.stand == "B" and len(names) > 1:           # finalists: stand A vs stand B seed 1 vs seed 2 (needs the stage3b stand-A comparison)
         subprocess.run([sys.executable, "tools/rootcause_diag.py", "--consistency", *names[1:]], cwd=str(DIAG))
 
@@ -140,7 +144,10 @@ def main():
         p.add_argument("--seeds", type=int, nargs="+", default=[1])
         p.add_argument("--arms", nargs="*", help="first = base; default: all arms of rootcause_arms.json")
         p.add_argument("--workers", type=int, default=8)
+        p.add_argument("--reuse-base", action="store_true", help="the first arm is only the comparison base: its result files already exist, do not re-run it")
         if name == "run":
+            p.add_argument("--stage", help="name of the comparison output (default stage3b / stage3c_s<seed>)")
+            p.add_argument("--also", nargs="*", help="already-run arms added to the comparison (e.g. A3)")
             p.add_argument("--log", default=str(RESULTS / "stage3b_progress.log"))
     a = ap.parse_args()
     {"plan": cmd_plan, "run": cmd_run}[a.cmd](a)

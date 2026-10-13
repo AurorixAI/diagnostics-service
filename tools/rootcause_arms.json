@@ -1,11 +1,38 @@
 {
- "note": "Stage-3b arms (ASSUMED composition, edit freely). All arms run the same stand/students (paired); A0 = defaults = OC15. Each arm = list of cat_sim --setting KEY=VAL overrides. D1 = two strikes, D2 = residual, D3 = informative probe.",
+ "note": "Stage-3b arms (ASSUMED composition, edit freely). All arms run the same stand/students (paired); A0 = defaults = OC15. Each arm = list of cat_sim --setting KEY=VAL overrides. D1 = two strikes, D2 = residual, D3 = informative probe. Stage 3b-ext (honesty/completeness curve of D2): A6 = d2 with residual 0.75, A7 = d2 with 0.5, A8 = d2 (1.0) on top of the hard_prereq gate. A0n = A0 settings re-run on the later bank (w37b + w37-cnt13 applied during 3b-ext: 6 tasks with a new irt_guessing, 1 corrected key, 855 distractor_meta) = bank-drift control and the base for A8.",
  "arms": {
   "A0": [],
-  "A1": ["DEEP_SCAN_TRIGGER_RULE=d1"],
-  "A2": ["DEEP_SCAN_TRIGGER_RULE=d1", "DEEP_SCAN_TRIGGER_MODE=hard_prereq"],
-  "A3": ["DEEP_SCAN_TRIGGER_RULE=d2", "DEEP_SCAN_RESIDUAL_MIN=1.0"],
-  "A4": ["DEEP_SCAN_PROBE_MIN_P=0.5"],
-  "A5": ["DEEP_SCAN_TRIGGER_RULE=d1", "DEEP_SCAN_PROBE_MIN_P=0.5"]
+  "A1": [
+   "DEEP_SCAN_TRIGGER_RULE=d1"
+  ],
+  "A2": [
+   "DEEP_SCAN_TRIGGER_RULE=d1",
+   "DEEP_SCAN_TRIGGER_MODE=hard_prereq"
+  ],
+  "A3": [
+   "DEEP_SCAN_TRIGGER_RULE=d2",
+   "DEEP_SCAN_RESIDUAL_MIN=1.0"
+  ],
+  "A4": [
+   "DEEP_SCAN_PROBE_MIN_P=0.5"
+  ],
+  "A5": [
+   "DEEP_SCAN_TRIGGER_RULE=d1",
+   "DEEP_SCAN_PROBE_MIN_P=0.5"
+  ],
+  "A6": [
+   "DEEP_SCAN_TRIGGER_RULE=d2",
+   "DEEP_SCAN_RESIDUAL_MIN=0.75"
+  ],
+  "A7": [
+   "DEEP_SCAN_TRIGGER_RULE=d2",
+   "DEEP_SCAN_RESIDUAL_MIN=0.5"
+  ],
+  "A8": [
+   "DEEP_SCAN_TRIGGER_RULE=d2",
+   "DEEP_SCAN_RESIDUAL_MIN=1.0",
+   "DEEP_SCAN_TRIGGER_MODE=hard_prereq"
+  ],
+  "A0n": []
  }
 }
