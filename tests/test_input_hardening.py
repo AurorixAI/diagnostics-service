@@ -548,6 +548,25 @@ def test_service_still_answers_after_the_worker_was_killed():
     assert time.perf_counter() - started < 2.0
 
 
+def test_worker_does_not_inherit_service_secrets(monkeypatch):
+    from src.domain import sympy_sandbox
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def fake_popen(*args, env=None, **kwargs):
+        seen.update(env)
+        raise _Stop()
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:secret@db/x")
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", "token")
+    monkeypatch.setattr(sympy_sandbox.subprocess, "Popen", fake_popen)
+    with pytest.raises(_Stop):
+        sympy_sandbox._Worker(memory_mb=256, startup_timeout=1.0)
+    assert "DATABASE_URL" not in seen and "INTERNAL_SERVICE_TOKEN" not in seen
+    assert seen["SYMPY_SANDBOX_MEMORY_MB"] == "256"
+
 # ── the cheap guards in front of the sandbox ─────────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("expression", [

@@ -46,7 +46,9 @@ class _Worker:
     """One worker process: started with its SymPy imports done, asked one question at a time."""
 
     def __init__(self, memory_mb: int, startup_timeout: float):
-        env = dict(os.environ, SYMPY_SANDBOX_MEMORY_MB=str(memory_mb), PYTHONUNBUFFERED="1")
+        # Only what the interpreter needs: the service env holds DATABASE_URL, tokens and API keys.
+        env = {key: os.environ[key] for key in ("PATH", "PYTHONPATH", "LANG", "LC_ALL") if key in os.environ}
+        env.update(SYMPY_SANDBOX_MEMORY_MB=str(memory_mb), PYTHONUNBUFFERED="1")
         self.proc = subprocess.Popen(
             [sys.executable, "-m", _WORKER_MODULE],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, cwd=str(_PROJECT_ROOT), env=env,
