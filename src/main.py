@@ -12,12 +12,14 @@ from contextlib import asynccontextmanager
 
 import sqlalchemy
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from src.core.config import get_settings
 from src.core.middleware import RequestIDMiddleware, configure_logging
+from src.core.validation import validation_exception_handler
 from src.api.router import router as diagnostic_router
 from src.api.analytics_router import router as analytics_router
 
@@ -82,6 +84,9 @@ app = FastAPI(
     redoc_url="/redoc" if settings.is_development else None,
     lifespan=lifespan,
 )
+
+# 422 without the rejected input: a long answer must not be echoed back at its full size.
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(

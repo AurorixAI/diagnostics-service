@@ -366,6 +366,8 @@ class SessionService:
                     task, opts, latex, diag_answer_type_for_display(task, opts),
                     provenance='legacy_answer_lookup',
                 )
+                # grade what the snapshot records (incl. ``display_answer_type``), like every other answer
+                task = task_object(state.current_task_snapshot, task_id)
         if task is None:
             raise NoTasksAvailableError(task_id)
 

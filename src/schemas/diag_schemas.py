@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from src.domain.answer_value import MAX_ANSWER_CHARS
+
 
 # ── Requests ──────────────────────────────────────────────────────────────
 
@@ -17,8 +19,11 @@ class CreateSessionRequest(BaseModel):
 
 
 class SubmitAnswerRequest(BaseModel):
-    task_id: str
-    student_answer: str
+    # The diagnostic is open through a public link: bound what a request can make the grader chew on.  A chosen
+    # option is sent as its full text, so the limit is above the longest option of the bank (1283 characters on
+    # 12.10.2026; see ``answer_value.MAX_ANSWER_CHARS``).  Longer -> 422, never a 500.
+    task_id: str = Field(..., max_length=128)                     # bank ids are varchar(60)
+    student_answer: str = Field(..., max_length=MAX_ANSWER_CHARS)
     time_ms: Optional[int] = Field(default=None, ge=0)
 
 

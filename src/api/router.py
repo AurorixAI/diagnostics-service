@@ -15,6 +15,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from src.core.database import get_db
 from src.core.access import invite_error, validate_invite_capability, validate_invite_state
@@ -156,11 +157,16 @@ async def submit_answer(
             allowed_statuses={"confirmed", "in_progress", "completed", "expired"},
             enforce_expiry=False,
         )
-        replay = service.get_completed_answer_result(session_id, body.task_id, body.student_answer)
+        # Grading is synchronous (DB, Redis lock, SymPy): on the event loop it would stall every other request
+        # of this worker for as long as it takes, so it runs in the thread pool.
+        replay = await run_in_threadpool(
+            service.get_completed_answer_result, session_id, body.task_id, body.student_answer
+        )
         if replay is not None:
             return replay
         validate_invite_state(invite, allowed_statuses={"confirmed", "in_progress"})
-        return service.submit_answer(
+        return await run_in_threadpool(
+            service.submit_answer,
             session_id=session_id,
             task_id=body.task_id,
             student_answer=body.student_answer,

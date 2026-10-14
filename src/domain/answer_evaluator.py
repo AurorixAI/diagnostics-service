@@ -7,9 +7,13 @@ Layered evaluation pipeline for student answers:
   Layer 2  Numeric normalization       — "3,5" = "3.5", "1/2" = "0.5", "4 507" = "4507"
   Layer 3  SymPy equivalence           — "2²" = "4", "√9" = "3", "2(x+1)" = "2x+2"
                                          uses task.sympy_solution if populated,
-                                         falls back to task.correct_answer
+                                         falls back to task.correct_answer;
+                                         runs in a subprocess with a ~1 s limit (sympy_sandbox)
   Layer 4  Distractor check            — partial credit 0.5 for known misconceptions
   Layer 5  IDK / skip                  — student explicitly skipped
+
+  Layers 2-3 only grade an answer the student TYPED (display_answer_type != "mcq"); a displayed choice is
+  compared as a value (layers 1, 4, 5).
 
   [Phase 2] Gemini — open-ended text where math comparison is not applicable
 
@@ -25,7 +29,9 @@ For answer_type="open": sympy_solution enables Layer 3 without Gemini.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import traceback
 from typing import Optional, Tuple
 
 from sympy import Abs, E, Float, Integer, Rational, Symbol, cos, exp, log as sympy_log, pi, simplify, sin, sqrt, tan
@@ -36,7 +42,8 @@ from sympy.parsing.sympy_parser import (
     implicit_multiplication_application,
 )
 
-from .answer_value import answer_value_key
+from .answer_value import MAX_ANSWER_CHARS, answer_value_key
+from .sympy_sandbox import SympySandbox
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +63,11 @@ _MAX_OPERATOR_COUNT = 64
 _MAX_POWER_OPERATORS = 4
 _MAX_INTEGER_DIGITS = 16
 _MAX_ABSOLUTE_INTEGER_POWER = 12
+# Extra limits for a STUDENT's answer on the sympy path (see ``_sympy_equivalent_untrusted``).
+_MAX_SYMPY_ANSWER_CHARS = 200
+_BIG_E_NOTATION = re.compile(r"\d[eE][+-]?\d{3,}")          # 1e999999: a float whose exponent has 3+ digits
+_POWER_OPERAND = re.compile(r"[\w.]*")
+_THREE_DIGITS = re.compile(r"\d{3,}")
 _ALLOWED_SYMBOLIC_CHARACTERS = re.compile(r"[0-9A-Za-z+*/().\-\s]+")
 _IDENTIFIER = re.compile(r"[A-Za-z]+")
 _INTEGER_LITERAL = re.compile(r"\d+")
@@ -90,6 +102,32 @@ _SUPERSCRIPT_MAP = {
 }
 
 
+def _sqrt_parentheses_to_call(text: str) -> str:
+    """``√(x+1)`` -> ``sqrt(x+1)``: the same result as ``re.sub(r"√\\(([^)]+)\\)", r"sqrt(\\1)", text)`` in linear time.
+
+    The regex retries ``[^)]+`` from every ``√(`` and so scans the rest of the text each time when there is no
+    closing parenthesis (``"√(" * N`` took seconds).  A match ends at the first ``)`` after its ``√(``; a ``√(``
+    with no ``)`` to its right cannot match, and neither can any later one.
+    """
+    parts = []
+    last = pos = 0
+    while True:
+        start = text.find("√(", pos)
+        if start < 0:
+            break
+        end = text.find(")", start + 2)
+        if end < 0:
+            break
+        if end == start + 2:                    # `√()`: an empty radicand is not a match, try the next start
+            pos = start + 1
+            continue
+        parts.append(text[last:start])
+        parts.append("sqrt(" + text[start + 2:end] + ")")
+        last = pos = end + 1
+    parts.append(text[last:])
+    return "".join(parts)
+
+
 def _preprocess_for_sympy(value: str) -> str:
     """
     Convert common math notation to sympy-compatible syntax.
@@ -115,7 +153,7 @@ def _preprocess_for_sympy(value: str) -> str:
     v = re.sub(r"\^(\d+)", r"**\1", v)
 
     # Square root variants: √9 → sqrt(9), √(x+1) → sqrt(x+1)
-    v = re.sub(r"√\(([^)]+)\)", r"sqrt(\1)", v)
+    v = _sqrt_parentheses_to_call(v)
     v = re.sub(r"√(\d+)", r"sqrt(\1)", v)
 
     # Multiplication sign variants: × → *, · → *
@@ -137,30 +175,31 @@ def _normalize_number(value: str) -> Optional[float]:
     Parse a student's math answer as a float.
     Handles: comma decimal, thousands space, typographic minus,
              simple fractions (1/2), trailing zeros.
-    Returns None if value is not a plain number.
+    Returns None if value is not a plain number (also when it is too long / too large to be one: `int` refuses
+    more than ``sys.get_int_max_str_digits()`` digits with ValueError, `num / den` of huge ints overflows).
     """
+    if len(value) > MAX_ANSWER_CHARS:
+        return None
     v = _preprocess_for_sympy(value)
-    # Simple fraction: "1/2" → 0.5
-    fraction_match = re.fullmatch(r"(-?\d+)\s*/\s*(-?\d+)", v)
-    if fraction_match:
-        num, den = int(fraction_match.group(1)), int(fraction_match.group(2))
-        return None if den == 0 else round(num / den, 10)
     try:
+        # Simple fraction: "1/2" → 0.5
+        fraction_match = re.fullmatch(r"(-?\d+)\s*/\s*(-?\d+)", v)
+        if fraction_match:
+            num, den = int(fraction_match.group(1)), int(fraction_match.group(2))
+            return None if den == 0 else round(num / den, 10)
         return float(v)
-    except ValueError:
+    except (ValueError, OverflowError, RecursionError):
         return None
 
 
 # ── SymPy equivalence ─────────────────────────────────────────────────────────
 
-def _safe_parse_symbolic_expression(value: str):
-    """Parse a bounded school-math expression without executable Python input.
+def _check_symbolic_expression(value: str) -> Tuple[str, list]:
+    """Syntax checks of a symbolic answer in plain Python (no SymPy evaluation).
 
-    This is an input boundary for student answers, not a general SymPy parser.
-    It accepts the notation already supported by the evaluator (numbers,
-    single-letter variables, arithmetic, parentheses and a small function
-    allow-list), then creates every symbol explicitly. Any other token is
-    rejected before ``parse_expr`` is reached.
+    Returns the preprocessed expression and the names of its variables; raises ``ValueError`` for anything
+    outside the supported school notation.  Cheap and bounded by ``_MAX_SYMBOLIC_INPUT_LENGTH``, so it is safe to
+    run in the service process before the (unbounded) SymPy work is handed to the sandbox.
     """
     expression = _preprocess_for_sympy(value)
     if not expression or len(expression) > _MAX_SYMBOLIC_INPUT_LENGTH:
@@ -198,7 +237,7 @@ def _safe_parse_symbolic_expression(value: str):
     if depth != 0:
         raise ValueError("symbolic expression has unbalanced parentheses")
 
-    local_dict = {**_SAFE_FUNCTIONS, **_SAFE_CONSTANTS}
+    variables = []
     for match in _IDENTIFIER.finditer(expression):
         name = match.group(0)
         following = expression[match.end():].lstrip()
@@ -212,6 +251,22 @@ def _safe_parse_symbolic_expression(value: str):
             continue
         if len(name) != 1:
             raise ValueError("only single-letter variables are supported")
+        variables.append(name)
+    return expression, variables
+
+
+def _safe_parse_symbolic_expression(value: str):
+    """Parse a bounded school-math expression without executable Python input.
+
+    This is an input boundary for student answers, not a general SymPy parser.
+    It accepts the notation already supported by the evaluator (numbers,
+    single-letter variables, arithmetic, parentheses and a small function
+    allow-list), then creates every symbol explicitly. Any other token is
+    rejected before ``parse_expr`` is reached.
+    """
+    expression, variables = _check_symbolic_expression(value)
+    local_dict = {**_SAFE_FUNCTIONS, **_SAFE_CONSTANTS}
+    for name in variables:
         local_dict[name] = Symbol(name, real=True)
 
     return parse_expr(
@@ -244,6 +299,57 @@ def _sympy_equivalent(student_expr: str, canonical_expr: str) -> bool:
         return False
 
 
+def _too_expensive_for_sympy(expression: str) -> bool:
+    """Cheap checks on a student's preprocessed expression for what SymPy cannot do in a second.
+
+    A power tower (``9**9**9``, ``9**(9**9)``), an exponent with 3+ digits and a float with a 3+ digit exponent
+    (``1e999999``) cost seconds to minutes and hold the GIL in ``long_pow``.  The sandbox timeout would stop
+    them anyway; rejecting them first spares a worker that has to be killed and started again.
+    """
+    if _BIG_E_NOTATION.search(expression):
+        return True
+    for power in re.finditer(r"\*\*", expression):
+        i = power.end()
+        while i < len(expression) and expression[i] in " +-":
+            i += 1
+        if i < len(expression) and expression[i] == "(":           # ``**(…)``: the matching parenthesis
+            depth = 0
+            for j in range(i, len(expression)):
+                depth += (expression[j] == "(") - (expression[j] == ")")
+                if depth == 0:
+                    break
+            end = j + 1
+        else:
+            end = _POWER_OPERAND.match(expression, i).end()
+        exponent = expression[i:end]
+        if "**" in exponent or expression[end:].lstrip().startswith("**") or _THREE_DIGITS.search(exponent):
+            return True
+    return False
+
+
+_SANDBOX = SympySandbox()
+
+
+def _sympy_equivalent_untrusted(student_expr: str, canonical_expr: str, task_id=None) -> bool:
+    """``_sympy_equivalent`` for a string typed by a student: bounded in time, never raises.
+
+    The syntax is checked here (cheap).  SymPy itself - ``parse_expr`` evaluates the expression, ``simplify``
+    can take minutes on ``(a+1)*(b+1)*…`` and a huge ``int ** int`` does not even release the GIL - runs in a
+    separate process that is killed after ~1 s.  Anything refused, too slow or crashed is "not equal".
+    """
+    try:
+        if len(student_expr.strip()) > _MAX_SYMPY_ANSWER_CHARS:
+            return False
+        student, _ = _check_symbolic_expression(student_expr)
+        _check_symbolic_expression(canonical_expr)
+    except ValueError:
+        return False
+    if _too_expensive_for_sympy(student):
+        log.info("sympy_answer_refused task_id=%s answer_len=%s", task_id, len(student_expr))
+        return False
+    return _SANDBOX.equivalent(student_expr, canonical_expr, task_id)
+
+
 # ── Main evaluator ────────────────────────────────────────────────────────────
 
 _IDK_TOKENS = {"не знаю", "незнаю", "?", "skip", "idk", ""}
@@ -256,6 +362,23 @@ class AnswerEvaluator:
     """
 
     def evaluate(self, task, student_answer: str) -> Tuple[float, str]:
+        """
+        One bad answer never breaks grading: an answer longer than ``MAX_ANSWER_CHARS`` is wrong without being
+        looked at, and an exception while comparing counts as wrong too (logged without the answer text -
+        exception messages of ``int`` / ``float`` quote it).  ``_evaluate`` holds the rules.
+        """
+        try:
+            return self._evaluate(task, student_answer)
+        except Exception as exc:
+            frame = traceback.extract_tb(exc.__traceback__)[-1]
+            log.warning(
+                "answer_evaluation_failed task_id=%s error_type=%s at=%s:%s answer_len=%s",
+                getattr(task, "id", None) or getattr(task, "task_id", None), type(exc).__name__,
+                os.path.basename(frame.filename), frame.lineno, len(student_answer) if isinstance(student_answer, str) else "?",
+            )
+            return 0.0, "wrong"
+
+    def _evaluate(self, task, student_answer: str) -> Tuple[float, str]:
         """
         Returns (outcome, category):
           outcome   — 0.0 | 1.0
@@ -281,13 +404,22 @@ class AnswerEvaluator:
         """
         correct = str(task.correct_answer).strip()
         given = student_answer.strip()
+        if len(given) > MAX_ANSWER_CHARS:
+            log.warning(
+                "answer_too_long task_id=%s answer_len=%s", getattr(task, "id", None) or getattr(task, "task_id", None), len(given)
+            )
+            return 0.0, "wrong"
 
         # ── Layer 1: Exact match (case-insensitive) ───────────────────────
         if answer_value_key(given) == answer_value_key(correct):
             return 1.0, "correct"
 
         # ── Open/numeric only: numeric normalization + SymPy ─────────────
-        if task.answer_type != "mcq":
+        # What the student was shown decides: the snapshot keeps the bank type in ``answer_type`` (text,
+        # expression, ...) and the displayed one ('mcq' whenever choices were served) in ``display_answer_type``.
+        # A choice is compared as a value; only a typed answer needs layers 2-3.  Old snapshots and live bank
+        # rows have no ``display_answer_type`` - the bank type decides, as before.
+        if (getattr(task, "display_answer_type", None) or task.answer_type) != "mcq":
             # Layer 2: Numeric normalization
             given_num = _normalize_number(given)
             correct_num = _normalize_number(correct)
@@ -302,7 +434,7 @@ class AnswerEvaluator:
             if not skip_sympy:
                 sympy_solution = getattr(task, "sympy_solution", None)
                 canonical = str(sympy_solution).strip() if sympy_solution else correct
-                if _sympy_equivalent(given, canonical):
+                if _sympy_equivalent_untrusted(given, canonical, getattr(task, "id", None) or getattr(task, "task_id", None)):
                     return 1.0, "correct"
 
         # ── Layer 4: Distractor check (MCQ and open) ─────────────────────

@@ -152,8 +152,13 @@ def integrity_flags(old_payload: dict, new_payload: dict, student_answer, outcom
         graded_below_one = float(outcome) < 1
     except (TypeError, ValueError):
         graded_below_one = True
-    if new_key and graded_below_one and report_answer_key(display_student_answer(student_answer)) == new_key:
-        flags.append('student_answer_equals_new_key_but_outcome<1')
+    if new_key and graded_below_one:
+        try:
+            equals_new_key = report_answer_key(display_student_answer(student_answer)) == new_key
+        except Exception:                      # an unreadable stored answer is simply not the key
+            equals_new_key = False
+        if equals_new_key:
+            flags.append('student_answer_equals_new_key_but_outcome<1')
     shown = old_payload.get('display_options')
     if isinstance(shown, list) and shown and new_key and new_key not in {report_answer_key(o) for o in shown}:
         flags.append('new_key_not_in_display_options')
