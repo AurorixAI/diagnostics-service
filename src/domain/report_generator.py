@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
@@ -170,6 +171,22 @@ def _distractor_explanation_latex(distractor: Any) -> Optional[str]:
         return None
     value = distractor.get("error_logic_latex") or distractor.get("explanation_latex")
     return str(value).strip() or None if value is not None else None
+
+
+_PROMPT_ANSWER_CHARS = 200
+
+
+def _prompt_answer(value: object) -> str:
+    """A student's answer as it goes into the AI prompt: at most 200 characters (``…`` marks a cut) and no control
+    characters - the stored text can be any length and may hold line breaks or invisible formatting.  The report
+    JSON keeps the text as it was."""
+    text = str(value if value is not None else "")
+    clipped = text[:_PROMPT_ANSWER_CHARS]                       # bound the work before looking at characters
+    clean = "".join(
+        " " if ch in "\t\n\r" else ch for ch in clipped
+        if ch in "\t\n\r" or not unicodedata.category(ch).startswith("C")
+    )
+    return clean[:_PROMPT_ANSWER_CHARS - 1] + "…" if len(text) > _PROMPT_ANSWER_CHARS else clean
 
 
 def _log_answer_compare_failure(exc: Exception) -> None:
@@ -1813,7 +1830,7 @@ def generate_and_save_report(
         for cg in cognitive_error_types:
             ex_strs = []
             for ex in cg.get("examples", [])[:2]:
-                ans_str = ex.get("student_answer") or "—"
+                ans_str = _prompt_answer(ex.get("student_answer") or "—")
                 d_exp = ex.get("distractor_explanation")
                 ex_strs.append(f"{ex['skill_name_ru']} (ответ: {repr(ans_str)}{f' — {d_exp}' if d_exp else ''})")
             cog_lines.append(f"  • {cg['title']} ({cg['count']} ошибок): {'; '.join(ex_strs)}")
@@ -1850,7 +1867,7 @@ def generate_and_save_report(
         for i, a in enumerate(selected_wrong, 1):
             name = skill_map.get(a.skill_id, {}).get("name_ru", a.skill_id)
             ans = (a.student_answer or "").strip()
-            ans = "—" if ans in ("x_wrong_x", "wrong", "") else display_student_answer(ans)
+            ans = "—" if ans in ("x_wrong_x", "wrong", "") else _prompt_answer(display_student_answer(ans))
             wrong_lines.append(f"  [{i}] {name}: ответ={repr(ans)}, категория={a.eval_category}")
         wrong_block = "\n".join(wrong_lines) or "  (нет неверных ответов)"
 
