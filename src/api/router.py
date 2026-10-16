@@ -78,6 +78,7 @@ async def create_session(
             grade_level=body.grade_level,
             allowed_statuses={"confirmed"},
         )
+        ticket.exists()
         session_id, first_task = service.create_session(
             student_id=body.student_id,
             grade_level=body.grade_level,
@@ -123,6 +124,7 @@ async def get_active_session(
             invite_code,
             allowed_statuses={"confirmed", "in_progress"},
         )
+        ticket.exists()
         result = service.get_active_session(invite_code)
         if result is None:
             raise invite_error(404, "SESSION_NOT_FOUND", "Активная попытка не найдена.", "check_session")
@@ -210,6 +212,7 @@ async def resolve_session(
             allowed_statuses={"confirmed", "in_progress", "completed", "expired"},
             enforce_expiry=False,
         )
+        ticket.exists()
         if session:
             session = service.session_repo.get_fresh(session.id)
         if session and session.phase == "completed":

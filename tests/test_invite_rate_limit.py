@@ -220,13 +220,15 @@ class TestLegitimateClassIsNotLockedOut:
             assert create(api, code_of(i), student_of(i)).status_code == 201
 
     def test_expired_and_used_invites_are_states_not_guesses(self, api):
-        api.invites[code_of(0)] = _invite(0, status="expired", expires_in=timedelta(hours=-1))
-        api.invites[code_of(1)] = _invite(1, status="completed")
-        api.invites[code_of(2)] = _invite(2, status="pending")
-        for _ in range(FAILS_PER_MINUTE.count + 5):
-            assert create(api, code_of(0), student_of(0)).status_code in (409, 410)
-            assert create(api, code_of(1), student_of(1)).status_code == 409
-            assert create(api, code_of(2), student_of(2)).status_code == 409
+        """More state answers than the whole failure budget: none of them is a guess."""
+        for i in range(35):
+            api.invites[f"EXP{i:05d}"] = _invite(i, status="expired", expires_in=timedelta(hours=-1))
+            api.invites[f"USD{i:05d}"] = _invite(i, status="completed")
+            api.invites[f"PND{i:05d}"] = _invite(i, status="pending")
+        for i in range(35):
+            assert create(api, f"EXP{i:05d}", student_of(i)).status_code in (409, 410)
+            assert create(api, f"USD{i:05d}", student_of(i)).status_code == 409
+            assert create(api, f"PND{i:05d}", student_of(i)).status_code == 409
         # the budget of failed lookups is untouched: a valid code still opens
         assert create(api, code_of(3), student_of(3)).status_code == 201
 
@@ -234,7 +236,7 @@ class TestLegitimateClassIsNotLockedOut:
 # ── the brute force ─────────────────────────────────────────────────────────────────────────────────────
 
 class TestGuessingIsBudgeted:
-    def test_the_twenty_first_wrong_code_in_a_minute_is_refused(self, api):
+    def test_the_hundred_and_first_wrong_code_in_a_minute_is_refused(self, api):
         for n in range(FAILS_PER_MINUTE.count):
             assert resolve(api, guess(n)).status_code == 403
         refused = resolve(api, guess(999))
@@ -312,6 +314,68 @@ class TestGuessingIsBudgeted:
             resolve(api, guess(n), ip=f"2001:db8:5:6:{n:x}::1")
         assert resolve(api, code_of(0), ip="2001:db8:5:6:ffff::9").status_code == 429
         assert resolve(api, code_of(0), ip="2001:db8:5:7::9").status_code == 404
+
+
+class TestRefusalsAreCheapAndLoud:
+    def test_retry_after_is_the_longest_of_the_exceeded_windows(self, api, monkeypatch):
+        clock = _Clock(monkeypatch)
+        for round_ in range(FAILS_PER_HOUR.count // FAILS_PER_MINUTE.count):
+            for n in range(FAILS_PER_MINUTE.count):
+                assert resolve(api, guess(round_ * 1000 + n)).status_code == 403
+            if round_ < FAILS_PER_HOUR.count // FAILS_PER_MINUTE.count - 1:
+                clock.now += 61
+        # the last minute is full AND the hour is full: the wait is the hour's, not the minute's
+        refused = resolve(api, code_of(0))
+        assert refused.status_code == 429
+        assert int(refused.headers["Retry-After"]) > 3000
+        assert "мин" in refused.json()["detail"]["message"]
+
+    def test_flood_and_failures_exceeded_together_answer_with_the_longer_wait(self, monkeypatch):
+        clock = _Clock(monkeypatch)
+        request = _req({"X-Real-IP": "203.0.113.7"})
+        for n in range(FAILS_PER_MINUTE.count):
+            abuse_limit.admit_invite_attempt(request, guess(n)).fail()
+        clock.now += 20
+        with pytest.raises(Exception) as caught:
+            abuse_limit.admit_invite_attempt(request, guess(999))
+        assert caught.value.status_code == 429 and int(caught.value.headers["Retry-After"]) == 40
+
+    def test_a_refused_address_is_logged_once_per_window_not_per_request(self, api, caplog, monkeypatch):
+        clock = _Clock(monkeypatch)
+        for n in range(FAILS_PER_MINUTE.count):
+            resolve(api, guess(n))
+        with caplog.at_level(logging.WARNING, logger="diagnostic_service.abuse_limit"):
+            for _ in range(50):
+                assert resolve(api, code_of(0)).status_code == 429
+            lines = [r for r in caplog.records if "invite_lookup_refused" in r.getMessage()]
+            assert len(lines) == 1 and "203.0.113.7" in lines[0].getMessage()
+            clock.now += 61  # the window is over: a new refusal is news again
+            for n in range(FAILS_PER_MINUTE.count):
+                resolve(api, guess(500 + n))
+            assert resolve(api, code_of(0)).status_code == 429
+            lines = [r for r in caplog.records if "invite_lookup_refused" in r.getMessage()]
+            assert len(lines) == 2
+
+    def test_unknown_codes_leave_no_key_of_their_own(self, api):
+        for n in range(30):
+            assert resolve(api, guess(n)).status_code == 403
+        assert not [k for k in counters._memory if k.startswith("diagcode:")]
+        assert resolve(api, code_of(0)).status_code == 404
+        assert len([k for k in counters._memory if k.startswith("diagcode:")]) == 1
+
+    def test_a_known_code_in_a_state_still_counts_against_its_own_cap(self, api):
+        api.invites[code_of(0)] = _invite(0, status="completed")
+        for _ in range(CODE_PER_HOUR.count):
+            assert create(api, code_of(0), student_of(0)).status_code == 409
+        refused = create(api, code_of(0), student_of(0))
+        assert refused.status_code == 429
+
+    def test_a_spent_code_is_refused_without_asking_auth_service(self, api):
+        for n in range(CODE_PER_HOUR.count):
+            assert resolve(api, code_of(0), ip=f"198.51.100.{n % 250 + 1}").status_code == 404
+        calls_before = api.calls["auth"]
+        assert resolve(api, code_of(0), ip="192.0.2.9").status_code == 429
+        assert api.calls["auth"] == calls_before
 
 
 class TestVolumeCaps:

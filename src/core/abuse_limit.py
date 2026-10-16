@@ -7,12 +7,14 @@ the student's address: diagnostic-service calls it server-to-server, so the addr
 therefore lives here, where the browser's address is known.
 
 * What a guess costs is a FAILED lookup (unknown code, or a known code with another student / grade), so those are
-  budgeted per client address: 20 per minute and 200 per hour.  A class behind one school NAT opens ~30 valid codes in
+  budgeted per client address: 100 per minute and 600 per hour.  A class behind one school NAT opens ~30 valid codes in
   a minute (about 2-3 calls each): valid lookups are not failures and are only capped against floods per address
   (300 per minute, 3000 per hour).
 * One code is used by ONE student; 100 calls per hour per code is far above a student's (a few page loads and
-  retries) and stops hammering a single code.  The key is a hash of the code: what a client types never becomes a key
-  and the code never reaches a log line (it is a capability).
+  retries) and stops hammering a single code.  The counter is created only after the code has been validated as an
+  existing invite (a walk over unknown codes must not fill the store with a key per guess) and is read before that,
+  so a spent code is refused without asking auth-service.  The key is a hash of the code: what a client types never
+  becomes a key and the code never reaches a log line (it is a capability).
 * When Redis is unreachable the counters run on per-process memory with ONE warning per outage (fail open).
 
 The client address: nginx overwrites X-Real-IP with $remote_addr on the diagnostic locations; that header is the
@@ -48,8 +50,8 @@ class Limit:
 
 # ── the policy ─────────────────────────────────────────────────────────────────────────────────────────────
 # Failed lookups per client address.
-FAILS_PER_MINUTE = Limit(20, 60)
-FAILS_PER_HOUR = Limit(200, 3600)
+FAILS_PER_MINUTE = Limit(100, 60)
+FAILS_PER_HOUR = Limit(600, 3600)
 # Every lookup per client address: only a flood guard, far above a class behind one NAT.
 ATTEMPTS_PER_MINUTE = Limit(300, 60)
 ATTEMPTS_PER_HOUR = Limit(3000, 3600)
@@ -250,45 +252,73 @@ def too_many_attempts(retry_after: int) -> HTTPException:
 
 
 # ── the invite-code policy ─────────────────────────────────────────────────────────────────────────────────
-class InviteTicket:
-    """One admitted lookup.  ``record(exc)`` classifies the error the lookup ended with."""
+# Errors that say the code does NOT exist (or could not be checked): nothing is counted against such a code.
+NO_SUCH_INVITE_CODES = frozenset({"INVITE_INVALID", "INVITE_REQUIRED", "INVITE_CHECK_UNAVAILABLE"})
 
-    def __init__(self, bucket: str) -> None:
+
+class InviteTicket:
+    """One admitted lookup.  ``exists()`` after the code validated, ``record(exc)`` for the error it ended with."""
+
+    def __init__(self, bucket: str, code_scope: Optional[str]) -> None:
         self._bucket = bucket
+        self._code_scope = code_scope
+        self._counted = False
 
     def fail(self) -> None:
         counters.hit(f"diagfail:{FAILS_PER_MINUTE.window}:{self._bucket}", FAILS_PER_MINUTE.window)
         counters.hit(f"diagfail:{FAILS_PER_HOUR.window}:{self._bucket}", FAILS_PER_HOUR.window)
 
+    def exists(self) -> None:
+        """The code is a real invite: only now does it get a counter of its own (idempotent)."""
+        if self._code_scope and not self._counted:
+            self._counted = True
+            counters.hit(f"diagcode:{self._code_scope}", CODE_PER_HOUR.window)
+
     def record(self, exc: BaseException) -> None:
-        """Count the lookup as a guess when it ended in INVITE_INVALID / INVITE_STUDENT_MISMATCH / INVITE_GRADE_MISMATCH."""
+        """Classify the error a lookup ended with: a guess is counted against the address, a state is not."""
         detail = getattr(exc, "detail", None)
-        if isinstance(detail, dict) and detail.get("code") in GUESS_CODES:
+        code = detail.get("code") if isinstance(detail, dict) else None
+        if code in GUESS_CODES:
             self.fail()
+        if code is not None and code not in NO_SUCH_INVITE_CODES:
+            self.exists()  # a known code that is expired, used, mismatched, has no attempt yet...
+
+
+def _log_refusal_once(bucket: str, reason: str, retry_after: int) -> None:
+    """One warning per refused address and reason per window: a walk that goes on must not flood the log."""
+    first, _ = counters.hit(f"diaglogged:{reason}:{bucket}", max(retry_after, 1))
+    if first == 1:
+        log.warning("invite_lookup_refused reason=%s bucket=%s retry_after=%s", reason, bucket, retry_after)
 
 
 def admit_invite_attempt(request: Request, invite_code: Optional[str]) -> InviteTicket:
     """Admit (or refuse with 429 + Retry-After) one public lookup by invite code.
 
-    A spent failure budget refuses first, before anything else is counted.
+    Every window is evaluated and the refusal carries the LONGEST wait among the exceeded ones.  The per-code
+    counter is only read here; it is created when the code has been validated (``InviteTicket.exists``).
     """
     bucket = client_bucket(request)
+    code_scope = code_key(invite_code) if invite_code else None
+    exceeded: list[tuple[int, str]] = []
 
     for limit in (FAILS_PER_MINUTE, FAILS_PER_HOUR):
         failures, left = counters.peek(f"diagfail:{limit.window}:{bucket}")
         if failures >= limit.count:
-            log.warning("invite_lookup_refused reason=failures bucket=%s", bucket)
-            raise too_many_attempts(left)
+            exceeded.append((left, "failures"))
 
-    uses, left = counters.hit(f"diagcode:{code_key(invite_code or '')}", CODE_PER_HOUR.window)
-    if uses > CODE_PER_HOUR.count:
-        log.warning("invite_lookup_refused reason=code_volume bucket=%s", bucket)
-        raise too_many_attempts(left)
+    if code_scope:
+        uses, left = counters.peek(f"diagcode:{code_scope}")
+        if uses >= CODE_PER_HOUR.count:
+            exceeded.append((left, "code_volume"))
 
     for limit in (ATTEMPTS_PER_MINUTE, ATTEMPTS_PER_HOUR):
         attempts, left = counters.hit(f"diagtry:{limit.window}:{bucket}", limit.window)
         if attempts > limit.count:
-            log.warning("invite_lookup_refused reason=flood bucket=%s", bucket)
-            raise too_many_attempts(left)
+            exceeded.append((left, "flood"))
 
-    return InviteTicket(bucket)
+    if exceeded:
+        wait, reason = max(exceeded)
+        _log_refusal_once(bucket, reason, wait)
+        raise too_many_attempts(wait)
+
+    return InviteTicket(bucket, code_scope)
