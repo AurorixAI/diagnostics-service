@@ -13,10 +13,11 @@ import logging
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
+from src.core.abuse_limit import admit_invite_attempt
 from src.core.database import get_db
 from src.core.access import invite_error, validate_invite_capability, validate_invite_state
 from src.models.diag_models import DiagSession
@@ -62,9 +63,12 @@ def _answer_error(exc: DiagnosticError) -> HTTPException:
 @router.post("/sessions", response_model=CreateSessionResponse, status_code=201)
 async def create_session(
     body: CreateSessionRequest,
+    request: Request,
     service: SessionService = Depends(_service),
 ):
     """Initialize a session only for the student bound to the invite code."""
+    # #77: the code can be probed here, so every lookup is rate limited per client address / per code (429 + Retry-After)
+    ticket = admit_invite_attempt(request, body.invite_code)
     try:
         # The public code is a capability, not merely presentation metadata.
         # A direct API caller cannot substitute another student UUID or grade.
@@ -87,11 +91,12 @@ async def create_session(
         raise _answer_error(exc)
     except DiagnosticError as exc:
         raise _answer_error(exc)
-    except HTTPException:
+    except HTTPException as exc:
         # A deliberate 4xx (missing invite capability, wrong student, a
         # session already started) must reach the client as itself. The
         # generic handler below would relabel it 500, and the UI would
         # report a server failure instead of what the user has to do.
+        ticket.record(exc)
         raise
     except Exception as exc:
         log.error("diagnostic_start_failed error_type=%s", type(exc).__name__)
@@ -100,6 +105,7 @@ async def create_session(
 
 @router.get("/sessions/active", response_model=ActiveSessionResponse)
 async def get_active_session(
+    request: Request,
     invite_code: str = Query(..., description="Diagnostic invite code"),
     service: SessionService = Depends(_service),
 ):
@@ -108,6 +114,7 @@ async def get_active_session(
     Called on page load by the frontend to offer 'Continue where you left off?'
     Returns 404 when no active session exists (new student or session completed/expired).
     """
+    ticket = admit_invite_attempt(request, invite_code)  # #77
     try:
         # A callback retry can leave auth-service on ``confirmed`` briefly,
         # while the diagnostic DB already owns the only valid session.  Resume
@@ -126,7 +133,8 @@ async def get_active_session(
             current_task=current_task,
             total_time_ms=total_time_ms,
         )
-    except HTTPException:
+    except HTTPException as exc:
+        ticket.record(exc)
         raise
     except Exception as exc:
         log.error("diagnostic_restore_failed error_type=%s", type(exc).__name__)
@@ -187,10 +195,12 @@ async def submit_answer(
 
 @router.get("/sessions/by-invite", response_model=ResolvedSessionResponse)
 async def resolve_session(
+    request: Request,
     invite_code: str = Query(..., min_length=1),
     service: SessionService = Depends(_service),
 ):
     """Restore the exact owned attempt, including a durably completed one."""
+    ticket = admit_invite_attempt(request, invite_code)  # #77
     try:
         session = service.session_repo.get_by_invite_code(invite_code)
         invite = await validate_invite_capability(
@@ -227,7 +237,8 @@ async def resolve_session(
         )
     except DiagnosticError as exc:
         raise _answer_error(exc)
-    except HTTPException:
+    except HTTPException as exc:
+        ticket.record(exc)
         raise
     except Exception as exc:
         log.error("diagnostic_restore_failed error_type=%s", type(exc).__name__)
