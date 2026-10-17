@@ -33,7 +33,7 @@ def are_answers_equivalent(a, b):
     strip_parens = lambda x: re.sub(r"[()]", "", x)
     return strip_parens(ka) == strip_parens(kb)
 
-conn = psycopg2.connect(DB_URL)
+conn = psycopg2.connect(DB_URL, options='-c timezone=UTC')  # session TimeZone=UTC (ROADMAP #49)
 cur = conn.cursor()
 cur.execute("SELECT id, report_json FROM diag_reports;")
 reports = cur.fetchall()

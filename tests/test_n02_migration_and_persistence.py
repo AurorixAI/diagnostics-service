@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from src.models.diag_models import DiagAnswer
+from src.core.db_timezone import utc_connect_args
 from tests.test_completion_lifecycle import CODE, PAYLOAD, scenario, submit  # noqa: F401  (fixture)
 
 DB_URL = os.environ.get("A2_TEST_DATABASE_URL")
@@ -29,11 +30,11 @@ def test_migration_010_sets_lock_timeout_before_alter_and_has_downgrade():
 def test_migration_010_up_down_up_keeps_legacy_rows_and_fails_fast_under_lock():
     assert make_url(DB_URL).database == "a2_diagnostic", "Require isolated CI database"
     name = "a2_n02_" + uuid.uuid4().hex[:12]
-    admin = create_engine(make_url(DB_URL).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    admin = create_engine(make_url(DB_URL).set(database="postgres"), isolation_level="AUTOCOMMIT", connect_args=utc_connect_args(DB_URL))
     with admin.connect() as conn:
         conn.execute(text(f"CREATE DATABASE {name}"))
     test_url = make_url(DB_URL).set(database=name).render_as_string(hide_password=False)
-    engine = create_engine(test_url)
+    engine = create_engine(test_url, connect_args=utc_connect_args(test_url))
     env = {**os.environ, "DATABASE_URL": test_url}
 
     def alembic(*args):

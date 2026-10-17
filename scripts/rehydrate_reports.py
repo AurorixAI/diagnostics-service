@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
+from src.core.db_timezone import utc_connect_args
 from src.models.diag_models import DiagReport
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -112,7 +113,7 @@ class _MockContentClient:
 
 
 def rehydrate_all_reports() -> None:
-    engine = create_engine(DB_URL)
+    engine = create_engine(DB_URL, connect_args=utc_connect_args(DB_URL))
     Session = sessionmaker(bind=engine)
     db = Session()
     try:

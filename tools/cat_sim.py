@@ -79,6 +79,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 DIAG_DIR = Path(__file__).resolve().parents[1]
+# Every connection of this tool (content DB, scratch copies) runs its session in UTC like the services (ROADMAP #49).
+_UTC_SESSION = {"options": "-c timezone=UTC"}
 DEFAULT_CONTENT_DIR = DIAG_DIR.parent / "content-service"
 DEFAULT_GAP_L3 = {
     11: ["G11_P16", "G11_P17", "G11_P20", "G11_P01", "G11_P09", "G11_P11", "G11_P12", "G11_P35"],
@@ -197,7 +199,7 @@ def bootstrap(content_db_url: str, truth_db_url: Optional[str], content_dir: Pat
 
     # knowledge graph (ground truth) ---------------------------------------
     def load_graph(url):
-        eng = create_engine(url)
+        eng = create_engine(url, connect_args=_UTC_SESSION)
         with eng.connect() as c:
             nodes = {r[0]: (r[1], r[2]) for r in c.execute(text(
                 "select id, level, parent_id from knowledge_hierarchy"))}
@@ -207,7 +209,7 @@ def bootstrap(content_db_url: str, truth_db_url: Optional[str], content_dir: Pat
         return nodes, edges
 
     def load_task_skills(url):
-        eng = create_engine(url)
+        eng = create_engine(url, connect_args=_UTC_SESSION)
         with eng.connect() as c:
             m = {r[0]: r[1] for r in c.execute(text("select id, skill_id from tasks_master"))}
         eng.dispose()
@@ -666,14 +668,14 @@ def make_scratch(url: str, name: str, edges: Optional[List[dict]] = None) -> int
     """Copy the content DB (CREATE DATABASE ... TEMPLATE) and optionally insert prerequisite edges."""
     import psycopg2
     src = url.rsplit("/", 1)[1].split("?")[0]
-    conn = psycopg2.connect(_swap_db(url, "postgres"))
+    conn = psycopg2.connect(_swap_db(url, "postgres"), **_UTC_SESSION)
     conn.autocommit = True
     cur = conn.cursor()
     cur.execute(f'DROP DATABASE IF EXISTS "{name}"')
     cur.execute(f'CREATE DATABASE "{name}" TEMPLATE "{src}"')
     conn.close()
     added = 0
-    c2 = psycopg2.connect(_swap_db(url, name))
+    c2 = psycopg2.connect(_swap_db(url, name), **_UTC_SESSION)
     cur = c2.cursor()
     for e in edges or []:
         cur.execute(
@@ -706,7 +708,7 @@ def deactivate_empty_l4(scratch_url: str) -> List[str]:
     import psycopg2
     if scratch_url.rsplit("/", 1)[1].split("?")[0] == "algo_content":
         raise RuntimeError("refusing to modify the live algo_content database")
-    c = psycopg2.connect(scratch_url)
+    c = psycopg2.connect(scratch_url, **_UTC_SESSION)
     cur = c.cursor()
     cur.execute("update knowledge_hierarchy k set is_active=false where k.level='L4' and k.is_active and not exists "
                 "(select 1 from tasks_master t where t.skill_id=k.id and t.is_active) returning k.id")
@@ -720,7 +722,7 @@ def candidate_l3(urls: List[str], grade: int) -> List[str]:
     from sqlalchemy import create_engine, text
     sets = []
     for u in urls:
-        eng = create_engine(u)
+        eng = create_engine(u, connect_args=_UTC_SESSION)
         with eng.connect() as c:
             sets.append({r[0] for r in c.execute(text(
                 "select l3.id from knowledge_hierarchy l3 where l3.level='L3' and l3.is_active and l3.id like :p "
@@ -732,7 +734,7 @@ def candidate_l3(urls: List[str], grade: int) -> List[str]:
 
 def drop_scratch(url: str, name: str) -> None:
     import psycopg2
-    conn = psycopg2.connect(_swap_db(url, "postgres"))
+    conn = psycopg2.connect(_swap_db(url, "postgres"), **_UTC_SESSION)
     conn.autocommit = True
     cur = conn.cursor()
     cur.execute("select pg_terminate_backend(pid) from pg_stat_activity where datname=%s and pid<>pg_backend_pid()", (name,))

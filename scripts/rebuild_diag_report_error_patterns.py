@@ -29,6 +29,7 @@ from src.domain.report_generator import (  # noqa: E402
     _build_error_patterns,
     _resolve_skill,
 )
+from src.core.db_timezone import utc_connect_args  # noqa: E402
 from src.models.diag_models import DiagAnswer, DiagReport  # noqa: E402
 from src.repositories.knowledge_repo import KnowledgeRepository  # noqa: E402
 
@@ -86,7 +87,7 @@ def main() -> int:
         os.environ["CONTENT_SERVICE_URL"] = args.content_service_url.rstrip("/")
 
     db_url = os.environ.get("DATABASE_URL") or "postgresql://algo:algo_password@127.0.0.1:5433/algo_diagnostic"
-    engine = create_engine(db_url)
+    engine = create_engine(db_url, connect_args=utc_connect_args(db_url))
     session_factory = sessionmaker(bind=engine)
     db = session_factory()
     try:

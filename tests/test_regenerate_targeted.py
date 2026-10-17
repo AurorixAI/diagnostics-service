@@ -20,6 +20,7 @@ from sqlalchemy.orm import sessionmaker
 
 from scripts import regenerate_reports as script
 from src.domain import report_jobs
+from src.core.db_timezone import utc_connect_args
 from src.domain.report_generator import REPORT_SCHEMA_VERSION
 from src.domain.task_display import build_diag_answer_options, diag_answer_type_for_display
 from src.domain.task_evidence import capture_task, read_task
@@ -38,7 +39,7 @@ def _jsonb_as_json(_type, _compiler, **_kw):          # test-only: the models us
 def engine():
     if PG_URL:
         assert PG_URL.rstrip("/").endswith("/regen_test"), "run only against the throwaway regen_test database"
-        eng = create_engine(PG_URL)
+        eng = create_engine(PG_URL, connect_args=utc_connect_args(PG_URL))
         Base.metadata.create_all(eng, tables=TABLES)
         with eng.begin() as connection:
             for table in reversed(TABLES):

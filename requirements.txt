@@ -14,3 +14,6 @@ google-generativeai==0.8.3
 tenacity==8.2.3
 structlog==24.4.0
 prometheus-fastapi-instrumentator==7.0.0
+
+# Time zones: pure-Python IANA database for zoneinfo (Asia/Tashkent) when the OS image has none
+tzdata==2026.5

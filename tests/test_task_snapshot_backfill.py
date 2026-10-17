@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 from scripts import backfill_task_snapshots as bf
 from src.domain.task_evidence import read_task
+from src.core.db_timezone import utc_connect_args
 
 ROOT = Path(__file__).parents[1]
 BANK = {
@@ -39,14 +40,14 @@ def engine():
     url = os.environ.get('A2_TEST_DATABASE_URL')
     assert url and make_url(url).database == 'a2_diagnostic', 'Require isolated CI database'
     name = 'a2_backfill_' + uuid.uuid4().hex[:12]
-    admin = create_engine(make_url(url).set(database='postgres'), isolation_level='AUTOCOMMIT')
+    admin = create_engine(make_url(url).set(database='postgres'), isolation_level='AUTOCOMMIT', connect_args=utc_connect_args(url))
     with admin.connect() as conn:
         conn.execute(text(f'CREATE DATABASE {name}'))
     test_url = make_url(url).set(database=name).render_as_string(hide_password=False)
     result = subprocess.run(['alembic', 'upgrade', 'head'], cwd=ROOT, env={**os.environ, 'DATABASE_URL': test_url},
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr[-3000:]
-    eng = create_engine(test_url)
+    eng = create_engine(test_url, connect_args=utc_connect_args(test_url))
     yield eng
     eng.dispose()
     with admin.connect() as conn:
