@@ -7,7 +7,9 @@ like that is dropped from the summary before it is stored and when a stored repo
 from __future__ import annotations
 
 import inspect
+import json
 import os
+import re
 
 import pytest
 
@@ -63,12 +65,59 @@ def test_the_prompt_for_the_model_has_no_slot_for_the_flag_and_no_such_wording()
     (f"Решено 7 из 12. Результат: «Ниже». {LEGACY}", "Решено 7 из 12. Результат: «Ниже»."),
     ("Решено 7 из 12. Оценка носит предварительный характер. Опорные навыки: Сложение.", "Решено 7 из 12. Опорные навыки: Сложение."),
     ("Решено 7 из 12. Точность измерения пока ограничена. Опорные навыки: Сложение.", "Решено 7 из 12. Опорные навыки: Сложение."),
+    ("Решено 7 из 12. Это предварительный результат. Опорные навыки: Сложение.", "Решено 7 из 12. Опорные навыки: Сложение."),
+    ("Решено 7 из 12. Предварительная оценка уровня: ниже нормы. Опорные навыки: Сложение.", "Решено 7 из 12. Опорные навыки: Сложение."),
+    ("Решено 7 из 12. Уровень определён предварительно. Опорные навыки: Сложение.", "Решено 7 из 12. Опорные навыки: Сложение."),
+    ("Решено 7 из 12. Оценка предварительная… Опорные навыки: Сложение.", "Решено 7 из 12. Опорные навыки: Сложение."),
     (LEGACY, ""),
     ("Решено 7 из 12. Опорные навыки: Сложение.", "Решено 7 из 12. Опорные навыки: Сложение."),
     ("", ""),
 ])
 def test_a_preliminary_sentence_is_dropped_and_only_that_sentence(text, expected):
     assert rg.drop_preliminary_sentences(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    # advice, not a statement about the assessment: «предварительно» without an assessment noun beside it
+    "Для начала предварительно повторите дроби.",
+    "Решено 7 из 12 заданий. Предварительно повторите дроби. Уровень: «Ниже уровня класса».",
+    # the noun is there, but too far from the word: a plan step, not «the assessment is preliminary»
+    "Результат решения уравнений: предварительно найдите область определения.",
+    # a skill or a topic that happens to carry the word, listed by the deterministic summary
+    "Опорные навыки: Предварительные сведения о функциях.",
+    "Подтверждены навыки: Предварительная оценка результатов.",
+    "Зафиксированы ключевые затруднения: Предварительные сведения, Оценка погрешности.",
+    "Углублённая проверка подтвердила первопричину: «Предварительная оценка».",
+    "Следующий шаг — развитие: задачи повышенной сложности по теме «Предварительные сведения».",
+    # quoted names are not judged by their words
+    "Уровень по теме «Предварительные сведения» ниже нормы.",
+])
+def test_nothing_else_is_touched(text):
+    assert rg.drop_preliminary_sentences(text) == text
+
+
+@pytest.mark.parametrize("text,expected", [
+    # «т.е.» / «т.к.» inside a sentence do not end it: no orphan fragment is left behind
+    ("Решено 7 из 12, т.е. Оценка предварительная и точность измерения пока ограничена. Опорные навыки: Сложение.",
+     "Опорные навыки: Сложение."),
+    ("Результат ниже нормы, т.к. Оценка предварительная. Опорные навыки: Сложение.", "Опорные навыки: Сложение."),
+    ("Ученик решил задания по дробям, т.е. по теме 5 класса. Оценка предварительная.", "Ученик решил задания по дробям, т.е. по теме 5 класса."),
+    ("Темы указаны напр. Дроби и степени. Оценка предварительная. Опорные навыки: Сложение.", "Темы указаны напр. Дроби и степени. Опорные навыки: Сложение."),
+    # «и т.д.» / «и др.» often end a sentence: the next capital letter starts a new one, the first stays whole
+    ("Решены дроби, степени и т.д. Оценка предварительная. Опорные навыки: Сложение.", "Решены дроби, степени и т.д. Опорные навыки: Сложение."),
+    ("Решены дроби, степени и др. Оценка предварительная. Опорные навыки: Сложение.", "Решены дроби, степени и др. Опорные навыки: Сложение."),
+    # a full stop inside a number or before a lower-case letter splits nothing
+    ("Решено 58.3 процента заданий, т.е. 7 из 12. Оценка предварительная.", "Решено 58.3 процента заданий, т.е. 7 из 12."),
+    ("Решено 7 из 12 заданий и т.д., оценка предварительная. Опорные навыки: Сложение.", "Опорные навыки: Сложение."),
+])
+def test_abbreviations_neither_leak_a_fragment_nor_swallow_a_neighbour(text, expected):
+    assert rg.drop_preliminary_sentences(text) == expected
+    assert "предварительн" not in rg.drop_preliminary_sentences(text).lower()
+
+
+def test_separators_survive_a_dropped_sentence():
+    text = f"Решено 7 из 12.\n{LEGACY}\n\nОпорные навыки: Сложение."
+    assert rg.drop_preliminary_sentences(text) == "Решено 7 из 12.\nОпорные навыки: Сложение."
 
 
 def test_not_a_string_comes_back_unchanged():
@@ -131,3 +180,44 @@ def test_the_model_gets_the_same_prompt_whatever_the_flag_says_and_the_stored_su
     summary = report_loose.report_json["overall"]["student_summary"].lower()
     for word in WORDING:
         assert word not in summary, word
+
+
+@needs_db
+def test_the_write_path_strips_a_preliminary_sentence_the_model_wrote(db, monkeypatch):
+    """The model returns a valid narrative whose summary CONTAINS the legacy sentence: it is not stored.
+
+    (Without ``drop_preliminary_sentences`` on the merge of the model's summary this test fails: the sentence would
+    be stored and shown.)
+    """
+    returned: list[str] = []
+
+    def fake_model(prompt, *args, **kwargs):
+        status = re.search(r'СКОПИРУЙ ТОЧНО: "(\w+)"', prompt).group(1)
+        score = int(re.search(r"\((\d+)%; это факт", prompt).group(1))
+        goals_block = prompt.split("ДОПУСТИМЫЕ ЦЕЛИ ПЛАНА", 1)[1].split("ВЕРНИ ТОЛЬКО JSON", 1)[0]
+        goals = re.findall(r"^\s+\d+\. (\S+) — (.+?) \(", goals_block, re.M)
+        assert goals, goals_block
+        summary = f"Решено 2 из 11 заданий адаптивного теста. {LEGACY} Зафиксированы затруднения в сложении дробей."
+        answer = json.dumps({
+            "overall": {"score_percent": score, "status": status, "status_label_ru": "Уровень", "student_summary": summary},
+            "action_plan": [
+                {"priority": i + 1, "skill_id": skill_id, "skill_name_ru": name, "action_title": "Отработать тему",
+                 "full_description": "Решите несколько заданий на эту тему и проверьте усвоение."}
+                for i, (skill_id, name) in enumerate(goals[:5])
+            ],
+        }, ensure_ascii=False)
+        returned.append(answer)
+        return answer
+
+    monkeypatch.setattr(rg, "call_gemini", fake_model)
+    session = make_session(db, se=0.55, invite="P4TEST0003")
+    report = build_report(db, session)
+
+    assert returned and LEGACY in returned[0], "the model really wrote the sentence"
+    meta = report.report_json["report_meta"]
+    assert meta["narrative_status"] == "ready", "the model's text was accepted, so this is the model's summary"
+    stored = report.report_json["overall"]["student_summary"]
+    assert stored == "Решено 2 из 11 заданий адаптивного теста. Зафиксированы затруднения в сложении дробей."
+    for word in WORDING:
+        assert word not in stored.lower(), word
+    assert report.report_json["level"]["provisional"] is True      # the flag itself is kept

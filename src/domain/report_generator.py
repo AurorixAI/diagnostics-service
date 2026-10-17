@@ -1612,29 +1612,86 @@ def _attempt_date(db: Session, session_id: uuid.UUID, answers: List[Any]) -> str
 # (and never names the word), the deterministic summary has no such sentence, and a sentence like that (a model's
 # own, or one written by an older build) is dropped from the summary before it is stored and again when a stored
 # report is served.
-_PRELIMINARY_RE = re.compile(
-    r"предварительн|точност[а-яё]*\s+измерени[а-яё]*\s+пока\s+ограничен",
+#
+# Only a sentence that STATES the preliminary / limited nature of the assessment goes: «предварительн…» standing
+# right next to an assessment noun («Оценка предварительная», «Результат носит предварительный характер»,
+# «Предварительный уровень», «Уровень определён предварительно») or the old «точность измерения пока ограничена».
+# «Для начала предварительно повторите дроби.» and a skill called «Предварительные сведения» are not statements about
+# the assessment and stay.
+_PRELIMINARY_WORD_RE = re.compile(r"предварительн[а-я]*")
+# the adjective forms (an adverb «предварительно» does not qualify a noun that follows it)
+_PRELIMINARY_ADJECTIVE_RE = re.compile(r"предварительн(?:ая|ый|ое|ые|ого|ой|ую|ым|ых|ому|ыми|ом)")
+_ASSESSMENT_NOUN_RE = re.compile(r"(?:оценк|результат|уров(?:ен|н)|точност|измерен)[а-я]*")
+_LIMITED_PRECISION_RE = re.compile(r"точност[а-я]*\s+измерени[а-я]*\s+пока\s+ограничен")
+_QUOTED_RE = re.compile(r"«[^»]*»")
+_WORD_RE = re.compile(r"[а-яa-z0-9]+")
+# sentences made of names the deterministic summary lists (skills, topics): never judged by the words inside them
+_LIST_SENTENCE_PREFIXES = (
+    "подтверждены навыки", "опорные навыки", "зафиксированы ключевые затруднения",
+    "углубленная проверка подтвердила", "устойчивые опорные навыки", "следующий шаг",
+)
+# a sentence ends at . ! ? … followed by whitespace and a capital letter (or quote / bracket); the abbreviations that
+# sit INSIDE a sentence do not end it («т.е.», «т.к.», «напр.», «см.» ...): a split there would leave a fragment behind.
+# «и т.д.» / «и др.» / «и т.п.» DO often end a sentence, so a capital letter after them starts a new one; before a
+# lower-case letter nothing is split anyway.
+_SENTENCE_END_RE = re.compile(r"[.!?…]+(?=\s+[А-ЯЁA-Z«\"(])")
+_ABBREVIATION_RE = re.compile(
+    r"(?<![а-яёa-z])(?:т\.\s?е|т\.\s?к|т\.\s?н|т\.\s?о|т\.\s?ч|напр|см|рис|стр)\.$",
     re.IGNORECASE,
 )
-_SUMMARY_SENTENCE_RE = re.compile(r"((?<=[.!?])\s+)")
+
+
+def _states_preliminary_assessment(sentence: str) -> bool:
+    text = _QUOTED_RE.sub(" ", sentence.lower().replace("ё", "е"))
+    if _LIMITED_PRECISION_RE.search(text):
+        return True
+    if text.lstrip(" \t\n-•").startswith(_LIST_SENTENCE_PREFIXES):
+        return False
+    words = _WORD_RE.findall(text)
+    preliminary = [i for i, w in enumerate(words) if _PRELIMINARY_WORD_RE.fullmatch(w)]
+    nouns = [i for i, w in enumerate(words) if _ASSESSMENT_NOUN_RE.fullmatch(w)]
+    for p in preliminary:
+        for n in nouns:
+            if n < p and p - n <= 2:       # «оценка предварительная», «результат носит предварительный характер»
+                return True
+            if p < n and n - p == 1 and _PRELIMINARY_ADJECTIVE_RE.fullmatch(words[p]):   # «предварительная оценка»
+                return True
+    return False
+
+
+def _split_sentences(text: str) -> List[Tuple[str, str]]:
+    """``(sentence, whitespace after it)`` pieces of ``text``; joining them gives ``text`` back."""
+    pieces: List[Tuple[str, str]] = []
+    start = 0
+    for match in _SENTENCE_END_RE.finditer(text):
+        if _ABBREVIATION_RE.search(text[: match.end()]):
+            continue
+        end = match.end()
+        gap_end = end
+        while gap_end < len(text) and text[gap_end].isspace():
+            gap_end += 1
+        pieces.append((text[start:end], text[end:gap_end]))
+        start = gap_end
+    pieces.append((text[start:], ""))
+    return pieces
 
 
 def drop_preliminary_sentences(text: Any) -> Any:
-    """``text`` without the sentences that call the result preliminary or its precision limited.
+    """``text`` without the sentences that state the preliminary / limited nature of the assessment.
 
-    Only the offending sentence goes; the rest of the summary stays.  Not a string, or clean text: returned
-    unchanged.  Applied to the summary of the level only: «предварительно повторите дроби» in a plan step is
-    a different meaning of the word and is not touched.
+    Only the offending sentence goes; the rest stays.  Not a string, or clean text: returned unchanged.  Applied to
+    the summary of the level only (never to the plan: «предварительно повторите дроби» is advice there).
     """
-    if not isinstance(text, str) or not _PRELIMINARY_RE.search(text):
+    if not isinstance(text, str) or "предварительн" not in text.lower() and "точност" not in text.lower():
         return text
-    parts = _SUMMARY_SENTENCE_RE.split(text)            # sentence, separator, sentence, ...
-    sentences, separators = parts[0::2], parts[1::2] + [""]
-    kept = [(sentence, sep) for sentence, sep in zip(sentences, separators) if not _PRELIMINARY_RE.search(sentence)]
+    pieces = _split_sentences(text)
+    kept = [(sentence, gap) for sentence, gap in pieces if not _states_preliminary_assessment(sentence)]
+    if len(kept) == len(pieces):
+        return text
     if not kept:
         return ""
-    # the separator after the last kept sentence is the one that followed a dropped one: nothing to join
-    return "".join(sentence + sep for sentence, sep in kept[:-1]) + kept[-1][0]
+    # the gap after the last kept sentence is the one that led to a dropped sentence: nothing to join
+    return "".join(sentence + gap for sentence, gap in kept[:-1]) + kept[-1][0]
 
 
 _PLAN_IDENTIFIER_KEYS = frozenset({"skill_id", "skill_name_ru", "evidence", "priority"})
