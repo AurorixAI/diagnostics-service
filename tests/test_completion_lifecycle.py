@@ -168,6 +168,66 @@ def test_expired_active_attempt_rejects_new_answer_without_writes(scenario):
         assert db.query(DiagSession).one().phase == "warmup"
 
 
+def _cancel(scenario, offset_seconds, **changes):
+    """The auth projection says the invite was cancelled ``offset_seconds`` after the session was created."""
+    _client, session_id, invite, factory, _redis = scenario
+    with factory() as db:
+        created = db.get(DiagSession, session_id).created_at
+    invite.update({"status": "cancelled", "cancel_reason": "student_archived", "message": "Приглашение отменено",
+                   "cancelled_at": (created + timedelta(seconds=offset_seconds)).isoformat(), **changes})
+
+
+def test_a_session_that_started_before_the_cancellation_may_finish(scenario):
+    """The student was archived while the auth projection still lagged: his running session is not cut off."""
+    client, session_id, invite, factory, _redis = scenario
+    _cancel(scenario, +60)
+    response = submit(client, session_id)
+    assert response.status_code == 200, response.text
+    assert response.json()["session_completed"] is True
+    again = client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
+    assert again.status_code == 200 and again.json()["status"] == "completed"
+    report = client.get(f"/api/v1/diagnostic/sessions/{session_id}/report", params={"invite_code": CODE})
+    assert report.status_code == 200, report.text
+    assert_single_completion(factory)
+    # a NEW session is still refused: nothing here predates the cancellation
+    refused = client.post("/api/v1/diagnostic/sessions", json={
+        "student_id": invite["student_id"], "grade_level": 9, "invite_code": CODE})
+    assert refused.status_code == 410 and refused.json()["detail"]["code"] == "INVITE_CANCELLED"
+
+
+@pytest.mark.parametrize("offset", [0, -60])
+def test_a_session_that_started_at_or_after_the_cancellation_is_cut_off(scenario, offset):
+    client, session_id, invite, factory, _redis = scenario
+    _cancel(scenario, offset)                                     # cancelled at / before the moment the session was created
+    for response in (
+        submit(client, session_id),
+        client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE}),
+        client.get("/api/v1/diagnostic/sessions/active", params={"invite_code": CODE}),
+    ):
+        assert response.status_code == 410, response.text
+        assert response.json()["detail"]["code"] == "INVITE_CANCELLED"
+        assert response.json()["detail"]["message"] == "Приглашение отменено"
+    with factory() as db:
+        assert db.query(DiagAnswer).count() == 0 and db.query(DiagSession).one().phase == "warmup"
+
+
+def test_only_an_archived_student_cancellation_lets_a_session_finish(scenario):
+    client, session_id, _invite, factory, _redis = scenario
+    _cancel(scenario, +60, cancel_reason="something_else")
+    response = submit(client, session_id)
+    assert response.status_code == 410 and response.json()["detail"]["code"] == "INVITE_CANCELLED"
+    with factory() as db:
+        assert db.query(DiagAnswer).count() == 0
+
+
+def test_resume_of_a_running_session_of_a_cancelled_invite_is_allowed_before_the_cancellation_only(scenario):
+    client, session_id, _invite, _factory, redis = scenario
+    _cancel(scenario, +60)
+    active = client.get("/api/v1/diagnostic/sessions/active", params={"invite_code": CODE})
+    assert active.status_code == 200, active.text                 # the session started before the cancellation: resumable
+    assert active.json()["session_id"] == str(session_id)
+
+
 def test_foreign_capability_cannot_submit_or_read_result(scenario):
     client, session_id, _invite, factory, _redis = scenario
     assert submit(client, session_id).status_code == 200

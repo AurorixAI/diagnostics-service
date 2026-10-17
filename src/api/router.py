@@ -46,6 +46,12 @@ def _service(db: Session = Depends(get_db)) -> SessionService:
     return SessionService(db)
 
 
+def _session_start_of(service, invite_code: str):
+    """When the session of this invite was created (``None`` if there is none) - looked up only for a cancelled invite."""
+    session = service.session_repo.get_by_invite_code(invite_code)
+    return session.created_at if session else None
+
+
 def _answer_error(exc: DiagnosticError) -> HTTPException:
     messages = {
         "ANSWER_IN_PROGRESS": (409, "Ответ ещё обрабатывается. Проверяем состояние попытки.", "check_session"),
@@ -123,6 +129,8 @@ async def get_active_session(
         await validate_invite_capability(
             invite_code,
             allowed_statuses={"confirmed", "in_progress"},
+            # An invite cancelled mid-test (student archived): a session that started before it finishes.
+            session_started_at=lambda: _session_start_of(service, invite_code),
         )
         ticket.exists()
         result = service.get_active_session(invite_code)
@@ -166,6 +174,8 @@ async def submit_answer(
             # answer, but can never admit a new answer or a second attempt.
             allowed_statuses={"confirmed", "in_progress", "completed", "expired"},
             enforce_expiry=False,
+            # An invite cancelled mid-test (student archived): this session started before it, so it finishes.
+            session_started_at=lambda: session.created_at,
         )
         # Grading is synchronous (DB, Redis lock, SymPy): on the event loop it would stall every other request
         # of this worker for as long as it takes, so it runs in the thread pool.
@@ -211,6 +221,7 @@ async def resolve_session(
             grade_level=session.grade_level if session else None,
             allowed_statuses={"confirmed", "in_progress", "completed", "expired"},
             enforce_expiry=False,
+            session_started_at=lambda: session.created_at if session else None,
         )
         ticket.exists()
         if session:
@@ -272,6 +283,7 @@ async def get_report(
             # different student's report or revive an invite for a new run.
             allowed_statuses={"confirmed", "in_progress", "completed", "expired"},
             enforce_expiry=False,
+            session_started_at=lambda: session.created_at,
         )
         if session.phase != "completed":
             raise invite_error(409, "SESSION_NOT_COMPLETED", "Диагностика ещё не завершена.", "check_session")

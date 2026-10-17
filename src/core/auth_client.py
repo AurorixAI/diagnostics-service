@@ -27,10 +27,14 @@ def _internal_headers() -> dict[str, str]:
     return {"X-Internal-Service-Token": token}
 
 
-def notify_start(invite_code: str, session_id: str) -> bool:
+def notify_start(invite_code: str, session_id: str, session_started_at: Optional[str] = None) -> bool:
     """
     Mark diagnostic invite as in_progress and link cat_session_id.
     Calls POST /api/v1/internal/diagnostic/{code}/start
+
+    ``session_started_at`` (ISO, when this service created the session) lets a LATE callback reach an invite that
+    the centre cancelled in the meantime (the student was archived): auth-service accepts it only for a session
+    that started before the cancellation.
     """
     if not invite_code:
         return True
@@ -39,7 +43,7 @@ def notify_start(invite_code: str, session_id: str) -> bool:
         with httpx.Client(timeout=5.0) as client:
             resp = client.post(
                 url,
-                json={"session_id": session_id},
+                json={"session_id": session_id, **({"session_started_at": session_started_at} if session_started_at else {})},
                 headers=_internal_headers(),
             )
             if resp.status_code not in (200, 204):
@@ -68,7 +72,7 @@ def notify_complete(
         return True
     # Repair a transient start-callback failure before completing the exact
     # same session.  start is idempotent only for this session_id.
-    notify_start(invite_code, session_id)
+    notify_start(invite_code, session_id, result_data.get("session_started_at"))
     url = f"{_base_url()}/api/v1/internal/diagnostic/{quote(invite_code, safe='')}/complete"
     payload = {"session_id": session_id, **result_data}
     try:

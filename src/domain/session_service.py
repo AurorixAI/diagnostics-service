@@ -203,7 +203,11 @@ class SessionService:
 
         # 6. Notify monolith: invite → in_progress
         if invite_code:
-            auth_client.notify_start(invite_code, str(db_session.id))
+            auth_client.notify_start(
+                invite_code,
+                str(db_session.id),
+                db_session.created_at.isoformat() if db_session.created_at else None,
+            )
 
         return db_session.id, first_task
 
