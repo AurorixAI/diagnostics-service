@@ -188,3 +188,60 @@ def test_the_start_callback_carries_the_moment_the_session_started(monkeypatch):
     assert sent[1] == ("start", {"session_id": "S1"})                      # an older caller: the body is unchanged
     assert sent[2] == ("start", {"session_id": "S1", "session_started_at": "2026-10-17T09:00:00"})   # the repair start of a completion
     assert sent[3][0] == "complete" and sent[3][1]["session_started_at"] == "2026-10-17T09:00:00"
+
+
+# ── what the check asks auth-service, and where ──────────────────────────────────────────────────────────────────
+
+def test_the_invite_lookup_carries_the_internal_token_so_auth_may_say_why_it_was_cancelled(monkeypatch):
+    seen = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            seen.append(kwargs.get("headers"))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, _url):
+            return httpx.Response(200, json={"status": "confirmed", "expires_at": None})
+
+    monkeypatch.setattr(access.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(access, "get_settings", lambda: SimpleNamespace(auth_service_url="http://auth", internal_service_token="tok"))
+    asyncio.run(access.validate_invite_capability("CODE0001", allowed_statuses={"confirmed"}))
+    assert seen == [{"X-Internal-Service-Token": "tok"}]
+    # no token configured here: nothing is sent (a cancelled invite then just stays unusable)
+    monkeypatch.setattr(access, "get_settings", lambda: SimpleNamespace(auth_service_url="http://auth", internal_service_token=""))
+    asyncio.run(access.validate_invite_capability("CODE0001", allowed_statuses={"confirmed"}))
+    assert seen[-1] == {}
+
+
+def test_the_session_lookup_for_a_cancelled_invite_runs_off_the_event_loop(api):
+    import threading
+    from datetime import datetime
+    from src.api import router as diag_router
+
+    code = code_of(7)
+    api.invites[code].update(CANCELLED_BY_ARCHIVE, expires_at=api.invites[code]["expires_at"])
+    threads = {}
+
+    class Service:
+        def __init__(self):
+            def lookup(c):
+                threads["lookup"] = threading.get_ident()
+                return SimpleNamespace(created_at=datetime(2026, 10, 17, 9, 0))
+            self.session_repo = SimpleNamespace(get_by_invite_code=lookup)
+
+        def get_active_session(self, c):
+            threads["loop"] = threading.get_ident()          # a plain call in the async route: the event-loop thread
+            return None
+
+    api.app.dependency_overrides[diag_router._service] = lambda: Service()
+    assert active(api, code).status_code == 404               # past the invite check
+    assert threads["lookup"] != threads["loop"]
+    # and the lookup is not made at all for an invite that is not cancelled
+    threads.clear()
+    assert active(api, code_of(8)).status_code == 404
+    assert "lookup" not in threads

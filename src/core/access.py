@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 import httpx
 from fastapi import HTTPException, Request, status
+from starlette.concurrency import run_in_threadpool
 
 from src.core.config import get_settings
 
@@ -161,9 +162,14 @@ async def validate_invite_capability(
     """
     if not invite_code:
         raise invite_error(403, "INVITE_REQUIRED", "Требуется код приглашения на диагностику.", "contact_center")
-    base = get_settings().auth_service_url.rstrip("/")
+    settings = get_settings()
+    base = settings.auth_service_url.rstrip("/")
+    # The internal token makes auth-service add WHY an invite was cancelled (cancelled_at / cancel_reason) to its
+    # answer; the public answer for a cancelled code says no more than «cancelled».  Without the token (not configured
+    # here) a cancelled invite simply stays unusable.
+    internal = {"X-Internal-Service-Token": settings.internal_service_token} if settings.internal_service_token else {}
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, headers=internal) as client:
             response = await client.get(f"{base}/api/v1/auth/diagnostic/{quote(invite_code, safe='')}")
     except httpx.HTTPError as exc:
         raise invite_error(503, "INVITE_CHECK_UNAVAILABLE", "Не удалось проверить приглашение.", "retry") from exc
@@ -181,6 +187,9 @@ async def validate_invite_capability(
         raise invite_error(403, "INVITE_STUDENT_MISMATCH", "Нет доступа к этой диагностике.", "contact_center")
     if grade_level is not None and invite.get("class_level") != grade_level:
         raise invite_error(403, "INVITE_GRADE_MISMATCH", "Класс не соответствует приглашению.", "contact_center")
+    if invite.get("status") == "cancelled" and callable(session_started_at):
+        # The lookup may be a database query (a synchronous session): never on the event loop.
+        session_started_at = await run_in_threadpool(session_started_at)
     if session_predates_cancellation(invite, session_started_at):
         # A running session of an invite cancelled mid-test goes on as an in-progress one; the returned projection
         # says so, so the caller's own second check (validate_invite_state) agrees.
