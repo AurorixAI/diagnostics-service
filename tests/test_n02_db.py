@@ -14,6 +14,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from src.domain import auth_sync_jobs as sync_jobs
+from src.core.db_timezone import utc_connect_args
 from src.domain import report_generator as rg
 from src.domain.report_generator import REPORT_SCHEMA_VERSION
 from src.models.base import Base
@@ -36,7 +37,7 @@ NODES = {
 @pytest.fixture
 def db(monkeypatch):
     assert DB_URL and DB_URL.endswith("/a2_diagnostic"), "Use only the disposable a2_diagnostic database"
-    engine = create_engine(DB_URL)
+    engine = create_engine(DB_URL, connect_args=utc_connect_args(DB_URL))
     Base.metadata.create_all(engine, tables=[DiagSession.__table__, DiagAnswer.__table__, DiagReport.__table__])
     with engine.begin() as connection:
         for table in [DiagReport.__table__, DiagAnswer.__table__, DiagSession.__table__]:

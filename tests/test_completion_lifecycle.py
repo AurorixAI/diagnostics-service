@@ -22,6 +22,7 @@ from sqlalchemy.orm import sessionmaker
 
 from src.api.router import router
 from src.core import access
+from src.core.db_timezone import utc_connect_args
 from src.core.database import get_db
 from src.domain import session_service as sessions
 from src.domain import auth_sync_jobs as sync_jobs
@@ -40,7 +41,7 @@ PAYLOAD = {"task_id": "A2_FINAL", "student_answer": "4", "time_ms": 1500}
 @pytest.fixture
 def scenario(monkeypatch):
     assert DB_URL and DB_URL.endswith("/a2_diagnostic"), "Use only the disposable a2_diagnostic database"
-    engine = create_engine(DB_URL)
+    engine = create_engine(DB_URL, connect_args=utc_connect_args(DB_URL))
     Base.metadata.create_all(engine, tables=[DiagSession.__table__, DiagAnswer.__table__, DiagReport.__table__])
     factory = sessionmaker(engine)
     with engine.begin() as connection:

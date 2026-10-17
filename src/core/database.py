@@ -8,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.core.config import get_settings
+from src.core.db_timezone import utc_connect_args
 
 
 def _make_engine():
@@ -18,6 +19,7 @@ def _make_engine():
         pool_pre_ping=True,
         pool_size=5,
         max_overflow=10,
+        connect_args=utc_connect_args(s.database_url),  # session TimeZone=UTC on every connection (ROADMAP #49)
     )
 
 

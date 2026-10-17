@@ -5,6 +5,7 @@ import subprocess
 import uuid
 import pytest
 from sqlalchemy import create_engine,text
+from src.core.db_timezone import utc_connect_args
 from sqlalchemy.engine import make_url
 
 
@@ -12,10 +13,10 @@ def test_task_evidence_migration_preserves_legacy_answers():
     url=os.environ.get('A2_TEST_DATABASE_URL')
     assert url and make_url(url).database=='a2_diagnostic', 'Require isolated CI database'
     name='a2_evidence_'+uuid.uuid4().hex[:12]
-    admin=create_engine(make_url(url).set(database='postgres'),isolation_level='AUTOCOMMIT')
+    admin=create_engine(make_url(url).set(database='postgres'),isolation_level='AUTOCOMMIT',connect_args=utc_connect_args(url))
     with admin.connect() as conn:conn.execute(text(f'CREATE DATABASE {name}'))
     test_url=make_url(url).set(database=name).render_as_string(hide_password=False)
-    engine=create_engine(test_url)
+    engine=create_engine(test_url,connect_args=utc_connect_args(test_url))
     root=Path(__file__).parents[1]
     env={**os.environ,'DATABASE_URL':test_url}
     def upgrade(revision):
@@ -51,10 +52,10 @@ def test_migration_009_fails_fast_when_diag_answers_is_locked_and_roundtrips():
     url=os.environ.get('A2_TEST_DATABASE_URL')
     assert url and make_url(url).database=='a2_diagnostic', 'Require isolated CI database'
     name='a2_locktimeout_'+uuid.uuid4().hex[:12]
-    admin=create_engine(make_url(url).set(database='postgres'),isolation_level='AUTOCOMMIT')
+    admin=create_engine(make_url(url).set(database='postgres'),isolation_level='AUTOCOMMIT',connect_args=utc_connect_args(url))
     with admin.connect() as conn:conn.execute(text(f'CREATE DATABASE {name}'))
     test_url=make_url(url).set(database=name).render_as_string(hide_password=False)
-    engine=create_engine(test_url)
+    engine=create_engine(test_url,connect_args=utc_connect_args(test_url))
     root=Path(__file__).parents[1]
     env={**os.environ,'DATABASE_URL':test_url}
     def alembic(*args):

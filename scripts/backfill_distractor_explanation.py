@@ -21,7 +21,8 @@ from src.pipeline.deepseek_client import call_deepseek, get_deepseek_model
 
 conn = psycopg2.connect(
     dbname='algo_diagnostic', user='algo',
-    password='algo_password', host='127.0.0.1', port=5433
+    password='algo_password', host='127.0.0.1', port=5433,
+    options='-c timezone=UTC',  # session TimeZone=UTC (ROADMAP #49)
 )
 cur = conn.cursor()
 

@@ -7,6 +7,7 @@ import subprocess
 from sqlalchemy import create_engine, text
 
 from src.core.config import get_settings
+from src.core.db_timezone import utc_connect_args, verify_database_timezone
 
 
 log = logging.getLogger(__name__)
@@ -20,7 +21,10 @@ def main() -> None:
     creating an index or adding a column.  The lock connection stays open
     until the child Alembic process has finished its transaction.
     """
-    engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+    url = get_settings().database_url
+    engine = create_engine(url, pool_pre_ping=True, connect_args=utc_connect_args(url))
+    # The container starts this runner before any Uvicorn worker: a non-UTC session stops the start here (ROADMAP #49).
+    verify_database_timezone(engine)
     with engine.connect() as connection:
         connection.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _MIGRATION_LOCK_KEY})
         try:

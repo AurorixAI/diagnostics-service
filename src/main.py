@@ -36,6 +36,13 @@ async def lifespan(app: FastAPI):
         settings.app_version,
         settings.app_env,
     )
+    # Every database session must run in UTC (ROADMAP #49): raise here, before anything is migrated or written,
+    # instead of storing shifted timestamps.  (migration_runner makes the same check before the workers start.)
+    from src.core.database import engine
+    from src.core.db_timezone import verify_database_timezone
+
+    await asyncio.to_thread(verify_database_timezone, engine)
+
     # Docker starts migration_runner before it launches any Uvicorn worker.
     # Keep the switch for direct local ``uvicorn`` development only.
     if os.getenv("RUN_MIGRATIONS_IN_LIFESPAN", "true").lower() == "true":
