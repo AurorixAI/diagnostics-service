@@ -1613,50 +1613,97 @@ def _attempt_date(db: Session, session_id: uuid.UUID, answers: List[Any]) -> str
 # own, or one written by an older build) is dropped from the summary before it is stored and again when a stored
 # report is served.
 #
-# Only a sentence that STATES the preliminary / limited nature of the assessment goes: «предварительн…» standing
-# right next to an assessment noun («Оценка предварительная», «Результат носит предварительный характер»,
-# «Предварительный уровень», «Уровень определён предварительно») or the old «точность измерения пока ограничена».
-# «Для начала предварительно повторите дроби.» and a skill called «Предварительные сведения» are not statements about
-# the assessment and stay.
+# Only a sentence that STATES the preliminary / limited nature of the assessment goes: «предварительн…» with an
+# assessment noun (оценка, результат, уровень, диагностика, вывод, итог, данные, картина ...) at most three words away,
+# in either order («Оценка предварительная», «Итоги диагностики носят предварительный характер», «Диагностика даёт
+# предварительную картину», «Результат можно считать лишь предварительным»), or «ограничен…» next to точность / оценка /
+# измерение («Точность оценки пока ограничена»).  Advice is not a statement: «предварительно» followed (or preceded) by
+# an imperative or an infinitive («Для роста уровня предварительно повторите дроби.») stays, unless the verb itself
+# assesses («лишь предварительно оценить уровень») or «лишь / только / пока» restricts it.  A skill called
+# «Предварительные сведения» and the names the deterministic summary lists stay as well.
 _PRELIMINARY_WORD_RE = re.compile(r"предварительн[а-я]*")
-# the adjective forms (an adverb «предварительно» does not qualify a noun that follows it)
-_PRELIMINARY_ADJECTIVE_RE = re.compile(r"предварительн(?:ая|ый|ое|ые|ого|ой|ую|ым|ых|ому|ыми|ом)")
-_ASSESSMENT_NOUN_RE = re.compile(r"(?:оценк|результат|уров(?:ен|н)|точност|измерен)[а-я]*")
-_LIMITED_PRECISION_RE = re.compile(r"точност[а-я]*\s+измерени[а-я]*\s+пока\s+ограничен")
+_ASSESSMENT_NOUN_RE = re.compile(
+    r"(?:оценк|результат|уров(?:ен|н)|точност|измерен|диагностик|диагноз|вывод|итог|заключени|анализ|картин|данн)[а-я]*"
+)
+_LIMITED_WORD_RE = re.compile(r"ограничен[а-я]*")
+_LIMITED_SUBJECT_RE = re.compile(r"(?:оценк|точност|измерен)[а-я]*")
+# the noun and the word may have up to three words between them
+_MAX_WORD_DISTANCE = 4
+# «лишь предварительно ...»: the adverb restricts a statement, it does not open advice
+_RESTRICTIVE_WORDS = frozenset({"лишь", "только", "пока", "всего"})
+# verbs that assess: «предварительно оценить уровень» states a result, it gives no advice
+_STATEMENT_VERB_RE = re.compile(r"(?:оцен|определ|измер|диагностир|выяв|суд|говор|сказ|счита|назв)[а-я]*")
 _QUOTED_RE = re.compile(r"«[^»]*»")
 _WORD_RE = re.compile(r"[а-яa-z0-9]+")
+_HINT_RE = re.compile(r"предварительн|ограничен", re.IGNORECASE)
+# a bullet («- », «• », «* ») or a number («1) », «2. ») at the start of a line
+_LEADING_MARKER_RE = re.compile(r"^\s*(?:[-–—•*]|\d{1,2}[.)])\s*")
 # sentences made of names the deterministic summary lists (skills, topics): never judged by the words inside them
 _LIST_SENTENCE_PREFIXES = (
     "подтверждены навыки", "опорные навыки", "зафиксированы ключевые затруднения",
     "углубленная проверка подтвердила", "устойчивые опорные навыки", "следующий шаг",
 )
-# a sentence ends at . ! ? … followed by whitespace and a capital letter (or quote / bracket); the abbreviations that
-# sit INSIDE a sentence do not end it («т.е.», «т.к.», «напр.», «см.» ...): a split there would leave a fragment behind.
-# «и т.д.» / «и др.» / «и т.п.» DO often end a sentence, so a capital letter after them starts a new one; before a
-# lower-case letter nothing is split anyway.
-_SENTENCE_END_RE = re.compile(r"[.!?…]+(?=\s+[А-ЯЁA-Z«\"(])")
+# a sentence ends at . ! ? … followed by whitespace and a capital letter (or quote / bracket), or before a line that
+# opens with a bullet or a number (so the items of a list never merge); the abbreviations that sit INSIDE a sentence do
+# not end it («т.е.», «т.к.», «напр.», «см.» ...): a split there would leave a fragment behind.  «см.» after a number is
+# a unit («10 см.») and may end a sentence.  «и т.д.» / «и др.» / «и т.п.» DO often end a sentence, so a capital letter
+# after them starts a new one; before a lower-case letter nothing is split anyway.
+_SENTENCE_END_RE = re.compile(
+    r"[.!?…]+(?=\s+[А-ЯЁA-Z«\"(])"
+    r"|(?<=\S)(?=[ \t]*\n[ \t]*(?:[-–—•*]|\d{1,2}[.)])[ \t])"
+)
 _ABBREVIATION_RE = re.compile(
     r"(?<![а-яёa-z])(?:т\.\s?е|т\.\s?к|т\.\s?н|т\.\s?о|т\.\s?ч|напр|см|рис|стр)\.$",
     re.IGNORECASE,
 )
+_UNIT_RE = re.compile(r"\d\s*см\.$", re.IGNORECASE)
+# «1.» / «2.» alone at the start of a line is a number, not the end of a sentence
+_LINE_NUMBER_RE = re.compile(r"(?:^|\n)[ \t]*\d{1,2}\.$")
+
+
+def _is_advice_verb(word: str) -> bool:
+    """An infinitive (-ть, -ти, -чь) or an imperative (-те, -йте, -ите; -й / -и as a word of its own); never an assessment noun."""
+    if _ASSESSMENT_NOUN_RE.fullmatch(word):
+        return False
+    return len(word) >= 4 and word.endswith(("ть", "ти", "чь", "те", "й", "и"))
+
+
+def _is_advice(text: str, words: List[str], spans: List[Tuple[int, int]], i: int) -> bool:
+    """«предварительно» at word ``i`` opens advice: an imperative / infinitive right after it (one word may stand between,
+    no punctuation) or right before it.  A restricting «лишь / только / пока» or an assessing verb makes it a statement."""
+    if words[i] != "предварительно":
+        return False
+    if i > 0 and words[i - 1] in _RESTRICTIVE_WORDS:
+        return False
+    for j in (i + 1, i + 2):
+        if j >= len(words) or text[spans[j - 1][1]:spans[j][0]].strip():
+            break
+        if _is_advice_verb(words[j]):
+            return not _STATEMENT_VERB_RE.fullmatch(words[j])
+    if i > 0 and not text[spans[i - 1][1]:spans[i][0]].strip() and _is_advice_verb(words[i - 1]):
+        return not _STATEMENT_VERB_RE.fullmatch(words[i - 1])
+    return False
 
 
 def _states_preliminary_assessment(sentence: str) -> bool:
     text = _QUOTED_RE.sub(" ", sentence.lower().replace("ё", "е"))
-    if _LIMITED_PRECISION_RE.search(text):
-        return True
-    if text.lstrip(" \t\n-•").startswith(_LIST_SENTENCE_PREFIXES):
+    if _LEADING_MARKER_RE.sub("", text, count=1).lstrip().startswith(_LIST_SENTENCE_PREFIXES):
         return False
-    words = _WORD_RE.findall(text)
-    preliminary = [i for i, w in enumerate(words) if _PRELIMINARY_WORD_RE.fullmatch(w)]
+    spans = [m.span() for m in _WORD_RE.finditer(text)]
+    words = [text[a:b] for a, b in spans]
     nouns = [i for i, w in enumerate(words) if _ASSESSMENT_NOUN_RE.fullmatch(w)]
-    for p in preliminary:
-        for n in nouns:
-            if n < p and p - n <= 2:       # «оценка предварительная», «результат носит предварительный характер»
-                return True
-            if p < n and n - p == 1 and _PRELIMINARY_ADJECTIVE_RE.fullmatch(words[p]):   # «предварительная оценка»
-                return True
-    return False
+    for i, word in enumerate(words):
+        if (
+            _PRELIMINARY_WORD_RE.fullmatch(word)
+            and any(abs(n - i) <= _MAX_WORD_DISTANCE for n in nouns)
+            and not _is_advice(text, words, spans, i)
+        ):
+            return True
+    subjects = [i for i, w in enumerate(words) if _LIMITED_SUBJECT_RE.fullmatch(w)]
+    return any(
+        _LIMITED_WORD_RE.fullmatch(word) and any(abs(s - i) <= _MAX_WORD_DISTANCE for s in subjects)
+        for i, word in enumerate(words)
+    )
 
 
 def _split_sentences(text: str) -> List[Tuple[str, str]]:
@@ -1664,9 +1711,15 @@ def _split_sentences(text: str) -> List[Tuple[str, str]]:
     pieces: List[Tuple[str, str]] = []
     start = 0
     for match in _SENTENCE_END_RE.finditer(text):
-        if _ABBREVIATION_RE.search(text[: match.end()]):
-            continue
         end = match.end()
+        if end <= start:
+            continue
+        if match.group():                                  # a full stop, not the start of a bullet line
+            head = text[:end]
+            if _LINE_NUMBER_RE.search(head):
+                continue
+            if _ABBREVIATION_RE.search(head) and not _UNIT_RE.search(head):
+                continue
         gap_end = end
         while gap_end < len(text) and text[gap_end].isspace():
             gap_end += 1
@@ -1682,7 +1735,7 @@ def drop_preliminary_sentences(text: Any) -> Any:
     Only the offending sentence goes; the rest stays.  Not a string, or clean text: returned unchanged.  Applied to
     the summary of the level only (never to the plan: «предварительно повторите дроби» is advice there).
     """
-    if not isinstance(text, str) or "предварительн" not in text.lower() and "точност" not in text.lower():
+    if not isinstance(text, str) or not _HINT_RE.search(text):
         return text
     pieces = _split_sentences(text)
     kept = [(sentence, gap) for sentence, gap in pieces if not _states_preliminary_assessment(sentence)]

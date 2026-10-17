@@ -115,6 +115,97 @@ def test_abbreviations_neither_leak_a_fragment_nor_swallow_a_neighbour(text, exp
     assert "предварительн" not in rg.drop_preliminary_sentences(text).lower()
 
 
+REST = "Решено 7 из 12. {} Опорные навыки: Сложение."
+KEPT_AFTER = "Решено 7 из 12. Опорные навыки: Сложение."
+
+
+@pytest.mark.parametrize("sentence", [
+    # R3 leaks (17.10): each states that the assessment is preliminary or limited
+    "Итоги диагностики носят предварительный характер.",
+    "Выводы предварительные.",
+    "Диагностика даёт предварительную картину.",
+    "Данные носят предварительный характер.",
+    "Точность оценки пока ограничена.",
+    "Удалось лишь предварительно оценить уровень.",
+    "Оценка, к сожалению, лишь предварительная.",
+    "Результат … можно считать лишь предварительным.",
+    "Результат диагностики можно считать лишь предварительным.",
+    # the same family: more nouns, either order, up to three words apart
+    "Заключение пока носит предварительный характер.",
+    "Это лишь предварительный анализ.",
+    "Диагноз поставлен предварительно.",
+    "Итоги предварительно подведены.",            # «итоги» ends in -и but is the noun, not an imperative
+    "Уровень определён предварительно, дроби вызывают затруднения.",   # the comma: «дроби» is another clause
+    "Измерение пока ограничено.",
+    "Оценка ограничена.",
+    # each exception to the advice rule on its own: a restricting word with a verb that does not assess ...
+    "Можно лишь предварительно сравнить уровень с нормой.",
+    # ... and an assessing verb without a restricting word
+    "Предварительно удалось определить уровень ученика.",
+    # only the ADVERB opens advice: the adjective next to an infinitive still calls the level preliminary
+    "Предварительный уровень учитывать при выборе группы.",
+    "Предварительный результат уточнить после теста.",
+])
+def test_every_way_of_calling_the_assessment_preliminary_or_limited_is_dropped(sentence):
+    assert rg.drop_preliminary_sentences(REST.format(sentence)) == KEPT_AFTER
+
+
+@pytest.mark.parametrize("text", [
+    # advice: «предварительно» and an imperative / infinitive next to it, whatever nouns stand around
+    "Чтобы улучшить результат, предварительно повторите дроби.",
+    "Для роста уровня предварительно повторите дроби.",
+    "Данные задания решите предварительно на черновике.",       # the imperative right BEFORE the adverb
+    "Чтобы поднять уровень, предварительно ещё повторите дроби.",   # one word between the adverb and the verb
+    "Для оценки результата предварительно изучить тему.",       # an infinitive
+    "Для роста уровня предварительно повтори дроби.",           # -й / -и as a word of its own
+    "- Для роста уровня предварительно повторите дроби.",
+])
+def test_advice_with_the_adverb_is_kept(text):
+    assert rg.drop_preliminary_sentences(text) == text
+    assert rg.drop_preliminary_sentences(f"Решено 7 из 12. {text} Далее.") == f"Решено 7 из 12. {text} Далее."
+
+
+@pytest.mark.parametrize("text", [
+    # N5: a quoted name is not judged by its words, even when the word and a noun stand side by side
+    "Уровень «Предварительная оценка» ниже нормы.",
+    "Тема «Предварительные сведения» показала уровень ниже нормы.",
+    # the names the deterministic summary lists, with or without a bullet in front
+    "Подтверждены навыки: Предварительная оценка результатов.",
+    "- Опорные навыки: Предварительная оценка результатов.",
+    "• Зафиксированы ключевые затруднения: Предварительные итоги, Анализ данных.",
+])
+def test_quoted_names_and_listed_names_are_not_judged_by_their_words(text):
+    assert rg.drop_preliminary_sentences(text) == text
+
+
+@pytest.mark.parametrize("text,expected", [
+    # «см.» after a number is a unit: it may end a sentence, the neighbour before it stays
+    ("Рост 10 см. Оценка предварительная. Далее.", "Рост 10 см. Далее."),
+    ("Рост 10см. Оценка предварительная. Далее.", "Рост 10см. Далее."),
+    # «см.» as «смотри» does not end a sentence
+    ("Подробности см. Рис. 3. Оценка предварительная.", "Подробности см. Рис. 3."),
+    ("Уровень ниже нормы, см. Оценка предварительная. Далее.", "Далее."),
+])
+def test_cm_after_a_number_is_a_unit_not_an_abbreviation(text, expected):
+    assert rg.drop_preliminary_sentences(text) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    # a bullet or a number at the start of a line opens a sentence: the items of a list never merge
+    ("Опорные навыки: Сложение\n- Оценка предварительная\n- Выводы по теме без точки",
+     "Опорные навыки: Сложение\n- Выводы по теме без точки"),
+    ("• Оценка предварительная\n• Опорные навыки: Сложение", "• Опорные навыки: Сложение"),
+    ("* Оценка предварительная\n* Опорные навыки: Сложение", "* Опорные навыки: Сложение"),
+    ("1) Оценка предварительная\n2) Опорные навыки: Сложение", "2) Опорные навыки: Сложение"),
+    ("Решено 7 из 12\n1) Опорные навыки: Сложение\n2) Оценка предварительная", "Решено 7 из 12\n1) Опорные навыки: Сложение"),
+    # a number before the full stop belongs to its sentence: no orphan «1.» is left when the item goes
+    ("1. Оценка предварительная.\n2. Решено 7 из 12.", "2. Решено 7 из 12."),
+    ("Итоги.\n1. Оценка предварительная.\n2. Решено 7 из 12.\n3. Опорные навыки: Сложение.", "Итоги.\n2. Решено 7 из 12.\n3. Опорные навыки: Сложение."),
+])
+def test_a_bullet_or_a_number_opens_a_new_sentence(text, expected):
+    assert rg.drop_preliminary_sentences(text) == expected
+
+
 def test_separators_survive_a_dropped_sentence():
     text = f"Решено 7 из 12.\n{LEGACY}\n\nОпорные навыки: Сложение."
     assert rg.drop_preliminary_sentences(text) == "Решено 7 из 12.\nОпорные навыки: Сложение."
