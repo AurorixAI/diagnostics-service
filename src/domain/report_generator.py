@@ -1437,7 +1437,6 @@ def _build_deterministic_summary(
     deep_scan_run: bool = False,
     solved: Optional[int] = None,
     total: Optional[int] = None,
-    provisional: bool = False,
     achievements: Optional[List[Dict[str, Any]]] = None,
     development_focus: Optional[str] = None,
 ) -> str:
@@ -1471,9 +1470,6 @@ def _build_deterministic_summary(
         f"Решено {solved} из {total} заданий адаптивного теста"
         if solved is not None and total is not None else f"Результат — {score_pct}%"
     )
-    provisional_sentence = (
-        " Оценка предварительная: точность измерения пока ограничена." if provisional else ""
-    )
     if root or observed:
         closing = "Коррекцию следует начать с первого пункта индивидуального плана и подтвердить перенос навыка на новой задаче."
     elif development_focus:
@@ -1483,7 +1479,7 @@ def _build_deterministic_summary(
     else:
         closing = "Рекомендуется развивать опорные навыки на задачах с новым контекстом."
     return (
-        f"{result}. Результат измерения: «{status_label}» (заявленный класс — {grade_level}).{provisional_sentence} "
+        f"{result}. Результат измерения: «{status_label}» (заявленный класс — {grade_level}). "
         f"{evidence_sentence} {anchors_sentence} {closing}"
     )
 
@@ -1611,6 +1607,36 @@ def _attempt_date(db: Session, session_id: uuid.UUID, answers: List[Any]) -> str
     return completed.astimezone(_LOCAL_TZ).date().isoformat()
 
 
+# Owner decision 17.10 (N13 P4 #102): a report never calls the level «предварительный».  The internal
+# ``provisional`` flag stays in the stored data (calibration) and is never worded: the prompt does not carry it
+# (and never names the word), the deterministic summary has no such sentence, and a sentence like that (a model's
+# own, or one written by an older build) is dropped from the summary before it is stored and again when a stored
+# report is served.
+_PRELIMINARY_RE = re.compile(
+    r"предварительн|точност[а-яё]*\s+измерени[а-яё]*\s+пока\s+ограничен",
+    re.IGNORECASE,
+)
+_SUMMARY_SENTENCE_RE = re.compile(r"((?<=[.!?])\s+)")
+
+
+def drop_preliminary_sentences(text: Any) -> Any:
+    """``text`` without the sentences that call the result preliminary or its precision limited.
+
+    Only the offending sentence goes; the rest of the summary stays.  Not a string, or clean text: returned
+    unchanged.  Applied to the summary of the level only: «предварительно повторите дроби» in a plan step is
+    a different meaning of the word and is not touched.
+    """
+    if not isinstance(text, str) or not _PRELIMINARY_RE.search(text):
+        return text
+    parts = _SUMMARY_SENTENCE_RE.split(text)            # sentence, separator, sentence, ...
+    sentences, separators = parts[0::2], parts[1::2] + [""]
+    kept = [(sentence, sep) for sentence, sep in zip(sentences, separators) if not _PRELIMINARY_RE.search(sentence)]
+    if not kept:
+        return ""
+    # the separator after the last kept sentence is the one that followed a dropped one: nothing to join
+    return "".join(sentence + sep for sentence, sep in kept[:-1]) + kept[-1][0]
+
+
 _PLAN_IDENTIFIER_KEYS = frozenset({"skill_id", "skill_name_ru", "evidence", "priority"})
 
 
@@ -1651,6 +1677,12 @@ def strip_retired_report_fields(report_json: Any) -> Any:
     overall = cleaned.get("overall")
     if isinstance(overall, dict) and contains_retired_claim(overall.get("student_summary")):
         overall["student_summary"] = None
+    if isinstance(overall, dict) and isinstance(overall.get("student_summary"), str):
+        # «Оценка предварительная: …» of older builds (#102): the flag stays in the data, the wording never shows
+        summary = overall["student_summary"]
+        without = drop_preliminary_sentences(summary)
+        if without != summary:
+            overall["student_summary"] = without or None
     plan = cleaned.get("action_plan")
     if isinstance(plan, list):
         for item in plan:
@@ -1965,7 +1997,6 @@ def generate_and_save_report(
             deep_scan_run=deep_scan_run,
             solved=correct,
             total=total,
-            provisional=level["provisional"],
             achievements=achievements if error_free else None,
             development_focus=development_step["skill_name_ru"] if development_step else None,
         )
@@ -2012,7 +2043,7 @@ def generate_and_save_report(
                 "score_percent":    score_pct,     # always from data
                 "status":           computed_status,   # legacy code, from level_policy
                 "status_label_ru":  computed_label_ru, # from level_policy
-                "student_summary":  overall_block.get("student_summary") or deterministic_summary,
+                "student_summary":  drop_preliminary_sentences(overall_block.get("student_summary")) or deterministic_summary,
                 "category":         level["category"],
                 "provisional":      level["provisional"],
             },
