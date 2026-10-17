@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import re
+import time
 
 import pytest
 
@@ -145,6 +146,20 @@ KEPT_AFTER = "Решено 7 из 12. Опорные навыки: Сложен�
     # only the ADVERB opens advice: the adjective next to an infinitive still calls the level preliminary
     "Предварительный уровень учитывать при выборе группы.",
     "Предварительный результат уточнить после теста.",
+    # hedges: the verb says «we state», not «you do» (one case per verb of the list)
+    "Предварительно стоит отметить, что уровень ученика ниже нормы.",
+    "Предварительно можно утверждать, что результат ниже нормы.",
+    "Можно предварительно заключить, что уровень знаний ниже нормы.",
+    "Можно предварительно предположить, что результат ниже нормы.",
+    "Следует предварительно констатировать, что уровень ниже нормы.",
+    "Можно предварительно полагать, что уровень ниже нормы.",
+    "Следует предварительно ожидать, что результат улучшится.",
+    # «лишь / только / пока / всего» right before the word: a statement, however far the noun is
+    "Уровень знаний ученика определён лишь предварительно.",
+    "Результат работы ученика над темой «Дроби» оценён только предварительно.",
+    "Итоги по группе за прошлую четверть подведены всего лишь предварительно.",
+    "Данные по ученику за последнюю неделю получены пока предварительно.",
+    "Оценка знаний ученика по итогам первой четверти дана лишь предварительная.",
 ])
 def test_every_way_of_calling_the_assessment_preliminary_or_limited_is_dropped(sentence):
     assert rg.drop_preliminary_sentences(REST.format(sentence)) == KEPT_AFTER
@@ -159,6 +174,19 @@ def test_every_way_of_calling_the_assessment_preliminary_or_limited_is_dropped(s
     "Для оценки результата предварительно изучить тему.",       # an infinitive
     "Для роста уровня предварительно повтори дроби.",           # -й / -и as a word of its own
     "- Для роста уровня предварительно повторите дроби.",
+    # reflexive forms and the imperative in -ь
+    "Предварительно ознакомьтесь с итогами прошлого урока.",
+    "Рекомендуется предварительно ознакомиться с результатами предыдущей работы.",
+    "Предварительно проверь результат вычислений.",
+    "Для проверки результата предварительно найти ответ.",          # -ти
+    "Для проверки результата предварительно повторяй материал.",    # -й
+    "Для сравнения результатов предварительно подготовьтесь.",
+    "Для сравнения результатов предварительно сойтись во мнениях.",   # -тись
+    "Для оценки результата предварительно оставь условие рядом.",    # -ь after a consonant
+    # the verbs of «анализ» / «вывод» are verbs, not the nouns
+    "Предварительно анализируйте условие и записывайте вывод.",
+    "Для проверки результата предварительно выводите формулу.",
+    "Для оценки уровня предварительно анализировать условие.",
 ])
 def test_advice_with_the_adverb_is_kept(text):
     assert rg.drop_preliminary_sentences(text) == text
@@ -312,3 +340,33 @@ def test_the_write_path_strips_a_preliminary_sentence_the_model_wrote(db, monkey
     for word in WORDING:
         assert word not in stored.lower(), word
     assert report.report_json["level"]["provisional"] is True      # the flag itself is kept
+
+
+# ── speed: an abbreviation, a unit or a line number is read from the last few characters, never the whole prefix ──
+
+def test_a_long_run_of_initials_is_split_in_linear_time():
+    text = "А. " * 7000 + "Оценка предварительная. Опорные навыки: Сложение."
+    started = time.perf_counter()
+    cleaned = rg.drop_preliminary_sentences(text)
+    elapsed = time.perf_counter() - started
+    assert cleaned == "А. " * 7000 + "Опорные навыки: Сложение."
+    assert elapsed < 0.5, f"{elapsed:.3f}s for {len(text)} characters (the target is well under 0.1s)"
+
+
+def test_long_numbered_and_abbreviated_text_is_cut_in_linear_time_too():
+    lines = "".join(f"{n}. Тема {n}, т.е. дроби, 10 см. Далее.\n" for n in range(1, 2500))
+    text = lines + "Оценка предварительная."
+    started = time.perf_counter()
+    cleaned = rg.drop_preliminary_sentences(text)
+    elapsed = time.perf_counter() - started
+    assert cleaned == lines.rstrip("\n")
+    assert elapsed < 0.5, f"{elapsed:.3f}s"
+
+
+def test_a_very_long_run_of_initials_does_not_turn_quadratic():
+    text = "А. " * 150000 + "Оценка предварительная."
+    started = time.perf_counter()
+    cleaned = rg.drop_preliminary_sentences(text)
+    elapsed = time.perf_counter() - started
+    assert cleaned == ("А. " * 150000).rstrip()
+    assert elapsed < 1.5, f"{elapsed:.3f}s for {len(text)} characters"

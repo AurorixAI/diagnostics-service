@@ -1619,7 +1619,8 @@ def _attempt_date(db: Session, session_id: uuid.UUID, answers: List[Any]) -> str
 # предварительную картину», «Результат можно считать лишь предварительным»), or «ограничен…» next to точность / оценка /
 # измерение («Точность оценки пока ограничена»).  Advice is not a statement: «предварительно» followed (or preceded) by
 # an imperative or an infinitive («Для роста уровня предварительно повторите дроби.») stays, unless the verb itself
-# assesses («лишь предварительно оценить уровень») or «лишь / только / пока» restricts it.  A skill called
+# assesses or hedges («лишь предварительно оценить уровень», «предварительно стоит отметить, что …») or «лишь / только /
+# пока / всего» stands right before the word (that is a statement whatever the noun distance).  A skill called
 # «Предварительные сведения» and the names the deterministic summary lists stay as well.
 _PRELIMINARY_WORD_RE = re.compile(r"предварительн[а-я]*")
 _ASSESSMENT_NOUN_RE = re.compile(
@@ -1631,8 +1632,13 @@ _LIMITED_SUBJECT_RE = re.compile(r"(?:оценк|точност|измерен)[
 _MAX_WORD_DISTANCE = 4
 # «лишь предварительно ...»: the adverb restricts a statement, it does not open advice
 _RESTRICTIVE_WORDS = frozenset({"лишь", "только", "пока", "всего"})
-# verbs that assess: «предварительно оценить уровень» states a result, it gives no advice
-_STATEMENT_VERB_RE = re.compile(r"(?:оцен|определ|измер|диагностир|выяв|суд|говор|сказ|счита|назв)[а-я]*")
+# verbs that assess or hedge: «предварительно оценить уровень», «предварительно можно утверждать, что …» state a result,
+# they give no advice
+_STATEMENT_VERB_RE = re.compile(
+    r"(?:оцен|определ|измер|диагностир|выяв|суд|говор|сказ|счита|назв|отмет|утвержд|заключ|предполож|полага|ожида|констатир)[а-я]*"
+)
+# the verb forms of two assessment nouns («анализируйте», «выводите»): verbs, although the noun pattern matches them
+_NOUN_VERB_FORM_RE = re.compile(r"анализир[а-я]*|вывод(?:и|ит|ят|ить|ите|им)")
 _QUOTED_RE = re.compile(r"«[^»]*»")
 _WORD_RE = re.compile(r"[а-яa-z0-9]+")
 _HINT_RE = re.compile(r"предварительн|ограничен", re.IGNORECASE)
@@ -1658,22 +1664,40 @@ _ABBREVIATION_RE = re.compile(
 )
 _UNIT_RE = re.compile(r"\d\s*см\.$", re.IGNORECASE)
 # «1.» / «2.» alone at the start of a line is a number, not the end of a sentence
-_LINE_NUMBER_RE = re.compile(r"(?:^|\n)[ \t]*\d{1,2}\.$")
+_LINE_NUMBER_RE = re.compile(r"[ \t]*\d{1,2}\.")
+# how far back from a full stop an abbreviation / unit / line number can reach
+_TAIL_CHARS = 12
+
+
+def _is_line_number(text: str, end: int) -> bool:
+    """The characters before ``end`` (just after a full stop) are a line number («1.», «  12.») and nothing else on the line."""
+    window = max(0, end - _TAIL_CHARS)
+    newline = text.rfind("\n", window, end)
+    if newline < 0 and window > 0:
+        return False                      # the line starts before the window: more than a number stands on it
+    return _LINE_NUMBER_RE.fullmatch(text[newline + 1 if newline >= 0 else window:end]) is not None
 
 
 def _is_advice_verb(word: str) -> bool:
-    """An infinitive (-ть, -ти, -чь) or an imperative (-те, -йте, -ите; -й / -и as a word of its own); never an assessment noun."""
-    if _ASSESSMENT_NOUN_RE.fullmatch(word):
+    """An infinitive (-ть, -ти, -чь, -ться) or an imperative (-те, -йте, -ите, -тесь, -тись; -й / -и / -ь as a word of its
+    own); never an assessment noun («итоги», «уровень»), but «анализируйте» / «выводите» are verbs."""
+    if _ASSESSMENT_NOUN_RE.fullmatch(word) and not _NOUN_VERB_FORM_RE.fullmatch(word):
         return False
-    return len(word) >= 4 and word.endswith(("ть", "ти", "чь", "те", "й", "и"))
+    if len(word) < 4:
+        return False
+    # infinitives in -ти / -тись / -ться, imperatives in -те (-йте, -ите) / -тесь, and -й / -и as a word of its own
+    if word.endswith(("и", "й", "те", "ться", "тись", "тесь")):
+        return True
+    # -ь: the infinitives in -ть / -чь and an imperative («проверь», «оставь»); a bare «-сь» is a reflexive past
+    # («удалось», «оказалось»), not advice
+    return word.endswith("ь") and not word.endswith("сь")
 
 
 def _is_advice(text: str, words: List[str], spans: List[Tuple[int, int]], i: int) -> bool:
     """«предварительно» at word ``i`` opens advice: an imperative / infinitive right after it (one word may stand between,
-    no punctuation) or right before it.  A restricting «лишь / только / пока» or an assessing verb makes it a statement."""
+    no punctuation) or right before it.  An assessing / hedging verb makes it a statement (a restricting «лишь / только /
+    пока / всего» right before the word is judged before this, in ``_states_preliminary_assessment``)."""
     if words[i] != "предварительно":
-        return False
-    if i > 0 and words[i - 1] in _RESTRICTIVE_WORDS:
         return False
     for j in (i + 1, i + 2):
         if j >= len(words) or text[spans[j - 1][1]:spans[j][0]].strip():
@@ -1693,11 +1717,11 @@ def _states_preliminary_assessment(sentence: str) -> bool:
     words = [text[a:b] for a, b in spans]
     nouns = [i for i, w in enumerate(words) if _ASSESSMENT_NOUN_RE.fullmatch(w)]
     for i, word in enumerate(words):
-        if (
-            _PRELIMINARY_WORD_RE.fullmatch(word)
-            and any(abs(n - i) <= _MAX_WORD_DISTANCE for n in nouns)
-            and not _is_advice(text, words, spans, i)
-        ):
+        if not _PRELIMINARY_WORD_RE.fullmatch(word):
+            continue
+        if i > 0 and words[i - 1] in _RESTRICTIVE_WORDS:       # «определён лишь предварительно»: a statement, however far the noun
+            return True
+        if any(abs(n - i) <= _MAX_WORD_DISTANCE for n in nouns) and not _is_advice(text, words, spans, i):
             return True
     subjects = [i for i, w in enumerate(words) if _LIMITED_SUBJECT_RE.fullmatch(w)]
     return any(
@@ -1715,10 +1739,11 @@ def _split_sentences(text: str) -> List[Tuple[str, str]]:
         if end <= start:
             continue
         if match.group():                                  # a full stop, not the start of a bullet line
-            head = text[:end]
-            if _LINE_NUMBER_RE.search(head):
+            # only the last few characters tell an abbreviation, a unit or a line number: never rescan the whole prefix
+            tail = text[max(start, end - _TAIL_CHARS):end]
+            if _is_line_number(text, end):
                 continue
-            if _ABBREVIATION_RE.search(head) and not _UNIT_RE.search(head):
+            if _ABBREVIATION_RE.search(tail) and not _UNIT_RE.search(tail):
                 continue
         gap_end = end
         while gap_end < len(text) and text[gap_end].isspace():
