@@ -28,6 +28,10 @@ def validate_invite_state(
 ) -> None:
     """Check a fetched projection without making a second auth-service request."""
     invite_status = str(invite.get("status") or "")
+    if invite_status == "cancelled":
+        # The centre switched the link off (today: the student was archived). Whatever the caller allows, a
+        # cancelled code is unusable; same class as an expired one (410), with a text of its own.
+        raise invite_error(410, "INVITE_CANCELLED", "Приглашение отменено", "contact_center")
     if allowed_statuses is not None and invite_status not in allowed_statuses:
         if invite_status == "expired":
             raise invite_error(410, "INVITE_EXPIRED", "Срок действия приглашения истёк.", "contact_center")

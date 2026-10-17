@@ -58,7 +58,7 @@ ATTEMPTS_PER_HOUR = Limit(3000, 3600)
 # Every lookup of one code, from any address.
 CODE_PER_HOUR = Limit(100, 3600)
 # invite_error codes that mean «this was a guess»: an unknown code, or a known one with another student / grade.
-# An expired / used / not-yet-confirmed invite is a state, not a guess, and a student can meet it legitimately.
+# An expired / cancelled / used / not-yet-confirmed invite is a state, not a guess, and a student can meet it legitimately.
 GUESS_CODES = frozenset({"INVITE_INVALID", "INVITE_STUDENT_MISMATCH", "INVITE_GRADE_MISMATCH"})
 
 
