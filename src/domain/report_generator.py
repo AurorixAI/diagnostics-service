@@ -17,6 +17,7 @@ Fire-and-forget: errors are logged, never raised.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -28,7 +29,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
-from src.core.gemini_client import call_gemini
+from src.core.gemini_client import call_gemini, narrative_enabled
 from src.models.diag_models import DiagReport
 from src.repositories.diag_repo import DiagReportRepository
 from src.repositories.knowledge_repo import KnowledgeRepository
@@ -333,17 +334,56 @@ def _resolve_skill(
 
 # ── JSON utilities ────────────────────────────────────────────────────────────
 
+def _strip_line_comments(text: str) -> str:
+    """Remove ``// ...`` comments that stand OUTSIDE JSON string literals.
+
+    A ``//`` inside a string (``https://...``, "и/или//") is content and must survive.
+    """
+    out: List[str] = []
+    in_string = False
+    escaped = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+            out.append(ch)
+        elif ch == "/" and text[i + 1:i + 2] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _extract_json(raw: str) -> Optional[Dict[str, Any]]:
-    """Strip markdown fences and parse JSON."""
+    """Strip markdown fences and parse JSON.
+
+    The text is parsed as is first.  Only if that fails are ``//`` comments removed - and only
+    outside string literals - so a link or "и/или//" inside the narrative never breaks valid JSON
+    (B-08: it used to cut the value and cost a second paid call).
+    """
     if not raw:
         return None
     cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned.strip())
-    cleaned = re.sub(r"//[^\n]*", "", cleaned)
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    for candidate in (cleaned, _strip_line_comments(cleaned)):
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+        match = re.search(r"\{.*\}", candidate, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group(0))
@@ -1831,6 +1871,36 @@ def strip_retired_report_fields(report_json: Any) -> Any:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
+def _narrative_skip_reason(
+    *, skip_narrative: bool, error_free: bool, has_answers: bool, degraded: bool,
+) -> Optional[str]:
+    """Why the paid narrative must NOT be requested for this report (``None`` = it may be).
+
+    Everything here is known before the first model call: a backfill job, an error-free
+    attempt, a session without answers (empty prompt), the emergency switch, and a degraded
+    evidence set (content-service was unreachable, the prompt would carry raw ids and the
+    result would be thrown away and retried).
+    """
+    if skip_narrative:
+        return "deterministic_job"
+    if error_free:
+        return "error_free"
+    if not has_answers:
+        return "no_answers"
+    if not narrative_enabled():
+        return "disabled_by_REPORT_NARRATIVE_ENABLED"
+    if degraded:
+        return "degraded_evidence"
+    return None
+
+
+def _read_narrative_cache(existing: Any, key: Optional[str]) -> Optional[Dict[str, Any]]:
+    cache = getattr(existing, "narrative_cache", None) if existing is not None else None
+    if key and isinstance(cache, dict) and cache.get("key") == key and isinstance(cache.get("ai_data"), dict):
+        return cache["ai_data"]
+    return None
+
+
 def generate_and_save_report(
     db: Session,
     *,
@@ -2044,32 +2114,55 @@ def generate_and_save_report(
             db.commit()
         last_errors: List[str] = []
 
-        # ``skip_narrative``: deterministic backfills never call the paid model;
-        # an error-free attempt has nothing to correct, so it is deterministic too.
-        for attempt in range(1, 1 if (skip_narrative or error_free) else 3):
-            prompt = _build_prompt(
-                grade_level=grade_level,
-                overall_level=overall_level,
-                score_pct=score_pct,
-                correct=correct,
-                total=total,
-                computed_status=computed_status,
-                status_label=computed_label_ru,
-                topics_block=topics_block,
-                wrong_block=wrong_block,
-                chains_block=chains_block,
-                boundary_block=boundary_block,
-                cognitive_block=cognitive_block,
-                anchor_block=anchor_block,
-                plan_candidates_block=plan_candidates_block,
-                plan_min_items=min(3, len(plan_candidates)),
-                plan_max_items=min(5, len(plan_candidates)),
-                root_cause_confirmed=root_cause_confirmed,
-                student_name=student_name,
-                test_code=test_code,
-                validation_errors=last_errors if attempt > 1 else None,
-            )
-            raw = call_gemini(prompt, temperature=0.3, max_tokens=2500)
+        # Whether the paid model is used at all is decided HERE, from data that is already
+        # known, before any prompt is built or any call is made (B-01, B-02).
+        narrative_skip = _narrative_skip_reason(
+            skip_narrative=skip_narrative,
+            error_free=error_free,
+            has_answers=bool(answers_orm),
+            degraded=bool(l2_of.degraded or name_failures),
+        )
+        prompt_args = dict(
+            grade_level=grade_level,
+            overall_level=overall_level,
+            score_pct=score_pct,
+            correct=correct,
+            total=total,
+            computed_status=computed_status,
+            status_label=computed_label_ru,
+            topics_block=topics_block,
+            wrong_block=wrong_block,
+            chains_block=chains_block,
+            boundary_block=boundary_block,
+            cognitive_block=cognitive_block,
+            anchor_block=anchor_block,
+            plan_candidates_block=plan_candidates_block,
+            plan_min_items=min(3, len(plan_candidates)),
+            plan_max_items=min(5, len(plan_candidates)),
+            root_cause_confirmed=root_cause_confirmed,
+            student_name=student_name,
+            test_code=test_code,
+        )
+        validate_kwargs = dict(
+            computed_status=computed_status,
+            score_pct=score_pct,
+            allowed_plan_skills=allowed_plan_skills,
+            root_cause_confirmed=root_cause_confirmed,
+        )
+        cache_key: Optional[str] = None
+        if narrative_skip:
+            log.info("Narrative skipped for session %s (%s): 0 paid model calls", session_id, narrative_skip)
+        else:
+            cache_key = hashlib.sha256(_build_prompt(**prompt_args, validation_errors=None).encode("utf-8")).hexdigest()
+            # A retry of the same job reuses a model answer that was already paid for.
+            cached = _read_narrative_cache(existing, cache_key)
+            if cached is not None and _validate_ai_output(cached, **validate_kwargs)[0]:
+                ai_data = cached
+                log.info("Narrative for session %s taken from the job cache: 0 paid model calls", session_id)
+
+        for attempt in range(1, 1 if (narrative_skip or ai_data) else 3):
+            prompt = _build_prompt(**prompt_args, validation_errors=last_errors if attempt > 1 else None)
+            raw = call_gemini(prompt, temperature=0.3, max_tokens=2500, purpose="report_narrative")
             if not raw:
                 log.warning("Attempt %d: empty AI response", attempt)
                 continue
@@ -2080,22 +2173,21 @@ def generate_and_save_report(
                 log.warning("Attempt %d: JSON parse failed", attempt)
                 continue
 
-            is_valid, errors = _validate_ai_output(
-                parsed,
-                computed_status=computed_status,
-                score_pct=score_pct,
-                allowed_plan_skills=allowed_plan_skills,
-                root_cause_confirmed=root_cause_confirmed,
-            )
+            is_valid, errors = _validate_ai_output(parsed, **validate_kwargs)
             if is_valid:
                 ai_data = parsed
                 log.info("Attempt %d: AI output valid", attempt)
+                # Persist what was paid for: if anything below fails, the retry of this job
+                # must not call the model again.
+                if existing is not None:
+                    existing.narrative_cache = {"key": cache_key, "ai_data": parsed}
+                    db.commit()
                 break
             else:
                 last_errors = errors
                 log.warning("Attempt %d: validation errors: %s", attempt, errors[:3])
 
-        if not ai_data and not skip_narrative and not error_free:
+        if not ai_data and not narrative_skip:
             log.warning("AI generation unavailable for session %s; using deterministic report wording.", session_id)
 
         # ── Clean action plan descriptions ──────────────────────────────────
@@ -2241,6 +2333,8 @@ def generate_and_save_report(
             existing.recommended_start = (recommended_start or {}).get("skill_id")
             existing.narrative_generated = bool(ai_data)
             current = bool(report_json) and not degraded
+            if current:
+                existing.narrative_cache = None     # the paid answer is now inside report_json
             existing.report_schema_version = REPORT_SCHEMA_VERSION if current else 0
             existing.generation_status = "ready" if current else "failed"
             existing.generation_stage = "ready" if current else "failed"

@@ -173,6 +173,9 @@ class DiagReport(Base):
     report_json = Column(JSONB)                         # structured 8-block JSON
     narrative_ru = Column(Text)                         # legacy text (kept for compat)
     narrative_generated = Column(Boolean, default=False)
+    # A valid model answer kept between retries of the SAME job ({"key": sha256(prompt), "ai_data": {...}})
+    # so that a retry never pays for the narrative twice.  Cleared when the report becomes current.
+    narrative_cache = Column(JSONB, nullable=True)
 
     # Report generation is deliberately tracked in the database rather than
     # only in an in-memory thread.  A restart therefore cannot silently lose a

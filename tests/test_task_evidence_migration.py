@@ -33,7 +33,7 @@ def test_task_evidence_migration_preserves_legacy_answers():
         with engine.connect() as conn:
             assert conn.execute(text('SELECT id,task_id,student_answer,outcome FROM diag_answers')).all()==before
             assert conn.scalar(text('SELECT task_snapshot FROM diag_answers')) is None
-            assert conn.scalar(text('SELECT version_num FROM alembic_version'))=='010_deep_scan_origin_link'
+            assert conn.scalar(text('SELECT version_num FROM alembic_version'))=='011_report_narrative_cache'
     finally:
         engine.dispose()
         with admin.connect() as conn:conn.execute(text(f'DROP DATABASE {name} WITH (FORCE)'))

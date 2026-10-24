@@ -71,7 +71,7 @@ def test_migration_010_up_down_up_keeps_legacy_rows_and_fails_fast_under_lock():
         with engine.connect() as conn:
             row = conn.execute(text("SELECT task_id, student_answer, deep_scan_origin_skill_id, deep_scan_step FROM diag_answers")).one()
             assert tuple(row) == ("legacy", "old", None, None)          # old answers: link unknown, not invented
-            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == "010_deep_scan_origin_link"
+            assert conn.scalar(text("SELECT version_num FROM alembic_version")) == "011_report_narrative_cache"
         assert alembic("downgrade", "009_answer_task_evidence").returncode == 0 and not set(NEW) & columns()
         with engine.connect() as conn:
             assert conn.scalar(text("SELECT count(*) FROM diag_answers")) == 1
