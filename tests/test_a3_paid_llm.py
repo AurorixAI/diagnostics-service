@@ -328,6 +328,8 @@ def test_retry_of_the_same_job_reuses_the_paid_answer(db, monkeypatch):
     assert row.generation_status == "ready" and row.narrative_generated is True
     assert row.report_json["report_meta"]["narrative_status"] == "ready"
     assert row.narrative_cache is None                             # cleared once the report is current
+    from sqlalchemy import text
+    assert db.execute(text("SELECT narrative_cache IS NULL FROM diag_reports")).scalar() is True   # SQL NULL, not JSON null
 
 
 @needs_db
@@ -361,3 +363,20 @@ def test_switch_off_job_makes_zero_calls_and_still_finishes(db, monkeypatch):
     db.expire_all()
     row = db.query(R).one()
     assert calls == [] and row.generation_status == "ready" and row.narrative_generated is False
+
+
+def test_startup_warns_about_an_unrecognised_switch_value_and_stays_on(monkeypatch, caplog):
+    set_env(monkeypatch, flag="flase")
+    with caplog.at_level(logging.WARNING, logger="src.core.gemini_client"):
+        assert gemini_client.warn_if_switch_unrecognised() is True
+    assert any("unrecognised" in r.getMessage() and "flase" in r.getMessage() for r in caplog.records)
+    assert gemini_client.narrative_enabled() is True          # still fail-open
+    for ok in (None, "true", "false", "0", "no", ""):
+        set_env(monkeypatch, flag=ok)
+        assert gemini_client.warn_if_switch_unrecognised() is False
+
+
+def test_the_paid_one_off_script_with_a_hard_coded_password_is_gone():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent.parent
+    assert not (root / "scripts" / "backfill_distractor_explanation.py").exists()
