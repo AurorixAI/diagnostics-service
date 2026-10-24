@@ -322,3 +322,24 @@ def admit_invite_attempt(request: Request, invite_code: Optional[str]) -> Invite
         raise too_many_attempts(wait)
 
     return InviteTicket(bucket, code_scope)
+
+
+def admit_report_lookup(request: Request) -> InviteTicket:
+    """The report read (``GET /sessions/{id}/report``): refuse (429 + Retry-After) an address that already holds the
+    budget of FAILED lookups, and hand back a ticket that counts this one's failure (S-03).
+
+    Unlike ``admit_invite_attempt`` a valid read costs nothing here: the finished page polls the report every few
+    seconds until it is ready (up to 40 reads per student), and a whole class behind one NAT finishes together - that
+    volume would burn the flood caps of the other entries.  The session id (a UUID) is needed as well, so this is
+    hygiene against a walk over invite codes for a known session, not the only guard."""
+    bucket = client_bucket(request)
+    exceeded: list[tuple[int, str]] = []
+    for limit in (FAILS_PER_MINUTE, FAILS_PER_HOUR):
+        failures, left = counters.peek(f"diagfail:{limit.window}:{bucket}")
+        if failures >= limit.count:
+            exceeded.append((left, "failures"))
+    if exceeded:
+        wait, reason = max(exceeded)
+        _log_refusal_once(bucket, reason, wait)
+        raise too_many_attempts(wait)
+    return InviteTicket(bucket, None)

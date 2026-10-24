@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from src.core.abuse_limit import admit_invite_attempt
+from src.core.abuse_limit import admit_invite_attempt, admit_report_lookup
 from src.core.database import get_db
 from src.core.access import invite_error, validate_invite_capability, validate_invite_state
 from src.models.diag_models import DiagSession
@@ -261,15 +261,23 @@ async def resolve_session(
 
 @router.get("/sessions/{session_id}/report")
 async def get_report(
+    request: Request,
     session_id: uuid.UUID,
     service: SessionService = Depends(_service),
     db: Session = Depends(get_db),
-    invite_code: str = Query(..., min_length=1),
+    # The invite code is a capability: it travels in a header (like ``answer``), not in the URL, where it would stay in
+    # the browser history and in proxy logs (S-02).  ``?invite_code=`` is still read for one release so that a page
+    # loaded before the deploy keeps working; remove it after that.
+    invite_header: Optional[str] = Header(None, alias="X-Diagnostic-Invite-Code"),
+    invite_query: Optional[str] = Query(None, alias="invite_code", min_length=1, deprecated=True),
 ):
     """Get diagnostic report for a completed session."""
+    invite_code = invite_header or invite_query
+    ticket = admit_report_lookup(request)  # S-03
     try:
         session = db.query(DiagSession).filter(DiagSession.id == session_id).first()
         if not session or session.invite_code != invite_code:
+            ticket.fail()  # a wrong code for a session id (or no such session) is a guess
             raise invite_error(404, "REPORT_NOT_FOUND", "Отчёт не найден.", "contact_center")
         await validate_invite_capability(
             invite_code,
@@ -290,11 +298,12 @@ async def get_report(
         return service.get_report_data(session_id)
     except ValueError as exc:
         raise invite_error(404, "REPORT_NOT_FOUND", "Отчёт не найден.", "contact_center")
-    except HTTPException:
+    except HTTPException as exc:
         # A deliberate 4xx (missing invite capability, wrong student, a
         # session already started) must reach the client as itself. The
         # generic handler below would relabel it 500, and the UI would
         # report a server failure instead of what the user has to do.
+        ticket.record(exc)
         raise
     except Exception as exc:
         log.error("diagnostic_report_failed session_id=%s error_type=%s", session_id, type(exc).__name__)

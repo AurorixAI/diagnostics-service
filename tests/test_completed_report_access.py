@@ -61,10 +61,12 @@ def test_completed_session_report_is_available_during_auth_projection_lag(monkey
 
     result = asyncio.run(
         diagnostic_router.get_report(
+            request=SimpleNamespace(headers={}, client=SimpleNamespace(host="203.0.113.5")),
             session_id=session_id,
             service=_Service(session_id),
             db=_Db(db_session),
-            invite_code=invite_code,
+            invite_header=invite_code,
+            invite_query=None,
         )
     )
 
