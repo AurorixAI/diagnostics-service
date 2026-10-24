@@ -39,3 +39,6 @@ docker-compose.override.yml
 
 # raw per-run outputs of the root-cause study (reproducible from tools/rootcause_stand.json; summaries are committed)
 tools/sim_results/rootcause_*_G*.json
+
+# production report dumps (student answers) never live in the repository or in the image; keep backups outside it
+backups/

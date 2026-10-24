@@ -11,3 +11,5 @@ tests/
 dist/
 build/
 *.egg-info/
+backups/
+tools/sim_results/
