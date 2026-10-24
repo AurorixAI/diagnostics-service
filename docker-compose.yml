@@ -19,6 +19,7 @@ services:
       AZURE_DEEPSEEK_API_KEY: ${AZURE_DEEPSEEK_API_KEY:-}
       AZURE_DEEPSEEK_ENDPOINT: ${AZURE_DEEPSEEK_ENDPOINT:-}
       AZURE_DEEPSEEK_MODEL: ${AZURE_DEEPSEEK_MODEL:-deepseek-v4-flash}
+      REPORT_NARRATIVE_ENABLED: ${REPORT_NARRATIVE_ENABLED:-true}
       CORS_ORIGINS: '["http://localhost:3000","http://127.0.0.1:3000","http://localhost:8000","http://127.0.0.1:8000"]'
       AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:-http://algo-auth:8000}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-local-internal-service-token-change-in-production}

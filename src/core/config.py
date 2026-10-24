@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     redis_session_ttl: int = 7200   # 2 hours
     redis_task_cache_ttl: int = 600  # 10 minutes
 
+    # Emergency switch for every paid report-narrative model call (REPORT_NARRATIVE_ENABLED).
+    # On by default: the narrative is a product feature.  "false" / "0" / "no" / "off" turns it
+    # off; reports are then built deterministically with 0 paid calls.  Read it ONLY through
+    # ``src.core.gemini_client.narrative_enabled()``.  A string (not bool) so that an empty value
+    # in a compose file cannot stop the service from starting.
+    report_narrative_enabled: str = "true"
+
     # Gemini AI
     gemini_api_key: str = ""
     gemini_model_eval: str = "gemini-2.0-flash"
