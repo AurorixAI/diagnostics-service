@@ -36,6 +36,9 @@ async def lifespan(app: FastAPI):
         settings.app_version,
         settings.app_env,
     )
+    from src.core.gemini_client import warn_if_switch_unrecognised
+
+    warn_if_switch_unrecognised()  # an unknown REPORT_NARRATIVE_ENABLED value keeps paid calls ON: say so at start
     # Every database session must run in UTC (ROADMAP #49): raise here, before anything is migrated or written,
     # instead of storing shifted timestamps.  (migration_runner makes the same check before the workers start.)
     from src.core.database import engine

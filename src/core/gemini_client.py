@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 
 SERVICE = "diagnostic"
 _OFF_VALUES = {"false", "0", "no", "off", "disabled"}
+_ON_VALUES = {"", "true", "1", "yes", "on", "enabled"}
 
 
 def narrative_enabled() -> bool:
@@ -25,6 +26,22 @@ def narrative_enabled() -> bool:
     """
     value = str(get_settings().report_narrative_enabled or "").strip().lower()
     return value not in _OFF_VALUES
+
+
+def warn_if_switch_unrecognised() -> bool:
+    """Startup check: a value that is neither a known "on" nor a known "off" keeps the model ON (fail-open) - say so loudly.
+
+    Returns True when a warning was logged.
+    """
+    raw = str(get_settings().report_narrative_enabled or "")
+    value = raw.strip().lower()
+    if value in _OFF_VALUES or value in _ON_VALUES:
+        return False
+    log.warning(
+        "REPORT_NARRATIVE_ENABLED has an unrecognised value %r: treated as ON (paid report calls are ENABLED). "
+        "Use false/0/no/off to switch them off.", raw[:40],
+    )
+    return True
 
 
 def _log_paid_call(purpose: str, provider: str, model: str, started: float, ok: bool) -> None:

@@ -175,7 +175,7 @@ class DiagReport(Base):
     narrative_generated = Column(Boolean, default=False)
     # A valid model answer kept between retries of the SAME job ({"key": sha256(prompt), "ai_data": {...}})
     # so that a retry never pays for the narrative twice.  Cleared when the report becomes current.
-    narrative_cache = Column(JSONB, nullable=True)
+    narrative_cache = Column(JSONB(none_as_null=True), nullable=True)   # None is SQL NULL, never JSON 'null'
 
     # Report generation is deliberately tracked in the database rather than
     # only in an in-memory thread.  A restart therefore cannot silently lose a
