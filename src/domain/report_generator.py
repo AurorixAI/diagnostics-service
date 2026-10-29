@@ -175,19 +175,56 @@ def _distractor_explanation_latex(distractor: Any) -> Optional[str]:
 
 
 _PROMPT_ANSWER_CHARS = 200
+# Masking looks a little further than the 200 kept characters, so a number that starts inside the kept part and
+# runs past the cut is still seen whole (and masked) instead of leaving its first digits in the prompt.
+_PROMPT_SCAN_CHARS = 400
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# A phone number: after a ``+`` any run of digits and separators holding 9..15 digits; without a ``+`` either digit
+# groups split by spaces / dashes / dots / brackets (9..15 digits) or a bare run that looks like a local number
+# (UZ 9 digits starting 3/7/8/9, 998 + 9 digits, RU/KZ 11 digits starting 7/8).  A short or plain number
+# (a maths answer: 12, 3.14, 1000000) is never touched.
+_PHONE_RE = re.compile(
+    r"\+\s?\d[\d\s().-]{7,18}\d"
+    r"|(?<![\w])(?:[78][\s-])?\(?\d{2,4}\)?(?:[\s.-]\(?\d{2,4}\)?){2,5}(?![\w])"
+    r"|(?<!\d)(?:998\d{9}|[78]\d{10}|[3789]\d{8})(?!\d)"
+)
+_PHONE_MIN_DIGITS = 9
+
+
+_THOUSANDS_RE = re.compile(r"\d{1,3}(?: \d{3})+")        # «1 000 000 000» is a number, not a phone
+
+
+def _mask_phone(match: "re.Match[str]") -> str:
+    text = match.group(0)
+    runs = re.findall(r"\d+", text)
+    digits = sum(len(run) for run in runs)
+    if not _PHONE_MIN_DIGITS <= digits <= 15 or _THOUSANDS_RE.fullmatch(text.strip()):
+        return text
+    # a list of short numbers («10 12 14 16 18») is an answer; a phone has a group of three or more digits
+    return "[телефон]" if max(len(run) for run in runs) >= 3 else text
+
+
+def _mask_contacts(text: str) -> str:
+    """Obvious phone numbers and e-mail addresses in a student's free text become ``[телефон]`` / ``[email]``.
+
+    Names are NOT looked for (owner decision, #160): a name typed into an answer cannot be told from a word without
+    a dictionary, and a model call must not carry a person anyway - the name never enters the prompt otherwise."""
+    return _PHONE_RE.sub(_mask_phone, _EMAIL_RE.sub("[email]", text))
 
 
 def _prompt_answer(value: object) -> str:
-    """A student's answer as it goes into the AI prompt: at most 200 characters (``…`` marks a cut) and no control
-    characters - the stored text can be any length and may hold line breaks or invisible formatting.  The report
-    JSON keeps the text as it was."""
+    """A student's answer as it goes into the AI prompt: at most 200 characters (``…`` marks a cut), no control
+    characters - the stored text can be any length and may hold line breaks or invisible formatting - and obvious
+    phone numbers / e-mail addresses masked (#160: nothing that identifies a person goes to an outside model).
+    The report JSON keeps the text as it was."""
     text = str(value if value is not None else "")
-    clipped = text[:_PROMPT_ANSWER_CHARS]                       # bound the work before looking at characters
+    scanned = text[:_PROMPT_SCAN_CHARS]                         # bound the work before looking at characters
     clean = "".join(
-        " " if ch in "\t\n\r" else ch for ch in clipped
+        " " if ch in "\t\n\r" else ch for ch in scanned
         if ch in "\t\n\r" or not unicodedata.category(ch).startswith("C")
     )
-    return clean[:_PROMPT_ANSWER_CHARS - 1] + "…" if len(text) > _PROMPT_ANSWER_CHARS else clean
+    masked = _mask_contacts(clean)
+    return masked[:_PROMPT_ANSWER_CHARS - 1] + "…" if len(text) > _PROMPT_ANSWER_CHARS else masked[:_PROMPT_ANSWER_CHARS]
 
 
 def _log_answer_compare_failure(exc: Exception) -> None:
@@ -1526,6 +1563,12 @@ def _build_deterministic_summary(
 
 # ── AI prompt ─────────────────────────────────────────────────────────────────
 
+# #160: a student's name (or any other identifier of a person) never goes to an outside model.  The prompt has no slot
+# for it - ``_build_prompt`` takes no name - and the line always reads «Ученик: Ученик».  The wording is the same as
+# before the change (the report job never passed a name, so the default was always sent), so the narrative-cache key
+# of every real prompt stays the same: no stored paid answer is orphaned and no new paid call appears from this change.
+_PROMPT_STUDENT = "Ученик"
+
 _AI_SCHEMA = """{
   "overall": {
     "score_percent": <int скопируй из данных>,
@@ -1564,7 +1607,6 @@ def _build_prompt(
     plan_min_items: int,
     plan_max_items: int,
     root_cause_confirmed: bool,
-    student_name: str,
     test_code: str,
     validation_errors: Optional[List[str]] = None,
 ) -> str:
@@ -1588,7 +1630,7 @@ def _build_prompt(
 4. action_plan — от {plan_min_items} до {plan_max_items} приоритетных шагов. Используй ТОЛЬКО цели из списка ниже, не добавляй темы от себя. Первым шагом (priority 1) ОБЯЗАТЕЛЬНО поставь первую цель списка. Не указывай сроки и часы.
 
 ДАННЫЕ АДАПТИВНОЙ ДИАГНОСТИКИ:
-Ученик: {student_name} | Заявленный класс: {grade_level} | Код теста: {test_code}
+Ученик: {_PROMPT_STUDENT} | Заявленный класс: {grade_level} | Код теста: {test_code}
 Решено: {correct} из {total} заданий адаптивного теста ({score_pct}%; это факт о выданном наборе, уровень определён по θ, а не по этому проценту)
 Уровень по результатам измерения (IRT): {status_label} | Статус: {computed_status}
 
@@ -2140,7 +2182,6 @@ def generate_and_save_report(
             plan_min_items=min(3, len(plan_candidates)),
             plan_max_items=min(5, len(plan_candidates)),
             root_cause_confirmed=root_cause_confirmed,
-            student_name=student_name,
             test_code=test_code,
         )
         validate_kwargs = dict(

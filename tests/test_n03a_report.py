@@ -110,7 +110,7 @@ def gen(monkeypatch):
         report = rg.generate_and_save_report(
             db, session_id=uuid.uuid4(), student_id=uuid.uuid4(), grade_level=8, theta=theta,
             theta_se=se, overall_level="at_grade", topic_breakdown=topics, weak_skills=list(weak),
-            items_total=len(answers), student_name="Ученик", test_code="T", **kw,
+            items_total=len(answers), **{"student_name": "Ученик", "test_code": "T", **kw},
         )
         assert report is not None and report.report_json, "report was not built"
         return report
