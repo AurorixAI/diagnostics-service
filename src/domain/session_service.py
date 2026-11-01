@@ -86,6 +86,7 @@ log = logging.getLogger(__name__)
 # (the repository clamps too, this keeps the stored/served target consistent with it).
 _TARGET_B_MIN, _TARGET_B_MAX = TARGET_B_MIN, TARGET_B_MAX
 settings = get_settings()
+ANSWER_UNIQUE_INDEX = "uq_diag_answers_session_task"   # models.diag_models.DiagAnswer, migration 013
 
 # The Deep Scan flags of a session, frozen in ``SessionState.deep_scan_params`` at
 # ``create_session``: key -> (settings attribute, cast).  A config change must never
@@ -484,10 +485,13 @@ class SessionService:
                 deep_scan_origin_skill_id=scan_origin,
                 deep_scan_step=scan_step,
             )
-        except IntegrityError:
+        except IntegrityError as exc:
             # UNIQUE (session_id, task_id) is the last barrier behind the row lock (B-06): the state moved on
-            # under this request.  Nothing was written; the client re-reads the attempt.
+            # under this request.  Nothing was written; the client re-reads the attempt.  Any OTHER integrity error
+            # (FK, NOT NULL) is a real defect and must not hide behind "the state changed".
             self.db.rollback()
+            if getattr(getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None) != ANSWER_UNIQUE_INDEX:
+                raise
             raise TaskOutOfSequenceError(str(session_id))
         # Inspect the navigation consequence before accepting an early stop.
         # Otherwise the final failed skill can end the test before the critical

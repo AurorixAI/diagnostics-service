@@ -10,10 +10,12 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from src.core import auth_client
 from src.core.db_timezone import utc_connect_args
 from src.domain import auth_sync_jobs as sync_jobs
 from src.models.base import Base
@@ -172,3 +174,64 @@ def test_a_crash_of_the_callback_is_scheduled_like_an_unanswered_one(world, monk
     row = world.row()
     assert row["status"] == "pending" and row["next"] is not None and "RuntimeError" in row["error"]
     assert row["next"].replace(tzinfo=timezone.utc) == T0 + timedelta(seconds=30)
+
+
+# ── R3 #4: a permanent "no" is not worth the whole ladder ────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("status", [400, 404, 409, 422])
+def test_a_permanent_refusal_is_final_after_three_attempts_with_one_error_line(world, monkeypatch, caplog, status):
+    monkeypatch.setattr(sync_jobs.auth_client, "notify_complete", lambda *a: world.calls.append(world.now) or auth_client.Rejected(status))
+    with caplog.at_level(logging.WARNING, logger=sync_jobs.log.name):
+        world.run(until=timedelta(hours=30), step=timedelta(seconds=30))
+    row = world.row()
+    assert len(world.calls) == sync_jobs.REJECTED_AFTER_ATTEMPTS == 3                 # not 34
+    assert (row["status"], row["next"], row["attempts"]) == ("failed", None, 3)
+    assert f"HTTP {status}" in row["error"]
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors == [f"diagnostic_auth_sync_rejected session_id={world.session_id} status={status} attempts=3"]
+    assert world.calls[-1] - T0 <= timedelta(minutes=5)                                 # and it is quick: 0 s, 30 s, 90 s
+
+
+def test_a_refusal_after_network_failures_is_final_too_and_a_later_success_is_still_possible_before_that(world, monkeypatch):
+    answers = iter([False, False, auth_client.Rejected(400)])                           # two outages, then a refusal
+    monkeypatch.setattr(sync_jobs.auth_client, "notify_complete", lambda *a: world.calls.append(world.now) or next(answers))
+    world.run(until=timedelta(hours=1))
+    assert world.row()["status"] == "failed" and world.row()["next"] is None and len(world.calls) == 3
+
+
+def test_a_refusal_below_three_attempts_keeps_the_pause(world, monkeypatch):
+    monkeypatch.setattr(sync_jobs.auth_client, "notify_complete", lambda *a: world.calls.append(world.now) or auth_client.Rejected(409))
+    sync_jobs.process_next_auth_completion_sync()
+    row = world.row()
+    assert row["status"] == "pending" and row["next"].replace(tzinfo=timezone.utc) == T0 + timedelta(seconds=30)
+
+
+@pytest.mark.parametrize("code,expected", [
+    (200, True), (204, True),
+    (400, "rejected"), (404, "rejected"), (409, "rejected"), (422, "rejected"),
+    (401, False), (403, False), (408, False), (425, False), (429, False), (500, False), (502, False), (503, False),
+])
+def test_notify_complete_classifies_the_answer_of_auth_service(monkeypatch, code, expected):
+    class Client:
+        def __init__(self, **_kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def post(self, url, **_kwargs): return httpx.Response(200 if url.endswith("/start") else code)
+    monkeypatch.setattr(auth_client.httpx, "Client", Client)
+    monkeypatch.setattr(auth_client, "_internal_headers", lambda: {"X-Internal-Service-Token": "t"})
+    result = auth_client.notify_complete("CODE", "S1", {})
+    if expected == "rejected":
+        assert isinstance(result, auth_client.Rejected) and result.status == code and not result
+    else:
+        assert result is expected
+
+
+def test_network_error_is_retry_not_rejected(monkeypatch):
+    class Client:
+        def __init__(self, **_kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def post(self, url, **_kwargs): raise httpx.ConnectError("down")
+    monkeypatch.setattr(auth_client.httpx, "Client", Client)
+    monkeypatch.setattr(auth_client, "_internal_headers", lambda: {"X-Internal-Service-Token": "t"})
+    assert auth_client.notify_complete("CODE", "S1", {}) is False

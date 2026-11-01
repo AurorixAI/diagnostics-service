@@ -16,6 +16,25 @@ from src.core.config import get_settings
 log = logging.getLogger(__name__)
 
 
+# A permanent "no" from auth-service (the invite is cancelled / already finished / bound to another session / the body
+# is refused).  Repeating it for a day only delays the alert; 401/403 (a wrong token is a deployment mistake that gets
+# fixed), 5xx, 408/425/429 and network errors are "try again".
+REJECTED_STATUSES = frozenset({400, 404, 409, 422})
+
+
+class Rejected:
+    """Outcome of ``notify_complete``: auth-service refused this completion for good.  Falsy, like "not delivered"."""
+
+    def __init__(self, status: int):
+        self.status = status
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return f"Rejected({self.status})"
+
+
 def _base_url() -> str:
     return get_settings().auth_service_url.rstrip("/")
 
@@ -63,10 +82,13 @@ def notify_complete(
     invite_code: str,
     session_id: str,
     result_data: Dict[str, Any],
-) -> bool:
+):
     """
     Mark diagnostic invite as completed and save result to StudentDiagnosticResult.
     Calls POST /api/v1/internal/diagnostic/{code}/complete
+
+    Three outcomes: ``True`` (delivered), ``False`` (try again later: network, 5xx, 401/403, 408/425/429) and a
+    ``Rejected`` (falsy; 400/404/409/422 - a permanent refusal, see ``REJECTED_STATUSES``).
     """
     if not invite_code:
         return True
@@ -84,6 +106,8 @@ def notify_complete(
                     session_id,
                     resp.status_code,
                 )
+                if resp.status_code in REJECTED_STATUSES:
+                    return Rejected(resp.status_code)
                 return False
             return True
     except Exception as exc:

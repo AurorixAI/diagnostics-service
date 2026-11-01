@@ -259,3 +259,56 @@ def test_fallback_ends_the_test_quietly_when_the_bank_is_unreachable(caplog):
     with caplog.at_level(logging.WARNING, logger=ss.log.name):
         assert fallback_service(["S2"], {}, boom=True)._fallback_task(fresh_state(), "S1") is None
     assert "Fallback search failed" in caplog.text
+
+
+# ── R3 #1: five "not checked" in ten minutes = one ERROR line ─────────────────────────────────────────────────────────
+
+class FakeClock:
+    def __init__(self): self.t = 1000.0
+    def __call__(self): return self.t
+
+
+def test_burst_alert_fires_once_at_the_threshold_and_forgets_events_outside_the_window():
+    from src.core.burst_alert import BurstAlert
+    clock = FakeClock()
+    alert = BurstAlert(threshold=5, window_s=600, clock=clock)
+    assert [alert.hit() for _ in range(4)] == [0, 0, 0, 0]
+    assert alert.hit() == 5                                    # the 5th inside the window
+    assert [alert.hit() for _ in range(4)] == [0, 0, 0, 0]     # a new count starts: not every further event shouts
+    clock.t += 601                                             # the window passes: the 4 old events are forgotten
+    assert alert.hit() == 0
+    for _ in range(3):
+        clock.t += 10
+        assert alert.hit() == 0
+    clock.t += 10
+    assert alert.hit() == 5
+
+
+def test_a_slow_trickle_of_not_checked_answers_never_alerts():
+    from src.core.burst_alert import BurstAlert
+    clock = FakeClock()
+    alert = BurstAlert(threshold=5, window_s=600, clock=clock)
+    for _ in range(50):
+        clock.t += 200                                         # 3 per 10 minutes at most
+        assert alert.hit() == 0
+
+
+def test_evaluator_logs_one_error_after_five_not_checked_answers(monkeypatch, caplog):
+    from src.core.burst_alert import BurstAlert
+    clock = FakeClock()
+    monkeypatch.setattr(answer_evaluator, "NOT_CHECKED_ALERT", BurstAlert(threshold=5, window_s=600, clock=clock))
+    def busy(student, canonical, task_id=None): raise SandboxUnavailable("busy")
+    monkeypatch.setattr(answer_evaluator._SANDBOX, "equivalent", busy)
+    task = NS(id="T", correct_answer="2*x+2", sympy_solution=None, answer_type="expression", distractor_meta=[])
+    with caplog.at_level(logging.WARNING, logger=answer_evaluator.log.name):
+        for _ in range(7):
+            clock.t += 30
+            with pytest.raises(AnswerNotCheckedError):
+                AnswerEvaluator().evaluate(task, "2*(x+1)")
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1 and errors[0].startswith("diagnostic_answers_not_checked_burst count=5 ")
+    assert sum("answer_not_checked task_id=T" in r.getMessage() for r in caplog.records) == 7    # every answer still warns
+
+
+def test_the_sandbox_waits_longer_for_a_free_slot_than_the_class_default():
+    assert answer_evaluator._SANDBOX._queue_wait == 8.0 and SympySandbox()._queue_wait == 3.0

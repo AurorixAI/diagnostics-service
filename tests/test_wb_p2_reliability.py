@@ -406,20 +406,91 @@ def test_unique_migration_stops_with_a_clear_message_when_duplicates_exist_and_c
         drop()
 
 
-def test_backoff_migration_makes_rows_failed_by_the_old_worker_due_again():
+def test_backoff_migration_makes_young_rows_failed_by_the_old_worker_due_again_and_leaves_old_ones_final():
     engine, alembic, drop = _scratch_db()
     try:
         assert alembic("upgrade", "011_report_narrative_cache").returncode == 0
-        failed_id, synced_id = uuid.uuid4(), uuid.uuid4()
+        ids = {name: uuid.uuid4() for name in ("young", "old", "synced", "never_requested")}
+        spec = {"young": ("failed", "1 day"), "old": ("failed", "10 days"), "synced": ("synced", "1 day"),
+                "never_requested": ("failed", None)}
         with engine.begin() as conn:
-            for sid, status in ((failed_id, "failed"), (synced_id, "synced")):
-                conn.execute(text("INSERT INTO diag_sessions(id,student_id,grade_level,phase,invite_code,auth_sync_status,auth_sync_attempts)"
-                                  " VALUES (:i,:s,9,'completed',:c,:st,5)"), {"i": sid, "s": uuid.uuid4(), "c": f"C{sid.hex[:8]}", "st": status})
+            for name, (status, age) in spec.items():
+                requested = f"(NOW() AT TIME ZONE 'UTC') - INTERVAL '{age}'" if age else "NULL"
+                conn.execute(text(
+                    "INSERT INTO diag_sessions(id,student_id,grade_level,phase,invite_code,auth_sync_status,auth_sync_attempts,auth_sync_requested_at)"
+                    f" VALUES (:i,:s,9,'completed',:c,:st,5,{requested})"),
+                    {"i": ids[name], "s": uuid.uuid4(), "c": f"C{ids[name].hex[:8]}", "st": status})
         assert alembic("upgrade", "012_auth_sync_backoff").returncode == 0
         with engine.connect() as conn:
-            due = dict(conn.execute(text("SELECT id, auth_sync_next_attempt_at IS NOT NULL FROM diag_sessions")).all())
-            assert due == {failed_id: True, synced_id: False}
+            due = {name: conn.scalar(text("SELECT auth_sync_next_attempt_at IS NOT NULL FROM diag_sessions WHERE id=:i"), {"i": ids[name]})
+                   for name in ids}
+            assert due == {"young": True, "old": False, "synced": False, "never_requested": False}
             assert conn.scalar(text("SELECT max(auth_sync_requeues) FROM diag_sessions")) == 0
         assert alembic("downgrade", "011_report_narrative_cache").returncode == 0
     finally:
         drop()
+
+
+# ── R3 #7: a snapshot that is ahead of a lagging Redis is never an expired attempt ───────────────────────────────────
+
+def test_lagging_redis_with_a_snapshot_is_not_expired_and_the_repeat_is_answered(mid):
+    mid.start()
+    behind = mid.cache.load(str(mid.session_id))
+    first = answer(mid, "WB_A", "4")
+    mid.cache.save(behind)                                 # Redis is one answer behind the database
+    repeat = answer(mid, "WB_A", "4")
+    assert repeat.status_code == 200 and repeat.json() == first.json()
+    assert phase(mid) == "warmup"                          # NOT 'expired'
+    assert resume(mid).json()["current_task"]["task_id"] == "WB_B"
+    assert phase(mid) == "warmup"
+
+
+# ── R3 #10: only the uniqueness of the answer is "the state moved on" ────────────────────────────────────────────────
+
+def test_another_integrity_error_is_not_hidden_behind_out_of_sequence(mid, monkeypatch):
+    mid.start()
+    class Diag:  # what psycopg2 puts on ``exc.orig``
+        constraint_name = "diag_answers_session_id_fkey"
+    class Orig(Exception):
+        diag = Diag()
+    def broken(self, **_kwargs): raise IntegrityError("INSERT", {}, Orig("Synthetic FK violation"))
+    monkeypatch.setattr(sessions.DiagAnswerRepository, "log_answer", broken)
+    reply = answer(mid, "WB_A", "4")
+    assert reply.status_code == 500 and reply.json()["detail"]["code"] == "ANSWER_FAILED"     # a defect is visible
+    assert rows(mid) == [] and phase(mid) == "warmup"
+
+
+# ── R3 #11: two browser tabs of one student (real threads, real PostgreSQL) ──────────────────────────────────────────
+
+@pytest.mark.parametrize("redis_up", [True, False])
+@pytest.mark.parametrize("same_answer", [True, False])
+def test_two_tabs_answer_the_same_question_at_once(mid, monkeypatch, redis_up, same_answer):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    mid.start()
+    original = sessions.AnswerEvaluator.evaluate
+    def slow(self, task, value):
+        time.sleep(0.4)                                   # the first request holds its locks while the second arrives
+        return original(self, task, value)
+    monkeypatch.setattr(sessions.AnswerEvaluator, "evaluate", slow)
+    if not redis_up:
+        break_redis(mid)
+    values = ["4", "4" if same_answer else "5"]
+    def tab(index):
+        time.sleep(0.15 * index)
+        return answer(mid, "WB_A", values[index])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(tab, i) for i in range(2)]
+        replies = [f.result(timeout=30) for f in futures]          # no hang, no deadlock
+    codes = sorted(r.status_code for r in replies)
+    assert rows(mid) == [("WB_A", "4")]                            # exactly one row, whatever happened
+    if redis_up:
+        assert codes == [200, 409]                                 # the second tab: "still being processed"
+        assert replies[1].json()["detail"]["code"] == "ANSWER_IN_PROGRESS"
+    elif same_answer:
+        assert codes == [200, 200] and replies[0].json() == replies[1].json()      # waited on the row lock, got the stored result
+    else:
+        assert codes == [200, 409] and replies[1].json()["detail"]["code"] == "TASK_OUT_OF_SEQUENCE"
+    with mid.factory() as db:
+        assert db.get(DiagSession, mid.session_id).items_answered == 1

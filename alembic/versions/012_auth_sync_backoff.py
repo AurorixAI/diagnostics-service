@@ -6,8 +6,10 @@ Revises: 011_report_narrative_cache
 ``auth_sync_next_attempt_at`` is the earliest moment of the next attempt (retry pause of a ``pending`` row, hourly
 requeue of a ``failed`` one); ``auth_sync_requeues`` counts those requeues.  Both are cheap ADD COLUMNs.
 
-Rows that the old worker already gave up on (``failed`` after 5 attempts in a minute) are due again at once: they
-are exactly the results that never reached auth-service.
+Rows that the old worker already gave up on (``failed`` after 5 attempts in a minute) and that are YOUNGER THAN 7 DAYS
+are due again: they are the results that never reached auth-service.  Older ones stay ``failed`` with no date (final;
+``scripts/resync_auth_levels.py`` by hand): an old row whose invite was cancelled meanwhile would only collect a day of
+refusals, and a replay of an old result must not shout over a newer diagnostic of the same student.
 """
 from alembic import op
 import sqlalchemy as sa
@@ -27,7 +29,8 @@ def upgrade():
     )
     op.execute(
         "UPDATE diag_sessions SET auth_sync_next_attempt_at = NOW() AT TIME ZONE 'UTC' "
-        "WHERE auth_sync_status = 'failed' AND phase = 'completed'"
+        "WHERE auth_sync_status = 'failed' AND phase = 'completed' "
+        "AND auth_sync_requested_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'"
     )
 
 

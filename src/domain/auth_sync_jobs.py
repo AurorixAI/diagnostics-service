@@ -33,6 +33,9 @@ BACKOFF_SECONDS = (30, 60, 120, 300, 600, 1200, 2400, 4800, 9600)
 REQUEUE_EVERY = timedelta(hours=1)
 MAX_REQUEUES = 24
 STALE_SYNC_AFTER = timedelta(minutes=2)
+# A permanent refusal of auth-service (``auth_client.Rejected``) is not worth the whole ladder: after this many attempts
+# the row is final at once, with one ERROR line (no new column: ``auth_sync_attempts`` counts them).
+REJECTED_AFTER_ATTEMPTS = 3
 
 
 def _now() -> datetime:
@@ -81,6 +84,19 @@ def enqueue_auth_completion_sync(db: Session, session: DiagSession, *, commit: b
     session.auth_sync_error = None
     if commit:
         db.commit()
+
+
+def _after_rejected_attempt(session: DiagSession, status: int, now: datetime) -> None:
+    """auth-service said no for good (400/404/409/422): retry quickly twice, then stop and shout once."""
+    if session.auth_sync_attempts < REJECTED_AFTER_ATTEMPTS:
+        _after_failed_attempt(session, now)
+        return
+    session.auth_sync_status = "failed"
+    session.auth_sync_next_attempt_at = None
+    log.error(
+        "diagnostic_auth_sync_rejected session_id=%s status=%s attempts=%s",
+        session.id, status, session.auth_sync_attempts,
+    )
 
 
 def _claim_next_sync(db: Session) -> Optional[DiagSession]:
@@ -215,6 +231,9 @@ def process_next_auth_completion_sync() -> bool:
             fresh.auth_sync_completed_at = _now()
             fresh.auth_sync_next_attempt_at = None
             fresh.auth_sync_error = None
+        elif isinstance(delivered, auth_client.Rejected):
+            _after_rejected_attempt(fresh, delivered.status, _now())
+            fresh.auth_sync_error = f"Auth-service rejected the completion (HTTP {delivered.status})"
         else:
             _after_failed_attempt(fresh, _now())
             fresh.auth_sync_error = (
@@ -223,7 +242,7 @@ def process_next_auth_completion_sync() -> bool:
                 else "Auth-service is temporarily unavailable"
             )
         db.commit()
-        return delivered
+        return bool(delivered)
     except Exception as exc:
         db.rollback()
         log.error("diagnostic_auth_sync_failed session_id=%s error_type=%s", session_id, type(exc).__name__)
