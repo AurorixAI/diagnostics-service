@@ -70,6 +70,10 @@ class DiagSession(Base):
     auth_sync_started_at = Column(DateTime, nullable=True)
     auth_sync_completed_at = Column(DateTime, nullable=True)
     auth_sync_error = Column(Text, nullable=True)
+    # B-03: earliest moment of the next attempt (retry pause of a ``pending`` row, hourly requeue of a ``failed``
+    # one; NULL = due now / final failure) and how many hourly requeues a failed series has had.
+    auth_sync_next_attempt_at = Column(DateTime, nullable=True)
+    auth_sync_requeues = Column(Integer, nullable=False, default=0, server_default="0")
 
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -140,6 +144,9 @@ class DiagAnswer(Base):
     __table_args__ = (
         Index("idx_diag_answers_session", "session_id"),
         Index("idx_diag_answers_skill", "skill_id"),
+        # B-06: a task is answered once per attempt (the navigators never serve a used task again).  The index is
+        # the last barrier behind the session row lock: a repeated request cannot add a second row.
+        Index("uq_diag_answers_session_task", "session_id", "task_id", unique=True),
     )
 
 

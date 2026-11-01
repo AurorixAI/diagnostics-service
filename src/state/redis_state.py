@@ -18,9 +18,12 @@ import redis
 from src.core.config import get_settings
 from src.core.redis_client import get_redis_client
 from src.domain.session_state import SessionState
-from src.core.exceptions import AnswerInProgressError
+from src.core.exceptions import AnswerInProgressError, StateStoreUnavailableError
 
 log = logging.getLogger(__name__)
+
+# What "Redis is down" looks like: connection refused / reset / timeout / loading / failover.
+_UNAVAILABLE = (redis.RedisError, OSError)
 
 
 class RedisStateManager:
@@ -47,18 +50,29 @@ class RedisStateManager:
             raise
 
     def load(self, session_id: str) -> Optional[SessionState]:
-        """Load and deserialize SessionState. Returns None if expired/missing."""
+        """Load and deserialize SessionState.
+
+        ``None`` = there is nothing usable under the key (missing, evicted, unreadable).  Redis being unreachable
+        is a different fact and raises ``StateStoreUnavailableError`` (B-05): "the cache is down" must never read
+        as "the attempt is gone".  The caller falls back to the database snapshot.
+        """
         try:
             raw = self._redis.get(self._key(session_id))
-            if raw is None:
-                return None
-            data = json.loads(raw)
-            # Refresh TTL on every access
-            self._redis.expire(self._key(session_id), self._ttl)
-            return SessionState.from_dict(data)
-        except Exception as exc:
-            log.error("Redis load failed for session %s: %s", session_id, exc)
+        except _UNAVAILABLE as exc:
+            log.warning("Redis unavailable while loading session %s: %s", session_id, type(exc).__name__)
+            raise StateStoreUnavailableError(session_id) from exc
+        if raw is None:
             return None
+        try:
+            state = SessionState.from_dict(json.loads(raw))
+        except Exception as exc:
+            log.error("Redis state of session %s is unreadable: %s", session_id, type(exc).__name__)
+            return None
+        try:
+            self._redis.expire(self._key(session_id), self._ttl)   # refresh TTL on every access
+        except _UNAVAILABLE as exc:
+            log.warning("Redis TTL refresh failed for session %s: %s", session_id, type(exc).__name__)
+        return state
 
     def delete(self, session_id: str) -> None:
         """Remove session from Redis on completion."""
@@ -82,7 +96,16 @@ class RedisStateManager:
         )
         acquired = False
         try:
-            acquired = bool(lock.acquire(blocking=False))
+            try:
+                acquired = bool(lock.acquire(blocking=False))
+            except _UNAVAILABLE as exc:
+                # B-05: the lock is an optimisation.  The final serialisation barrier is the row lock of the
+                # session in PostgreSQL (FOR UPDATE in ``_submit_answer_locked``), so a Redis blip must not stop
+                # the student: go on without it.
+                log.warning("Redis answer lock unavailable for %s: %s; relying on the database row lock",
+                            session_id, type(exc).__name__)
+                yield
+                return
             if not acquired:
                 raise AnswerInProgressError(session_id)
             yield

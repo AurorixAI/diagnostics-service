@@ -829,11 +829,11 @@ def answering_service(state, seen):
     """Service whose collaborators are stubbed just enough to run _submit_answer_locked up to the
     early-stop decision; ``seen`` records the frozen params at the moment of the critical-probe preview."""
     service = object.__new__(SessionService)
-    service.session_repo = NS(get_fresh=lambda sid, for_update=False: None)
+    service.session_repo = NS(get_fresh=lambda sid, for_update=False: NS(id=sid, phase="warmup", state_snapshot=None))
     service.get_completed_answer_result = lambda sid, task_id, answer: None
-    service.redis = NS(load=lambda sid: state)
+    service._load_state = lambda row: state                              # B-05: database snapshot / Redis cache
     service.evaluator = NS(evaluate=lambda task, answer: (1.0, "correct"))
-    service.answer_repo = NS(log_answer=lambda **kw: None)
+    service.answer_repo = NS(log_answer=lambda **kw: None, get_by_task=lambda sid, task_id: None)
     real_preview = service._has_pending_critical_probe
 
     def preview(st, correct):

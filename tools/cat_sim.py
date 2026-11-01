@@ -183,6 +183,7 @@ def bootstrap(content_db_url: str, truth_db_url: Optional[str], content_dir: Pat
         def log_answer(self, **kw):
             a = DiagAnswer(**kw); self.rows.append(a); return a
         def get_last_answer(self, sid): return self.rows[-1] if self.rows else None
+        def get_by_task(self, sid, task_id): return next((a for a in self.rows if a.task_id == task_id), None)
 
     noop = lambda *a, **k: None
     ss.enqueue_report_generation = noop

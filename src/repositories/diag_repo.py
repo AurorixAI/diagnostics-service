@@ -98,6 +98,12 @@ class DiagAnswerRepository(BaseRepository[DiagAnswer]):
             .limit(1)
         )
 
+    def get_by_task(self, session_id: uuid.UUID, task_id: str) -> Optional[DiagAnswer]:
+        """The answer given to this task in this attempt (at most one: UNIQUE (session_id, task_id))."""
+        return self.session.scalar(
+            select(DiagAnswer).where(DiagAnswer.session_id == session_id, DiagAnswer.task_id == task_id)
+        )
+
     def get_session_answers(self, session_id: uuid.UUID) -> List[DiagAnswer]:
         return list(
             self.session.scalars(

@@ -52,11 +52,18 @@ def _session_start_of(service, invite_code: str):
     return session.created_at if session else None
 
 
+_EXPIRED_MESSAGE = "Эту попытку нельзя продолжить: её данные потеряны. Обратитесь в учебный центр: вам выдадут новую ссылку."
+
+
 def _answer_error(exc: DiagnosticError) -> HTTPException:
     messages = {
         "ANSWER_IN_PROGRESS": (409, "Ответ ещё обрабатывается. Проверяем состояние попытки.", "check_session"),
         "TASK_OUT_OF_SEQUENCE": (409, "Состояние попытки изменилось. Восстановите текущий вопрос или результат.", "check_session"),
-        "SESSION_EXPIRED": (410, "Состояние диагностики больше недоступно. Обратитесь к учебному центру.", "contact_center"),
+        "SESSION_EXPIRED": (410, _EXPIRED_MESSAGE, "contact_center"),
+        # Redis is down: nothing is lost (answers are in the database), the request just has to be repeated.
+        "STATE_UNAVAILABLE": (503, "Сервис временно не отвечает. Ваши ответы сохранены. Подождите минуту и повторите.", "retry"),
+        # The symbolic checker is busy/down: the answer was neither saved nor counted as wrong.
+        "ANSWER_NOT_CHECKED": (503, "Не удалось проверить ответ: проверка сейчас занята. Ответ не засчитан как неверный. Отправьте его ещё раз.", "retry"),
         "SESSION_NOT_FOUND": (404, "Сессия диагностики не найдена.", "contact_center"),
         "SESSION_ALREADY_STARTED": (409, "Попытка по этому приглашению уже начата. Восстановите её состояние.", "check_session"),
         "GRADE_NOT_CONFIGURED": (422, "Для этого класса пока не настроена диагностика. Обратитесь к учебному центру.", "contact_center"),
@@ -143,6 +150,8 @@ async def get_active_session(
             current_task=current_task,
             total_time_ms=total_time_ms,
         )
+    except DiagnosticError as exc:
+        raise _answer_error(exc)
     except HTTPException as exc:
         ticket.record(exc)
         raise
@@ -243,7 +252,7 @@ async def resolve_session(
                     session_id=session.id, status="completed", items_answered=session.items_answered,
                     total_time_ms=service.answer_repo.get_total_time_ms(session.id),
                 )
-            raise invite_error(410, "SESSION_EXPIRED", "Состояние попытки больше недоступно. Обратитесь к учебному центру.", "contact_center")
+            raise invite_error(410, "SESSION_EXPIRED", _EXPIRED_MESSAGE, "contact_center")
         session_id, items_answered, current_task, total_time_ms = active
         return ResolvedSessionResponse(
             session_id=session_id, status="active", items_answered=items_answered,

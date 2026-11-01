@@ -24,6 +24,9 @@ BANK = {
 }
 
 
+BANK['t-ok-b'] = NS(**{**vars(BANK['t-ok']), 'id': 't-ok-b'})   # B-06: one answer per (session, task) - the 2nd legacy row is another task
+
+
 class Repo:
     def __init__(self, bank=BANK, broken=()):
         self.bank, self.broken, self.calls = bank, set(broken), []
@@ -66,12 +69,12 @@ def db(engine):
 
 
 def seed(engine):
-    """3 legacy rows (known task x2, missing task) + 1 row that already has a snapshot."""
+    """3 legacy rows (two known tasks, missing task) + 1 row that already has a snapshot."""
     sid = uuid.uuid4()
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO diag_sessions(id,student_id,grade_level,phase) VALUES (:i,:s,7,'completed')"),
                      {'i': sid, 's': uuid.uuid4()})
-        for task_id, snap in (('t-ok', None), ('t-ok', None), ('t-gone', None), ('t-ok', '{"keep":"me"}')):
+        for task_id, snap in (('t-ok', None), ('t-ok-b', None), ('t-gone', None), ('t-keep', '{"keep":"me"}')):
             conn.execute(text(
                 "INSERT INTO diag_answers(id,session_id,task_id,skill_id,topic_id,student_answer,outcome,task_snapshot) "
                 "VALUES (:i,:s,:t,'k','p','1',0,CAST(:snap AS jsonb))"),
@@ -105,10 +108,10 @@ def test_execute_fills_rerun_is_noop_and_missing_stays_null(engine, db):
         snap = row.task_snapshot
         assert snap['provenance'] == 'legacy_bank_backfill' and snap['backfill_source'] == bf.BACKFILL_SOURCE
         assert snap['backfilled_at']
-        payload = read_task(snap, 't-ok')                                  # hash + envelope validate
+        payload = read_task(snap, row.task_id)                                  # hash + envelope validate
         assert payload['correct_answer'] == '2' and sorted(payload['display_options']) == ['1', '2']
         # same deterministic shuffle the live service would use for this session/task
-        options, _ = bf.build_diag_answer_options(BANK['t-ok'], seed=f'{sid}:t-ok')
+        options, _ = bf.build_diag_answer_options(BANK[row.task_id], seed=f'{sid}:{row.task_id}')
         assert payload['display_options'] == options
     with engine.connect() as conn:
         before = conn.execute(text('SELECT id, task_snapshot FROM diag_answers ORDER BY id')).all()
@@ -120,7 +123,7 @@ def test_execute_fills_rerun_is_noop_and_missing_stays_null(engine, db):
 
 def test_unreachable_content_service_leaves_null_and_is_counted(engine, db):
     seed(engine)
-    stats = bf.run(db, Repo(broken={'t-ok'}), execute=True)
+    stats = bf.run(db, Repo(broken={'t-ok', 't-ok-b'}), execute=True)
     assert stats['fetch_errors'] == 2 and stats['filled'] == 0 and stats['missing_task'] == 1
     assert null_count(engine) == 3
 
@@ -129,5 +132,5 @@ def test_task_is_fetched_once_per_run_and_limit_is_respected(engine, db):
     seed(engine)
     repo = Repo()
     bf.run(db, repo, execute=False)
-    assert sorted(repo.calls) == ['t-gone', 't-ok']
+    assert sorted(repo.calls) == ['t-gone', 't-ok', 't-ok-b']   # each task once per run
     assert bf.run(db, Repo(), execute=False, limit=1)['examined'] == 1

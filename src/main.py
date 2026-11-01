@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
-from src.core.config import get_settings
+from src.core.config import get_settings, require_internal_service_token
 from src.core.middleware import RequestIDMiddleware, configure_logging
 from src.core.validation import validation_exception_handler
 from src.api.router import router as diagnostic_router
@@ -38,6 +38,8 @@ async def lifespan(app: FastAPI):
     )
     from src.core.gemini_client import warn_if_switch_unrecognised
 
+    # S-01: stop here, before anything is migrated or started, instead of losing results quietly later.
+    require_internal_service_token()
     warn_if_switch_unrecognised()  # an unknown REPORT_NARRATIVE_ENABLED value keeps paid calls ON: say so at start
     # Every database session must run in UTC (ROADMAP #49): raise here, before anything is migrated or written,
     # instead of storing shifted timestamps.  (migration_runner makes the same check before the workers start.)

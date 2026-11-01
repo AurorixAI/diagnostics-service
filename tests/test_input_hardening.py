@@ -670,16 +670,18 @@ def test_sandbox_works_when_the_process_has_descriptors_above_1024():
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 
 
-def test_sandbox_busy_or_unstartable_means_not_equal(monkeypatch, caplog):
+def test_sandbox_busy_or_unstartable_means_not_checked(monkeypatch, caplog):
+    """B-09: a busy or broken sandbox did not compare anything - it must not answer "not equal"."""
+    from src.domain.sympy_sandbox import SandboxUnavailable
     sandbox = SympySandbox(queue_wait=0.05)
     sandbox._slots.get()                                         # every slot is taken
-    with caplog.at_level(logging.WARNING):
-        assert sandbox.equivalent("x", "x", "T2") is False
+    with caplog.at_level(logging.WARNING), pytest.raises(SandboxUnavailable):
+        sandbox.equivalent("x", "x", "T2")
     assert "sympy_sandbox_busy task_id=T2" in caplog.text
     broken = SympySandbox()
     monkeypatch.setattr("src.domain.sympy_sandbox._WORKER_MODULE", "src.domain.no_such_worker")
-    with caplog.at_level(logging.WARNING):
-        assert broken.equivalent("x", "x", "T3") is False
+    with caplog.at_level(logging.WARNING), pytest.raises(SandboxUnavailable):
+        broken.equivalent("x", "x", "T3")
     assert "sympy_sandbox_failed task_id=T3" in caplog.text
     broken.close()
 

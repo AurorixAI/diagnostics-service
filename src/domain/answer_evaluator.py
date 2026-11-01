@@ -42,8 +42,9 @@ from sympy.parsing.sympy_parser import (
     implicit_multiplication_application,
 )
 
+from src.core.exceptions import AnswerNotCheckedError
 from .answer_value import MAX_ANSWER_CHARS, answer_value_key
-from .sympy_sandbox import SympySandbox
+from .sympy_sandbox import SandboxUnavailable, SympySandbox
 
 log = logging.getLogger(__name__)
 
@@ -335,7 +336,8 @@ def _sympy_equivalent_untrusted(student_expr: str, canonical_expr: str, task_id=
 
     The syntax is checked here (cheap).  SymPy itself - ``parse_expr`` evaluates the expression, ``simplify``
     can take minutes on ``(a+1)*(b+1)*…`` and a huge ``int ** int`` does not even release the GIL - runs in a
-    separate process that is killed after ~1 s.  Anything refused, too slow or crashed is "not equal".
+    separate process that is killed after ~1 s.  Anything refused or too slow is "not equal"; a sandbox that is busy
+    or down raises ``SandboxUnavailable`` (B-09): the comparison was not made, so nothing may be said about the answer.
     """
     try:
         if len(student_expr.strip()) > _MAX_SYMPY_ANSWER_CHARS:
@@ -369,6 +371,12 @@ class AnswerEvaluator:
         """
         try:
             return self._evaluate(task, student_answer)
+        except SandboxUnavailable as exc:
+            # B-09: "not checked" is not "wrong".  The caller does not record or score this answer; the student
+            # sends it again (the same task is still the current one).
+            task_id = getattr(task, "id", None) or getattr(task, "task_id", None)
+            log.warning("answer_not_checked task_id=%s reason=%s", task_id, exc)
+            raise AnswerNotCheckedError(str(task_id)) from exc
         except Exception as exc:
             frame = traceback.extract_tb(exc.__traceback__)[-1]
             log.warning(
