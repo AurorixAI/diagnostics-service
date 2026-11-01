@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from src.core import auth_client
@@ -21,8 +22,52 @@ from src.models.diag_models import DiagAnswer, DiagSession
 
 log = logging.getLogger(__name__)
 
-MAX_SYNC_ATTEMPTS = 5
+# B-03: an auth-service restart / deploy takes a minute or two, an incident can take hours.  The first series
+# is MAX_SYNC_ATTEMPTS attempts with a growing pause (BACKOFF_SECONDS[n-1] after the n-th failed attempt: 30 s ...
+# 2 h 40 min, 5 h 18 min in all).  A series that fails is not the end: the row stays ``failed`` and is queued again
+# every REQUEUE_EVERY, MAX_REQUEUES times (one more day); only then the failure is final and logged at ERROR level
+# (the line "diagnostic_auth_sync_permanently_failed" is the alert).  Everything lives in the row, so a restart
+# of the service loses nothing.
+MAX_SYNC_ATTEMPTS = 10
+BACKOFF_SECONDS = (30, 60, 120, 300, 600, 1200, 2400, 4800, 9600)
+REQUEUE_EVERY = timedelta(hours=1)
+MAX_REQUEUES = 24
 STALE_SYNC_AFTER = timedelta(minutes=2)
+# A permanent refusal of auth-service (``auth_client.Rejected``) is not worth the whole ladder: after this many attempts
+# the row is final at once, with one ERROR line (no new column: ``auth_sync_attempts`` counts them).
+REJECTED_AFTER_ATTEMPTS = 3
+
+
+def _now() -> datetime:
+    """The one clock of this module (tests replace it; LESSONS 76/82)."""
+    return datetime.now(timezone.utc)
+
+
+def backoff_after(attempt: int) -> timedelta:
+    """Pause before the next attempt of the first series, after the ``attempt``-th failed one (1-based)."""
+    index = min(max(attempt, 1), len(BACKOFF_SECONDS)) - 1
+    return timedelta(seconds=BACKOFF_SECONDS[index])
+
+
+def _after_failed_attempt(session: DiagSession, now: datetime) -> None:
+    """Move a row whose attempt failed (or was abandoned) to its next state: retry later, requeue later, or give up."""
+    if session.auth_sync_attempts < MAX_SYNC_ATTEMPTS:
+        session.auth_sync_status = "pending"
+        session.auth_sync_next_attempt_at = now + backoff_after(session.auth_sync_attempts)
+        return
+    session.auth_sync_status = "failed"
+    if (session.auth_sync_requeues or 0) >= MAX_REQUEUES:
+        session.auth_sync_next_attempt_at = None
+        log.error(
+            "diagnostic_auth_sync_permanently_failed session_id=%s attempts=%s requeues=%s",
+            session.id, session.auth_sync_attempts, session.auth_sync_requeues,
+        )
+    else:
+        session.auth_sync_next_attempt_at = now + REQUEUE_EVERY
+        log.warning(
+            "diagnostic_auth_sync_failed_requeued session_id=%s attempts=%s requeues=%s",
+            session.id, session.auth_sync_attempts, session.auth_sync_requeues,
+        )
 
 
 def enqueue_auth_completion_sync(db: Session, session: DiagSession, *, commit: bool = True) -> None:
@@ -31,7 +76,9 @@ def enqueue_auth_completion_sync(db: Session, session: DiagSession, *, commit: b
         return
     session.auth_sync_status = "pending"
     session.auth_sync_attempts = 0
-    session.auth_sync_requested_at = datetime.now(timezone.utc)
+    session.auth_sync_requeues = 0
+    session.auth_sync_next_attempt_at = None
+    session.auth_sync_requested_at = _now()
     session.auth_sync_started_at = None
     session.auth_sync_completed_at = None
     session.auth_sync_error = None
@@ -39,15 +86,43 @@ def enqueue_auth_completion_sync(db: Session, session: DiagSession, *, commit: b
         db.commit()
 
 
+def _after_rejected_attempt(session: DiagSession, status: int, now: datetime) -> None:
+    """auth-service said no for good (400/404/409/422): retry quickly twice, then stop and shout once."""
+    if session.auth_sync_attempts < REJECTED_AFTER_ATTEMPTS:
+        _after_failed_attempt(session, now)
+        return
+    session.auth_sync_status = "failed"
+    session.auth_sync_next_attempt_at = None
+    log.error(
+        "diagnostic_auth_sync_rejected session_id=%s status=%s attempts=%s",
+        session.id, status, session.auth_sync_attempts,
+    )
+
+
 def _claim_next_sync(db: Session) -> Optional[DiagSession]:
+    now = _now()
     session = (
         db.query(DiagSession)
         .filter(
             DiagSession.phase == "completed",
             DiagSession.invite_code.isnot(None),
-            DiagSession.auth_sync_status == "pending",
             DiagSession.auth_sync_requested_at.isnot(None),
-            DiagSession.auth_sync_attempts < MAX_SYNC_ATTEMPTS,
+            or_(
+                # a new row, or one whose pause has passed ...
+                and_(
+                    DiagSession.auth_sync_status == "pending",
+                    or_(
+                        DiagSession.auth_sync_next_attempt_at.is_(None),
+                        DiagSession.auth_sync_next_attempt_at <= now,
+                    ),
+                ),
+                # ... and a failed series that is due for its hourly requeue (no date = final failure)
+                and_(
+                    DiagSession.auth_sync_status == "failed",
+                    DiagSession.auth_sync_next_attempt_at.isnot(None),
+                    DiagSession.auth_sync_next_attempt_at <= now,
+                ),
+            ),
         )
         .order_by(DiagSession.auth_sync_requested_at, DiagSession.created_at)
         .with_for_update(skip_locked=True)
@@ -55,9 +130,12 @@ def _claim_next_sync(db: Session) -> Optional[DiagSession]:
     )
     if not session:
         return None
+    if session.auth_sync_status == "failed":
+        session.auth_sync_requeues = (session.auth_sync_requeues or 0) + 1
     session.auth_sync_status = "syncing"
     session.auth_sync_attempts += 1
-    session.auth_sync_started_at = datetime.now(timezone.utc)
+    session.auth_sync_next_attempt_at = None
+    session.auth_sync_started_at = now
     session.auth_sync_error = None
     db.commit()
     return session
@@ -91,6 +169,7 @@ def _completion_payload(db: Session, session: DiagSession) -> dict:
 
 def recover_stale_auth_sync_jobs(db: Session) -> int:
     """Recover abandoned HTTP callbacks without stealing a recent claim."""
+    now = _now()
     stale = (
         db.query(DiagSession)
         .filter(
@@ -98,13 +177,13 @@ def recover_stale_auth_sync_jobs(db: Session) -> int:
             DiagSession.auth_sync_status == "syncing",
             DiagSession.auth_sync_requested_at.isnot(None),
             DiagSession.auth_sync_started_at.isnot(None),
-            DiagSession.auth_sync_started_at < datetime.now(timezone.utc) - STALE_SYNC_AFTER,
+            DiagSession.auth_sync_started_at < now - STALE_SYNC_AFTER,
         )
         .with_for_update(skip_locked=True)
         .all()
     )
     for session in stale:
-        session.auth_sync_status = "failed" if session.auth_sync_attempts >= MAX_SYNC_ATTEMPTS else "pending"
+        _after_failed_attempt(session, now)
         session.auth_sync_error = "Previous completion callback was interrupted"
         log.warning("diagnostic_auth_sync_recovered session_id=%s status=%s attempts=%s",
                     session.id, session.auth_sync_status, session.auth_sync_attempts)
@@ -149,16 +228,21 @@ def process_next_auth_completion_sync() -> bool:
             return False
         if delivered:
             fresh.auth_sync_status = "synced"
-            fresh.auth_sync_completed_at = datetime.now(timezone.utc)
+            fresh.auth_sync_completed_at = _now()
+            fresh.auth_sync_next_attempt_at = None
             fresh.auth_sync_error = None
-        elif fresh.auth_sync_attempts >= MAX_SYNC_ATTEMPTS:
-            fresh.auth_sync_status = "failed"
-            fresh.auth_sync_error = "Auth-service did not confirm diagnostic completion"
+        elif isinstance(delivered, auth_client.Rejected):
+            _after_rejected_attempt(fresh, delivered.status, _now())
+            fresh.auth_sync_error = f"Auth-service rejected the completion (HTTP {delivered.status})"
         else:
-            fresh.auth_sync_status = "pending"
-            fresh.auth_sync_error = "Auth-service is temporarily unavailable"
+            _after_failed_attempt(fresh, _now())
+            fresh.auth_sync_error = (
+                "Auth-service did not confirm diagnostic completion"
+                if fresh.auth_sync_status == "failed"
+                else "Auth-service is temporarily unavailable"
+            )
         db.commit()
-        return delivered
+        return bool(delivered)
     except Exception as exc:
         db.rollback()
         log.error("diagnostic_auth_sync_failed session_id=%s error_type=%s", session_id, type(exc).__name__)
@@ -172,10 +256,7 @@ def process_next_auth_completion_sync() -> bool:
                     .first()
                 )
                 if fresh and _owns_claim(fresh, claim_attempt, claim_started_at):
-                    if fresh.auth_sync_attempts >= MAX_SYNC_ATTEMPTS:
-                        fresh.auth_sync_status = "failed"
-                    else:
-                        fresh.auth_sync_status = "pending"
+                    _after_failed_attempt(fresh, _now())
                     fresh.auth_sync_error = "Completion callback failed: " + type(exc).__name__
                     repair_db.commit()
             except Exception:

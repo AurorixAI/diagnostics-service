@@ -4,7 +4,7 @@
 
 - **Port**: 8002
 - **DB**: `algo_diagnostic` (PostgreSQL 15)
-- **Cache**: Redis (CAT-сессии, TTL 2ч)
+- **Cache**: Redis (кэш состояния CAT-сессии, TTL 2ч; истина — `diag_sessions.state_snapshot` в PostgreSQL, пишется вместе с каждым ответом)
 - **Framework**: FastAPI + SQLAlchemy ORM + Alembic
 - **Main file**: `src/main.py`
 

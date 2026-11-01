@@ -38,6 +38,12 @@ class _Timeout(Exception):
     pass
 
 
+class SandboxUnavailable(Exception):
+    """The comparison could not be made at all: every slot busy for ``queue_wait`` seconds, a worker that cannot
+    start, or one that died.  This is a fact about the service, not about the student's answer, so it must never
+    read as "not equal" (B-09).  A comparison that RAN and timed out is still "not equal"."""
+
+
 class _WorkerGone(Exception):
     pass
 
@@ -110,8 +116,9 @@ class _Worker:
 class SympySandbox:
     """At most ``workers`` comparisons at a time, each on its own worker process, started lazily and reused.
 
-    A caller waits up to ``queue_wait`` seconds for a free slot, then the answer is "not equal" (logged).  A
-    worker is replaced after ``jobs_per_worker`` requests (SymPy caches grow) and whenever it timed out or died.
+    A caller waits up to ``queue_wait`` seconds for a free slot, then ``SandboxUnavailable`` is raised (logged);
+    the same for a worker that cannot start or dies.  A comparison that ran longer than ``timeout`` is "not
+    equal".  A worker is replaced after ``jobs_per_worker`` requests (SymPy caches grow) and whenever it timed out or died.
     """
 
     def __init__(self, *, workers: int = 1, timeout: float = 1.0, queue_wait: float = 3.0,
@@ -135,20 +142,25 @@ class SympySandbox:
             self._slots.get(timeout=self._queue_wait)
         except queue.Empty:
             log.warning("sympy_sandbox_busy task_id=%s answer_len=%s", task_id, len(student))
-            return False
+            raise SandboxUnavailable("busy") from None
         worker: Optional[_Worker] = None
         try:
-            worker = self._take()
-            result = worker.ask(student, canonical, self._timeout)
-        except _Timeout:
-            log.warning("sympy_timeout task_id=%s answer_len=%s limit_s=%s", task_id, len(student), self._timeout)
-            self._replace(worker)
-            return False
-        except Exception as exc:               # a worker that cannot start or died: the comparison is not made
-            log.warning("sympy_sandbox_failed task_id=%s error_type=%s", task_id, type(exc).__name__)
-            self._replace(worker)
-            return False
-        else:
+            try:
+                worker = self._take()
+            except Exception as exc:           # a worker that cannot start: the comparison is not made
+                log.warning("sympy_sandbox_failed task_id=%s error_type=%s", task_id, type(exc).__name__)
+                self._replace(None)
+                raise SandboxUnavailable("cannot start") from exc
+            try:
+                result = worker.ask(student, canonical, self._timeout)
+            except _Timeout:                   # it ran and was too slow: a property of this answer
+                log.warning("sympy_timeout task_id=%s answer_len=%s limit_s=%s", task_id, len(student), self._timeout)
+                self._replace(worker)
+                return False
+            except Exception as exc:           # the worker died while asking: the comparison is not made
+                log.warning("sympy_sandbox_failed task_id=%s error_type=%s", task_id, type(exc).__name__)
+                self._replace(worker)
+                raise SandboxUnavailable("worker died") from exc
             self._release(worker)
             return result
         finally:

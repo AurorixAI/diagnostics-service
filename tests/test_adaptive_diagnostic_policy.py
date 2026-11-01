@@ -125,8 +125,9 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
 
         self.assertEqual(persisted, [])
 
-    def test_redis_initialisation_failure_releases_one_time_invite(self) -> None:
-        """A session without resumable state must not strand an invite."""
+    def test_redis_initialisation_failure_keeps_the_session_resumable(self) -> None:
+        """B-05: the state is committed with the row (``state_snapshot``), so a Redis blip at the start neither
+        fails the request nor strands the invite: the first read rebuilds the cache from the snapshot."""
         service = object.__new__(SessionService)
         persisted = []
         deleted = []
@@ -147,15 +148,17 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
         service._build_topic_grid = lambda state: state.section_ids.append("l1-a")
         service._pick_warmup_task = lambda _state: SimpleNamespace(id="first-task")
 
-        with self.assertRaisesRegex(RuntimeError, "redis unavailable"):
-            service.create_session(
+        with patch("src.domain.session_service.auth_client.notify_start"):
+            session_id, first_task = service.create_session(
                 student_id="student-1",
                 grade_level=10,
                 invite_code="ONE-TIME-CODE",
             )
 
+        self.assertEqual(first_task.id, "first-task")
         self.assertEqual(len(persisted), 1)
-        self.assertEqual(deleted, persisted)
+        self.assertEqual(deleted, [])
+        self.assertEqual(persisted[0].state_snapshot["section_ids"], ["l1-a"])
 
     def test_task_pool_exhaustion_never_reuses_an_answered_task(self) -> None:
         class EmptyTaskRepo:

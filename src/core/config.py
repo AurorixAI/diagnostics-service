@@ -142,3 +142,17 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def require_internal_service_token(settings: "Settings | None" = None) -> None:
+    """S-01: the service does not start without the shared secret.
+
+    An empty ``INTERNAL_SERVICE_TOKEN`` used to fail silently: every callback to auth-service and every call to
+    content-service was refused or skipped, and the only symptom was results that never arrived.
+    """
+    token = (settings or get_settings()).internal_service_token
+    if not token or not token.strip():
+        raise RuntimeError(
+            "INTERNAL_SERVICE_TOKEN is empty. diagnostic-service cannot talk to auth-service or content-service "
+            "without it: set the same non-empty value as in auth-service (see docker-compose, .env.example)."
+        )

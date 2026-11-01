@@ -299,26 +299,48 @@ def test_final_answer_snapshot_and_jobs_are_atomic(scenario, monkeypatch, job):
     assert_single_completion(factory)
 
 
-@pytest.mark.parametrize("attempts,expected", [(1, "synced"), (5, "failed")])
-def test_abandoned_completion_callback_is_recovered_after_restart(scenario, monkeypatch, attempts, expected):
+T0 = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)      # fixed clock (LESSONS 76/82): no test reads the real time
+
+
+class Clock:
+    def __init__(self): self.now = T0
+    def __call__(self): return self.now
+    def advance(self, **kwargs): self.now += timedelta(**kwargs)
+
+
+@pytest.mark.parametrize("attempts,expected,wait", [
+    (1, "synced", {"seconds": 31}),            # first series: pause 30 s after the interrupted attempt, then delivered
+    (10, "synced", {"hours": 1, "seconds": 1}),   # series used up: hourly requeue (B-03), then delivered
+])
+def test_abandoned_completion_callback_is_recovered_after_restart(scenario, monkeypatch, attempts, expected, wait):
     client, session_id, _invite, factory, _redis = scenario
     assert submit(client, session_id).status_code == 200
+    clock = Clock()
+    monkeypatch.setattr(sync_jobs, "_now", clock)
     with factory() as db:
         session = db.get(DiagSession, session_id)
         session.auth_sync_status = "syncing"
         session.auth_sync_attempts = attempts
-        session.auth_sync_started_at = datetime.now(timezone.utc)-timedelta(minutes=3)
+        session.auth_sync_started_at = T0 - timedelta(minutes=3)
         db.commit()
     delivered = []
     monkeypatch.setattr(sync_jobs, "SessionLocal", factory)
     monkeypatch.setattr(sync_jobs.auth_client, "notify_complete", lambda *args: delivered.append(args) or True)
-    assert sync_jobs.process_next_auth_completion_sync() is (expected == "synced")
+    # the "restart": a fresh worker call finds the abandoned claim, returns it to the queue, but the pause is not over
+    assert sync_jobs.process_next_auth_completion_sync() is False
+    assert delivered == []
+    with factory() as db:
+        session = db.get(DiagSession, session_id)
+        assert session.auth_sync_status == ("pending" if attempts < 10 else "failed")
+        assert session.auth_sync_next_attempt_at is not None
+    clock.advance(**wait)
+    assert sync_jobs.process_next_auth_completion_sync() is True
     with factory() as db:
         session = db.get(DiagSession, session_id)
         assert session.auth_sync_status == expected
-        assert session.auth_sync_attempts == (2 if expected == "synced" else 5)
+        assert session.auth_sync_attempts == attempts + 1
         assert db.query(DiagAnswer).count() == db.query(DiagReport).count() == 1
-    assert len(delivered) == (1 if expected == "synced" else 0)
+    assert len(delivered) == 1
 
 
 def test_recent_completion_callback_claim_is_not_stolen(scenario, monkeypatch):

@@ -6,7 +6,7 @@ import subprocess
 
 from sqlalchemy import create_engine, text
 
-from src.core.config import get_settings
+from src.core.config import get_settings, require_internal_service_token
 from src.core.db_timezone import utc_connect_args, verify_database_timezone
 
 
@@ -21,6 +21,7 @@ def main() -> None:
     creating an index or adding a column.  The lock connection stays open
     until the child Alembic process has finished its transaction.
     """
+    require_internal_service_token()   # S-01: the container stops before it touches the schema
     url = get_settings().database_url
     engine = create_engine(url, pool_pre_ping=True, connect_args=utc_connect_args(url))
     # The container starts this runner before any Uvicorn worker: a non-UTC session stops the start here (ROADMAP #49).

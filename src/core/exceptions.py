@@ -14,9 +14,29 @@ class SessionNotFoundError(DiagnosticError):
 
 
 class SessionExpiredError(DiagnosticError):
+    """The attempt's state exists nowhere (neither Redis nor the database snapshot): the attempt is marked ``expired``."""
+
     def __init__(self, session_id: str):
         super().__init__(
-            f"Session {session_id} expired or not in Redis", "SESSION_EXPIRED"
+            f"Session {session_id} expired: its state is in neither Redis nor the database", "SESSION_EXPIRED"
+        )
+
+
+class StateStoreUnavailableError(DiagnosticError):
+    """Redis is down right now.  NOT an expired attempt: nothing is lost, the request can simply be repeated."""
+
+    def __init__(self, session_id: str = ""):
+        super().__init__(
+            f"State store is temporarily unavailable (session {session_id})", "STATE_UNAVAILABLE"
+        )
+
+
+class AnswerNotCheckedError(DiagnosticError):
+    """The answer could not be checked (SymPy sandbox busy or down).  It is NOT recorded and NOT counted as wrong."""
+
+    def __init__(self, task_id: str = ""):
+        super().__init__(
+            f"Answer to task {task_id} was not checked: the symbolic checker is unavailable", "ANSWER_NOT_CHECKED"
         )
 
 

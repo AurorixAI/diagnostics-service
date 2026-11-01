@@ -34,7 +34,9 @@ from src.core.exceptions import (
     NoTasksAvailableError,
     SessionExpiredError,
     SessionNotFoundError,
+    AnswerNotCheckedError,
     SessionAlreadyStartedError,
+    StateStoreUnavailableError,
     TaskOutOfSequenceError,
 )
 from src.domain.auth_sync_jobs import enqueue_auth_completion_sync, process_next_auth_completion_sync
@@ -60,7 +62,7 @@ from src.domain.task_display import (
 from src.domain.answer_evaluator import AnswerEvaluator
 from src.domain.task_evidence import capture_task, read_task, task_object
 from src.domain.session_state import SessionState
-from src.models.diag_models import DiagSession
+from src.models.diag_models import DiagAnswer, DiagSession
 from src.models.knowledge import TaskMaster
 from src.repositories.diag_repo import (
     DiagAnswerRepository,
@@ -84,6 +86,7 @@ log = logging.getLogger(__name__)
 # (the repository clamps too, this keeps the stored/served target consistent with it).
 _TARGET_B_MIN, _TARGET_B_MAX = TARGET_B_MIN, TARGET_B_MAX
 settings = get_settings()
+ANSWER_UNIQUE_INDEX = "uq_diag_answers_session_task"   # models.diag_models.DiagAnswer, migration 013
 
 # The Deep Scan flags of a session, frozen in ``SessionState.deep_scan_params`` at
 # ``create_session``: key -> (settings attribute, cast).  A config change must never
@@ -170,6 +173,8 @@ class SessionService:
             grade_level=grade_level,
             invite_code=invite_code,
             phase="warmup",
+            # The durable copy of the state (B-05): Redis is a cache in front of it.
+            state_snapshot=state.to_dict(),
         )
         self.session_repo.add(db_session)
         try:
@@ -182,24 +187,9 @@ class SessionService:
                     raise SessionAlreadyStartedError(str(existing.id)) from exc
             raise
 
-        # 5. Persist resumable state before notifying auth-service.  If Redis
-        # is unavailable at this point, the just-created database row has no
-        # answers and no external side effect yet.  Remove it again instead of
-        # leaving a one-time invite permanently claimed by an unrecoverable
-        # session.
-        try:
-            self.redis.save(state)
-        except Exception:
-            try:
-                self.db.delete(db_session)
-                self.db.commit()
-            except Exception:
-                self.db.rollback()
-                log.exception(
-                    "Could not compensate failed Redis initialization for session %s",
-                    db_session.id,
-                )
-            raise
+        # 5. Warm the cache.  The state is already in the database (``state_snapshot``, committed with the row),
+        # so a Redis blip here costs nothing: the first read rebuilds the cache from the snapshot (B-05).
+        self._cache_state(state)
 
         # 6. Notify monolith: invite → in_progress
         if invite_code:
@@ -226,16 +216,19 @@ class SessionService:
 
         Returns None when:
           - No session found for this invite_code
-          - Session is already completed
-          - Redis state has expired (TTL elapsed) — session is unrecoverable
+          - Session is already completed, or expired (its state exists nowhere: ``phase`` becomes ``expired``)
+
+        A Redis outage or a lost Redis key does NOT end the attempt: the state is rebuilt from the database
+        snapshot written with every answer (B-05/B-14).  If Redis is down and there is no snapshot, the request
+        fails with ``StateStoreUnavailableError`` (503, "repeat later"), never with "expired".
         """
         db_session = self.session_repo.get_by_invite_code(invite_code)
         if db_session is None or db_session.phase in {"completed", "expired"}:
             return None
 
-        state = self.redis.load(str(db_session.id))
-        if state is None:
-            # Redis TTL expired — state is gone, cannot resume
+        try:
+            state = self._load_state(db_session)
+        except SessionExpiredError:
             return None
 
         # Re-build current task from state
@@ -247,6 +240,53 @@ class SessionService:
 
         total_time_ms = self.answer_repo.get_total_time_ms(db_session.id)
         return db_session.id, state.items_answered, task, total_time_ms
+
+    # ── State: database snapshot + Redis cache ─────────────────────────────
+
+    def _cache_state(self, state: SessionState) -> None:
+        """Best-effort write to the Redis cache: the database already holds the truth, so a failure is only logged."""
+        try:
+            self.redis.save(state)
+        except Exception as exc:
+            log.warning("diagnostic_state_cache_save_failed session_id=%s error_type=%s",
+                        state.session_id, type(exc).__name__)
+
+    def _load_state(self, row: DiagSession) -> SessionState:
+        """The current state of an unfinished attempt.
+
+        PostgreSQL is the truth: every answer commits ``state_snapshot`` together with the answer row, then Redis is
+        updated.  So the newer of the two wins (a Redis write lost after the commit leaves Redis one answer behind),
+        a missing/evicted/unreachable Redis falls back to the snapshot, and the cache is rebuilt from it.
+          * Redis answered "no key" and there is no snapshot  -> the attempt is really lost: ``phase = expired``;
+          * Redis is unreachable and there is no snapshot     -> ``StateStoreUnavailableError`` (retry later).
+        """
+        session_id = str(row.id)
+        durable: Optional[SessionState] = None
+        if row.state_snapshot and row.phase != "completed":
+            durable = SessionState.from_dict(row.state_snapshot)
+        cache_reachable = True
+        try:
+            cached = self.redis.load(session_id)
+        except StateStoreUnavailableError:
+            cached, cache_reachable = None, False
+        if cached is not None and (durable is None or cached.items_answered >= durable.items_answered):
+            return cached
+        if durable is not None:
+            if cache_reachable:
+                self._cache_state(durable)     # evicted or one answer behind: heal the cache
+            return durable
+        if not cache_reachable:
+            raise StateStoreUnavailableError(session_id)
+        self._mark_expired(row)
+        raise SessionExpiredError(session_id)
+
+    def _mark_expired(self, row: DiagSession) -> None:
+        """The attempt cannot be continued (only a session older than the durable snapshot can get here).  Honest
+        phase instead of an eternal "active" row; ``stop_reason`` says why.  The answers stay for the audit."""
+        row.phase = "expired"
+        row.stop_reason = row.stop_reason or "state_lost"
+        self.db.commit()
+        log.warning("diagnostic_session_expired session_id=%s items_answered=%s", row.id, row.items_answered)
 
     def _current_task_from_state(self, state: SessionState) -> TaskOut:
         """Re-serve the current task stored in state (no DB write)."""
@@ -334,20 +374,26 @@ class SessionService:
         # PostgreSQL remains the final serialization barrier if a Redis lease
         # expires during slow evaluation. The final answer and completion
         # commit together below, so a second worker observes the durable result.
-        self.session_repo.get_fresh(session_id, for_update=True)
+        row = self.session_repo.get_fresh(session_id, for_update=True)
         # A request admitted before completion can acquire the lock afterwards.
         replay = self.get_completed_answer_result(session_id, task_id, student_answer)
         if replay is not None:
             return replay
-
-        # 1. Load state
-        state = self.redis.load(str(session_id))
-        if state is None:
+        if row.phase == "expired":
             raise SessionExpiredError(str(session_id))
+
+        # 1. Load state (database snapshot / Redis cache, B-05)
+        state = self._load_state(row)
 
         if state.phase == "completed":
             from src.core.exceptions import SessionAlreadyCompletedError
             raise SessionAlreadyCompletedError(str(session_id))
+
+        # B-06: this task already has its answer (the commit went through, the reply or the Redis write did not).
+        # A repeat of the same answer gets the stored result again, never a second row.
+        recorded = self.answer_repo.get_by_task(session_id, task_id)
+        if recorded is not None:
+            return self._replay_recorded_answer(row, state, recorded, student_answer)
 
         # Freeze the Deep Scan flags before any preview/trigger evaluation: a session created
         # before the flags existed (or before some flag existed) is frozen by its first answer
@@ -375,8 +421,13 @@ class SessionService:
         if task is None:
             raise NoTasksAvailableError(task_id)
 
-        # 3. Evaluate answer
-        outcome, category = self.evaluator.evaluate(task, student_answer)
+        # 3. Evaluate answer.  A sandbox that is busy/down raises AnswerNotCheckedError (B-09): nothing was
+        # written, release the row lock and let the student send the answer again - it is NOT scored as wrong.
+        try:
+            outcome, category = self.evaluator.evaluate(task, student_answer)
+        except AnswerNotCheckedError:
+            self.db.rollback()
+            raise
         correct = is_correct(outcome)
 
         # 4. Update global IRT theta only with measurement items.  Deep-scan
@@ -413,26 +464,35 @@ class SessionService:
         if state.is_in_deep_scan and state.deep_scan:
             scan_origin = state.deep_scan.get("origin_skill_id")
             scan_step = int(state.deep_scan.get("items_used", 0)) + 1
-        self.answer_repo.log_answer(
-            session_id=session_id,
-            task_id=task_id,
-            skill_id=state.current_skill_id or "",
-            topic_id=state.current_topic_id or "",
-            subtopic_id=state.current_subtopic_id,
-            student_answer=student_answer,
-            time_ms=time_ms,
-            outcome=outcome,
-            eval_category=category,
-            ai_evaluated=False,
-            theta_before=theta_before,
-            theta_after=state.theta.theta,
-            se_after=state.theta.se,
-            phase=state.phase,
-            is_deep_scan=state.is_in_deep_scan,
-            task_snapshot=copy.deepcopy(state.current_task_snapshot),
-            deep_scan_origin_skill_id=scan_origin,
-            deep_scan_step=scan_step,
-        )
+        try:
+            self.answer_repo.log_answer(
+                session_id=session_id,
+                task_id=task_id,
+                skill_id=state.current_skill_id or "",
+                topic_id=state.current_topic_id or "",
+                subtopic_id=state.current_subtopic_id,
+                student_answer=student_answer,
+                time_ms=time_ms,
+                outcome=outcome,
+                eval_category=category,
+                ai_evaluated=False,
+                theta_before=theta_before,
+                theta_after=state.theta.theta,
+                se_after=state.theta.se,
+                phase=state.phase,
+                is_deep_scan=state.is_in_deep_scan,
+                task_snapshot=copy.deepcopy(state.current_task_snapshot),
+                deep_scan_origin_skill_id=scan_origin,
+                deep_scan_step=scan_step,
+            )
+        except IntegrityError as exc:
+            # UNIQUE (session_id, task_id) is the last barrier behind the row lock (B-06): the state moved on
+            # under this request.  Nothing was written; the client re-reads the attempt.  Any OTHER integrity error
+            # (FK, NOT NULL) is a real defect and must not hide behind "the state changed".
+            self.db.rollback()
+            if getattr(getattr(getattr(exc, "orig", None), "diag", None), "constraint_name", None) != ANSWER_UNIQUE_INDEX:
+                raise
+            raise TaskOutOfSequenceError(str(session_id))
         # Inspect the navigation consequence before accepting an early stop.
         # Otherwise the final failed skill can end the test before the critical
         # prerequisite scan it is supposed to trigger.
@@ -450,14 +510,19 @@ class SessionService:
                 if state.theta.se > settings.se_threshold:
                     state.stop_reason = "insufficient_precision"
                 elif state.current_section_idx >= len(state.section_ids):
-                    state.stop_reason = "precision_reached" if state.theta.se <= settings.se_threshold else "coverage_complete"
+                    # here se <= threshold always holds (the branch above took the other case)
+                    state.stop_reason = "precision_reached"
                 else:
                     state.stop_reason = "bank_exhausted"
             return self._complete_session(state, outcome, category)
 
-        # 10. Save updated state
+        # 10. Save updated state: the snapshot commits together with the answer row (B-05/B-06), then the cache.
+        # If the Redis write is lost, the next request reads the newer snapshot and a repeat of this answer is
+        # answered from its stored row.
+        row.state_snapshot = state.to_dict()
+        row.items_answered = state.items_answered
         self.db.commit()
-        self.redis.save(state)
+        self._cache_state(state)
 
         return AnswerResult(
             is_correct=correct,
@@ -465,6 +530,34 @@ class SessionService:
             eval_category=category,
             theta=state.theta.theta,
             se=state.theta.se,
+            next_task=next_task,
+            session_completed=False,
+        )
+
+    def _replay_recorded_answer(
+        self, row: DiagSession, state: SessionState, recorded: DiagAnswer, student_answer: str
+    ) -> AnswerResult:
+        """Answer a repeated request from the stored row (B-06): same answer -> same result, no second row.
+
+        ``state`` is the durable state after that answer, so its current task is the "next task" the first reply
+        carried.  A different answer for an already answered task cannot rewrite history: 409 as before.
+        """
+        session_id = row.id
+        if recorded.student_answer != student_answer:
+            raise TaskOutOfSequenceError(str(session_id))
+        if state.current_task_id == recorded.task_id:
+            # The state is not past this answer (a legacy attempt without a snapshot and with a stale cache):
+            # the follow-up task is unknown and cannot be rebuilt.  Say so instead of looping on the same task.
+            self._mark_expired(row)
+            raise SessionExpiredError(str(session_id))
+        next_task = self._current_task_from_state(state)
+        log.info("diagnostic_answer_replayed session_id=%s phase=%s", session_id, state.phase)
+        return AnswerResult(
+            is_correct=is_correct(recorded.outcome),
+            outcome=float(recorded.outcome),
+            eval_category=recorded.eval_category,
+            theta=float(recorded.theta_after if recorded.theta_after is not None else state.theta.theta),
+            se=float(recorded.se_after if recorded.se_after is not None else state.theta.se),
             next_task=next_task,
             session_completed=False,
         )
@@ -978,7 +1071,7 @@ class SessionService:
             SubtopicEntry(
                 subtopic_id=s.id,
                 topic_id=topic.topic_id,
-                position=s.sequence_order,
+                position=s.sequence_order or 0,
                 importance=s.importance or 5,
                 name_ru=s.name_ru or "",
             )
