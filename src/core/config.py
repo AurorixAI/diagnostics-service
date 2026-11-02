@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     redis_session_ttl: int = 7200   # 2 hours
     redis_task_cache_ttl: int = 600  # 10 minutes
 
+    # Blocking work of start / resume / report handlers runs in threads, at most this many at a time per worker (src/core/sync_slots.py).
+    # Must stay below the pool of database connections (pool_size 5 + max_overflow 10 = 15): the rest is left to answers and open sessions.
+    sync_work_slots: int = Field(default=8, ge=1, le=12)
+
     # Emergency switch for every paid report-narrative model call (REPORT_NARRATIVE_ENABLED).
     # On by default: the narrative is a product feature.  "false" / "0" / "no" / "off" turns it
     # off; reports are then built deterministically with 0 paid calls.  Read it ONLY through

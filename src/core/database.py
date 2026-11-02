@@ -11,14 +11,19 @@ from src.core.config import get_settings
 from src.core.db_timezone import utc_connect_args
 
 
+# The pool of one worker.  ``sync_work_slots`` (config) is kept below their sum - see src/core/sync_slots.py.
+POOL_SIZE = 5
+MAX_OVERFLOW = 10
+
+
 def _make_engine():
     s = get_settings()
     return create_engine(
         s.database_url,
         echo=s.debug,
         pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=POOL_SIZE,
+        max_overflow=MAX_OVERFLOW,
         connect_args=utc_connect_args(s.database_url),  # session TimeZone=UTC on every connection (ROADMAP #49)
     )
 

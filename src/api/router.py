@@ -19,6 +19,7 @@ from starlette.concurrency import run_in_threadpool
 
 from src.core.abuse_limit import admit_invite_attempt, admit_report_lookup
 from src.core.database import get_db
+from src.core.sync_slots import run_sync_limited
 from src.core.access import invite_error, validate_invite_capability, validate_invite_state
 from src.models.diag_models import DiagSession
 from src.core.exceptions import (
@@ -92,7 +93,9 @@ async def create_session(
             allowed_statuses={"confirmed"},
         )
         ticket.exists()
-        session_id, first_task = service.create_session(
+        # B-04: 5-8 HTTP calls to content-service and the database - in a thread (bounded), not on the event loop
+        session_id, first_task = await run_sync_limited(
+            service.create_session,
             student_id=body.student_id,
             grade_level=body.grade_level,
             invite_code=body.invite_code,
@@ -140,7 +143,7 @@ async def get_active_session(
             session_started_at=lambda: _session_start_of(service, invite_code),
         )
         ticket.exists()
-        result = service.get_active_session(invite_code)
+        result = await run_sync_limited(service.get_active_session, invite_code)
         if result is None:
             raise invite_error(404, "SESSION_NOT_FOUND", "Активная попытка не найдена.", "check_session")
         session_id, items_answered, current_task, total_time_ms = result
@@ -170,7 +173,7 @@ async def submit_answer(
 ):
     """Submit answer to current task. Returns result and next task (if any)."""
     try:
-        session = db.query(DiagSession).filter(DiagSession.id == session_id).first()
+        session = await run_in_threadpool(lambda: db.query(DiagSession).filter(DiagSession.id == session_id).first())
         if not session or not session.invite_code:
             raise invite_error(404, "SESSION_NOT_FOUND", "Сессия диагностики не найдена.", "contact_center")
         if invite_code != session.invite_code:
@@ -223,7 +226,7 @@ async def resolve_session(
     """Restore the exact owned attempt, including a durably completed one."""
     ticket = admit_invite_attempt(request, invite_code)  # #77
     try:
-        session = service.session_repo.get_by_invite_code(invite_code)
+        session = await run_sync_limited(service.session_repo.get_by_invite_code, invite_code)
         invite = await validate_invite_capability(
             invite_code,
             student_id=str(session.student_id) if session else None,
@@ -234,23 +237,23 @@ async def resolve_session(
         )
         ticket.exists()
         if session:
-            session = service.session_repo.get_fresh(session.id)
+            session = await run_sync_limited(service.session_repo.get_fresh, session.id)
         if session and session.phase == "completed":
             return ResolvedSessionResponse(
                 session_id=session.id, status="completed", items_answered=session.items_answered,
-                total_time_ms=service.answer_repo.get_total_time_ms(session.id),
+                total_time_ms=await run_sync_limited(service.answer_repo.get_total_time_ms, session.id),
             )
         validate_invite_state(invite, allowed_statuses={"confirmed", "in_progress"})
         if session is None:
             raise invite_error(404, "SESSION_NOT_FOUND", "Попытка по этому приглашению ещё не начата.", "start")
-        active = service.get_active_session(invite_code)
+        active = await run_sync_limited(service.get_active_session, invite_code)
         if active is None:
             # Completion may commit while the Redis-backed resume check runs.
-            session = service.session_repo.get_fresh(session.id)
+            session = await run_sync_limited(service.session_repo.get_fresh, session.id)
             if session and session.phase == "completed":
                 return ResolvedSessionResponse(
                     session_id=session.id, status="completed", items_answered=session.items_answered,
-                    total_time_ms=service.answer_repo.get_total_time_ms(session.id),
+                    total_time_ms=await run_sync_limited(service.answer_repo.get_total_time_ms, session.id),
                 )
             raise invite_error(410, "SESSION_EXPIRED", _EXPIRED_MESSAGE, "contact_center")
         session_id, items_answered, current_task, total_time_ms = active
@@ -284,7 +287,7 @@ async def get_report(
     invite_code = invite_header or invite_query
     ticket = admit_report_lookup(request)  # S-03
     try:
-        session = db.query(DiagSession).filter(DiagSession.id == session_id).first()
+        session = await run_sync_limited(lambda: db.query(DiagSession).filter(DiagSession.id == session_id).first())
         if not session or session.invite_code != invite_code:
             ticket.fail()  # a wrong code for a session id (or no such session) is a guess
             raise invite_error(404, "REPORT_NOT_FOUND", "Отчёт не найден.", "contact_center")
@@ -304,7 +307,7 @@ async def get_report(
         )
         if session.phase != "completed":
             raise invite_error(409, "SESSION_NOT_COMPLETED", "Диагностика ещё не завершена.", "check_session")
-        return service.get_report_data(session_id)
+        return await run_sync_limited(service.get_report_data, session_id)
     except ValueError as exc:
         raise invite_error(404, "REPORT_NOT_FOUND", "Отчёт не найден.", "contact_center")
     except HTTPException as exc:

@@ -218,7 +218,7 @@ def test_the_invite_lookup_carries_the_internal_token_so_auth_may_say_why_it_was
     assert seen[-1] == {}
 
 
-def test_the_session_lookup_for_a_cancelled_invite_runs_off_the_event_loop(api):
+def test_the_session_lookup_for_a_cancelled_invite_runs_off_the_event_loop(api, monkeypatch):
     import threading
     from datetime import datetime
     from src.api import router as diag_router
@@ -235,12 +235,19 @@ def test_the_session_lookup_for_a_cancelled_invite_runs_off_the_event_loop(api):
             self.session_repo = SimpleNamespace(get_by_invite_code=lookup)
 
         def get_active_session(self, c):
-            threads["loop"] = threading.get_ident()          # a plain call in the async route: the event-loop thread
+            threads["active"] = threading.get_ident()        # WC-B B-04: this service call is off the loop too
             return None
 
+    real_validate = diag_router.validate_invite_capability
+
+    async def validate_on_the_loop(*a, **kw):
+        threads["loop"] = threading.get_ident()              # the async route itself: the event-loop thread
+        return await real_validate(*a, **kw)
+
     api.app.dependency_overrides[diag_router._service] = lambda: Service()
+    monkeypatch.setattr(diag_router, "validate_invite_capability", validate_on_the_loop)
     assert active(api, code).status_code == 404               # past the invite check
-    assert threads["lookup"] != threads["loop"]
+    assert threads["lookup"] != threads["loop"] and threads["active"] != threads["loop"]
     # and the lookup is not made at all for an invite that is not cancelled
     threads.clear()
     assert active(api, code_of(8)).status_code == 404

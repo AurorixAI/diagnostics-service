@@ -22,6 +22,7 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from src.core.database import get_db
+from src.core.sync_slots import await_on_loop, sync_slot
 from src.core.access import (
     DiagnosticActor,
     require_diagnostic_staff,
@@ -85,8 +86,8 @@ def _alpha_to_status(alpha: float) -> str:
 
 # ── 1. STUDENT SKILL MAP ───────────────────────────────────────────────────────
 
-@router.get("/students/{student_id}/skill-map")
-async def student_skill_map(
+@router.get("/students/{student_id}/skill-map", dependencies=[Depends(sync_slot)])
+def student_skill_map(
     student_id: str,
     db: Session = Depends(get_db),
     actor: DiagnosticActor = Depends(require_diagnostic_staff),
@@ -95,7 +96,7 @@ async def student_skill_map(
     Per-topic mastery карта ученика из последней завершённой диагностики.
     topic_breakdown: {topic_id: {alpha, level}}
     """
-    await require_student_report_access(actor, student_id)
+    await_on_loop(require_student_report_access, actor, student_id)
     session = (
         db.query(DiagSession)
         .filter(
@@ -200,14 +201,14 @@ async def student_skill_map(
 
 # ── 2. STUDENT TIMELINE ────────────────────────────────────────────────────────
 
-@router.get("/students/{student_id}/timeline")
-async def student_timeline(
+@router.get("/students/{student_id}/timeline", dependencies=[Depends(sync_slot)])
+def student_timeline(
     student_id: str,
     db: Session = Depends(get_db),
     actor: DiagnosticActor = Depends(require_diagnostic_staff),
 ):
     """Динамика θ ученика — все завершённые сессии по времени."""
-    await require_student_report_access(actor, student_id)
+    await_on_loop(require_student_report_access, actor, student_id)
     sessions = (
         db.query(DiagSession)
         .filter(
@@ -252,8 +253,8 @@ async def student_timeline(
 
 # ── 3. STUDENT REPORT ──────────────────────────────────────────────────────────
 
-@router.get("/students/{student_id}/report")
-async def student_report(
+@router.get("/students/{student_id}/report", dependencies=[Depends(sync_slot)])
+def student_report(
     student_id: str,
     session_id: Optional[str] = Query(None, description="Exact diagnostic session for this report"),
     db: Session = Depends(get_db),
@@ -300,9 +301,9 @@ async def student_report(
         )
 
     if session:
-        await require_student_report_access(actor, str(session.student_id))
+        await_on_loop(require_student_report_access, actor, str(session.student_id))
     else:
-        await require_student_report_access(actor, str(sid_uuid))
+        await_on_loop(require_student_report_access, actor, str(sid_uuid))
 
     # DiagReport by student_id, session_id, or session.id
     report = None
@@ -606,8 +607,8 @@ def _build_diagnostic_trajectory(session: Optional[DiagSession], db: Session, kn
 
 # ── 4. GROUP OVERVIEW ──────────────────────────────────────────────────────────
 
-@router.get("/groups/overview")
-async def group_overview(
+@router.get("/groups/overview", dependencies=[Depends(sync_slot)])
+def group_overview(
     student_ids: List[str] = Query(..., description="Список student_id группы"),
     db: Session = Depends(get_db),
     actor: DiagnosticActor = Depends(require_diagnostic_staff),
@@ -621,7 +622,7 @@ async def group_overview(
     level_counts = {"mastered": 0, "learning": 0, "struggling": 0, "gap": 0, "no_data": 0}
 
     for sid in student_ids:
-        await require_student_report_access(actor, sid)
+        await_on_loop(require_student_report_access, actor, sid)
         session = (
             db.query(DiagSession)
             .filter(
@@ -664,8 +665,8 @@ async def group_overview(
 
 # ── 5. GROUP SKILL HEATMAP ─────────────────────────────────────────────────────
 
-@router.get("/groups/heatmap")
-async def group_skill_heatmap(
+@router.get("/groups/heatmap", dependencies=[Depends(sync_slot)])
+def group_skill_heatmap(
     student_ids: List[str] = Query(..., description="Список student_id группы"),
     db: Session = Depends(get_db),
     actor: DiagnosticActor = Depends(require_diagnostic_staff),
@@ -678,7 +679,7 @@ async def group_skill_heatmap(
     student_breakdowns: dict = {}
 
     for sid in student_ids:
-        await require_student_report_access(actor, sid)
+        await_on_loop(require_student_report_access, actor, sid)
         session = (
             db.query(DiagSession)
             .filter(
