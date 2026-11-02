@@ -77,9 +77,6 @@ class SkillNavigator:
     def peek_current(self) -> Optional[SkillEntry]:
         return self.state.current_skill
 
-    def is_exhausted(self) -> bool:
-        return self.state.exhausted
-
     def get_failing_skill(self) -> Optional[str]:
         return self.state.failing_skill_id
 

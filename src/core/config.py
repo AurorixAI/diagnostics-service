@@ -47,7 +47,6 @@ class Settings(BaseSettings):
 
     # Gemini AI
     gemini_api_key: str = ""
-    gemini_model_eval: str = "gemini-2.0-flash"
     gemini_model_report: str = "gemini-2.0-flash"
 
     # Azure OpenAI / DeepSeek API
@@ -135,10 +134,6 @@ class Settings(BaseSettings):
     # Shared only with auth-service. Required for all mutable internal
     # callbacks; public diagnostic invite codes are never accepted there.
     internal_service_token: str = ""
-
-    # Standalone mode: True  → service owns its own Postgres, runs ALL migrations
-    #                  False → connects to monolith DB, runs ONLY owned-table migrations (001)
-    standalone: bool = Field(default=True)
 
     @property
     def is_development(self) -> bool:

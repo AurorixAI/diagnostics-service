@@ -200,9 +200,6 @@ class AlphaTracker:
     def get_all(self) -> Dict[str, float]:
         return dict(self._alphas)
 
-    def topic_level(self, topic_id: str) -> str:
-        return theta_to_level(self.get_alpha(topic_id))
-
     def to_dict(self) -> dict:
         return {"alphas": self._alphas, "counts": self._counts}
 

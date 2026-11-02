@@ -10,11 +10,9 @@ services:
       - "8002:8002"
     environment:
       DATABASE_URL: postgresql://algo:algo_password@algo-postgres-diag:5432/algo_diagnostic
-      CONTENT_DB_URL: postgresql://algo:algo_password@content-postgres:5432/algo_content
       REDIS_URL: redis://redis:6379
       APP_ENV: ${APP_ENV:-production}
       DEBUG: ${DEBUG:-false}
-      STANDALONE: ${STANDALONE:-true}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       AZURE_DEEPSEEK_API_KEY: ${AZURE_DEEPSEEK_API_KEY:-}
       AZURE_DEEPSEEK_ENDPOINT: ${AZURE_DEEPSEEK_ENDPOINT:-}

@@ -28,7 +28,6 @@
 | `GEMINI_API_KEY` | — | Google Gemini (AI-отчёты) | — |
 | `REPORT_NARRATIVE_ENABLED` | `true` | Аварийный выключатель платных вызовов нарратива отчёта (`false`/`0`/`no` — 0 платных вызовов, отчёт детерминированный) | `false` |
 | `CORS_ORIGINS` | — | JSON-массив origins | `["https://algolab.me"]` |
-| `STANDALONE` | — | `true` = собственная БД | `true` |
 | `REDIS_SESSION_TTL` | — | TTL CAT-сессии (сек) | `7200` |
 
 ## Алгоритм параметры

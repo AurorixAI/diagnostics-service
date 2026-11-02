@@ -991,7 +991,7 @@ class SessionService:
                 subtopic_pass = skill_score >= settings.mastery_threshold
                 sub_nav.record_score(skill_score)
                 # move() sets boundary_subtopic_id when subtopic fails — MUST happen before
-                # needs_deep_scan() which reads boundary_subtopic_id to check importance.
+                # the Deep Scan check below, which reads boundary_subtopic_id to check importance.
                 next_sub = sub_nav.move(subtopic_pass)
                 state.current_subtopic_nav = sub_nav.to_dict()
 

@@ -222,7 +222,6 @@ def test_alpha_tracker_updates_counts_and_survives_the_state_round_trip():
     assert tracker.get_all() == {"T1": pytest.approx(0.0), "T2": pytest.approx(-0.2)}
     again = AlphaTracker.from_dict(tracker.to_dict())
     assert again.get_all() == tracker.get_all() and again.get_count("T1") == 2
-    assert again.topic_level("T2") == tracker.topic_level("T2")
 
 
 def fallback_service(candidates, tasks, *, boom=False):

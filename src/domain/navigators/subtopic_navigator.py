@@ -75,9 +75,6 @@ class SubtopicNavigator:
     def peek_current(self) -> Optional[SubtopicEntry]:
         return self.state.current_subtopic
 
-    def is_exhausted(self) -> bool:
-        return self.state.exhausted
-
     def failed_subtopic(self) -> Optional[SubtopicEntry]:
         """The last failed subtopic (boundary), or None if nothing failed yet."""
         if self.state.boundary_subtopic_id is None:
@@ -86,11 +83,6 @@ class SubtopicNavigator:
             if sub.subtopic_id == self.state.boundary_subtopic_id:
                 return sub
         return None
-
-    def needs_deep_scan(self, threshold: int) -> bool:
-        """True if the failed subtopic itself is important enough to warrant deep scan."""
-        failed = self.failed_subtopic()
-        return failed is not None and failed.importance >= threshold
 
     def record_score(self, score: float) -> None:
         """Store the skill-aggregated score [0.0–1.0] for the current subtopic.

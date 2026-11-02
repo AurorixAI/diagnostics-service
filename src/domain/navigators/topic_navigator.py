@@ -69,9 +69,6 @@ class TopicNavigator:
     def peek_current(self) -> Optional[TopicEntry]:
         return self.state.current_topic
 
-    def is_exhausted(self) -> bool:
-        return self.state.exhausted
-
     def move(self, correct: bool) -> Optional[TopicEntry]:
         """
         Register result for current topic and advance cursor.

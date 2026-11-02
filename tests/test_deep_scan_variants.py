@@ -410,13 +410,13 @@ def test_importance_mode_trigger_and_pending_probe_are_unchanged(monkeypatch):
         assert (service._advance_navigation(state, False) == "SCAN:S1") is fires
 
 
-def test_failed_subtopic_helper_matches_needs_deep_scan():
+def test_failed_subtopic_helper_returns_the_boundary_subtopic_with_its_importance():
     nav = SubtopicNavigator.create("t", 5, [SubtopicEntry("a", "t", 0, 9), SubtopicEntry("b", "t", 1, 3)])
-    assert nav.failed_subtopic() is None and not nav.needs_deep_scan(8)
+    assert nav.failed_subtopic() is None
     nav.state.boundary_subtopic_id = "a"
-    assert nav.failed_subtopic().subtopic_id == "a" and nav.needs_deep_scan(8)
+    assert nav.failed_subtopic().subtopic_id == "a" and nav.failed_subtopic().importance == 9
     nav.state.boundary_subtopic_id = "b"
-    assert not nav.needs_deep_scan(8) and nav.needs_deep_scan(3)
+    assert nav.failed_subtopic().subtopic_id == "b" and nav.failed_subtopic().importance == 3
 
 
 # ── report chains with confirmed steps ────────────────────────────────────────
