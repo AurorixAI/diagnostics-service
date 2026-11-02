@@ -1236,26 +1236,29 @@ class SessionService:
             state.stop_reason = "insufficient_precision"
             return None
 
-        # Search for a task matching target_b ≈ theta in candidate skills
-        for skill_id in candidate_skills_ordered:
-            task = self.task_repo.get_task_by_difficulty_target(
-                skill_id, target_b=theta_val, exclude_ids=state.used_task_ids
+        # Search for a task matching target_b ≈ theta in candidate skills: the first skill of the list that has one (P-02: 8 skills per HTTP call)
+        picked_skill, task, no_free_tasks = self.task_repo.pick_task_by_difficulty_target(
+            candidate_skills_ordered, theta_val, exclude_ids=state.used_task_ids
+        )
+        if task is not None:
+            skill_id = picked_skill
+            self._set_context_for_skill(state, skill_id)
+            state.current_task_id = task.id
+            log.info(
+                "Precision targeting selected task %s (skill %s, target_b=%.2f, current_se=%.2f, theta=%.2f)",
+                task.id,
+                skill_id,
+                theta_val,
+                state.theta.se,
+                theta_val,
             )
-            if task is not None:
-                self._set_context_for_skill(state, skill_id)
-                state.current_task_id = task.id
-                log.info(
-                    "Precision targeting selected task %s (skill %s, target_b=%.2f, current_se=%.2f, theta=%.2f)",
-                    task.id,
-                    skill_id,
-                    theta_val,
-                    state.theta.se,
-                    theta_val,
-                )
-                return self._task_to_out(task, state)
+            return self._task_to_out(task, state)
 
         # Fallback: if difficulty-matching task wasn't found, pick any available task from candidate pool
+        # (a skill the scan above found without a free task has none here either - same filters - and is not asked again)
         for skill_id in candidate_skills_ordered:
+            if skill_id in no_free_tasks:
+                continue
             tasks = self.task_repo.get_tasks_for_skill(
                 skill_id, exclude_ids=state.used_task_ids, limit=1
             )

@@ -34,6 +34,10 @@ TARGET_B_MIN, TARGET_B_MAX = -4.0, 4.0
 # Wider values (e.g. 0.5) incorrectly mix tasks of very different difficulty levels.
 _IRT_TOLERANCE = 0.1
 
+# P-02: skills probed per HTTP call and the row limit of that call (content-service allows up to 200).
+PROBE_BATCH = 8
+PROBE_LIMIT = 200
+
 
 def _normalise_target_b(target_b: float, skill_id: str) -> float:
     """A target the content API accepts: NaN -> 0.0 (warning), +-inf and out-of-range values
@@ -213,7 +217,11 @@ class TaskRepository:
         )
         if not candidates:
             return None
+        return self._pick_near_target(candidates, target_b)
 
+    @staticmethod
+    def _pick_near_target(candidates: List[types.SimpleNamespace], target_b: float) -> types.SimpleNamespace:
+        """One of the candidates nearest to ``target_b`` (within ``_IRT_TOLERANCE`` of the best), chosen at random."""
         # Find the closest difficulty to target
         best_dist = min(abs(float(getattr(t, "irt_difficulty", 0) or 0) - target_b) for t in candidates)
         # Build pool of all candidates within tolerance of the best
@@ -222,6 +230,60 @@ class TaskRepository:
             if abs(float(getattr(t, "irt_difficulty", 0) or 0) - target_b) <= best_dist + _IRT_TOLERANCE
         ]
         return random.choice(pool)
+
+    def get_tasks_for_skills(
+        self,
+        skill_ids: List[str],
+        *,
+        target_b: float,
+        exclude_ids: Optional[List[str]] = None,
+        limit: int = PROBE_LIMIT,
+    ) -> List[types.SimpleNamespace]:
+        """Tasks of SEVERAL skills in one call (content-service ``skill_ids``): nearest to ``target_b`` first across all of them, then LIMIT."""
+        params: dict = {"skill_ids": list(skill_ids), "limit": limit, "target_b": _normalise_target_b(target_b, ",".join(skill_ids))}
+        if exclude_ids:
+            params["exclude_ids"] = exclude_ids
+        resp = content_client.get(f"{BASE}/tasks", params=params)
+        resp.raise_for_status()
+        return [_ns(r) for r in resp.json()]
+
+    def pick_task_by_difficulty_target(
+        self,
+        ordered_skill_ids: List[str],
+        target_b: float,
+        *,
+        exclude_ids: Optional[List[str]] = None,
+        batch: int = PROBE_BATCH,
+        limit: int = PROBE_LIMIT,
+    ) -> tuple[Optional[str], Optional[types.SimpleNamespace], set]:
+        """(skill_id, task, skills known to have no free task): the FIRST skill of the list that has a free task, and a task of it near ``target_b``.
+
+        The answer is the one a skill-by-skill scan gives (``get_task_by_difficulty_target`` for each skill in turn, the first hit wins), at
+        one HTTP call per ``batch`` skills instead of one per skill (P-02).  The batch call returns the tasks of its skills nearest to the target
+        across all of them, cut at ``limit``; read it like this:
+          * fewer rows than ``limit`` - the window is complete: a skill with no row has no free task;
+          * ``limit`` rows - the window is cut: a skill with rows has its nearest tasks in it (a prefix of its own order), a skill WITHOUT rows may
+            still have farther ones - that skill is asked alone, exactly as the scan would, and so is a skill with fewer than 20 rows in the window
+            (its 20 nearest are not all there).
+        """
+        empty: set = set()
+        for start in range(0, len(ordered_skill_ids), batch):
+            chunk = ordered_skill_ids[start:start + batch]
+            rows = self.get_tasks_for_skills(chunk, target_b=target_b, exclude_ids=exclude_ids, limit=limit)
+            cut = len(rows) >= limit
+            by_skill: dict[str, list] = {}
+            for row in rows:
+                by_skill.setdefault(row.skill_id, []).append(row)
+            for skill_id in chunk:
+                own = by_skill.get(skill_id, [])
+                if own and (len(own) >= 20 or not cut):
+                    return skill_id, self._pick_near_target(own[:20], _normalise_target_b(target_b, skill_id)), empty
+                if own or cut:
+                    task = self.get_task_by_difficulty_target(skill_id, target_b, exclude_ids=exclude_ids)
+                    if task is not None:
+                        return skill_id, task, empty
+                empty.add(skill_id)
+        return None, None, empty
 
     def get_avg_difficulty_for_skills(
         self, skill_ids: List[str]

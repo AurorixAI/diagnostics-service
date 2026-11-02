@@ -12,6 +12,20 @@ from src.domain.session_service import SessionService
 from src.domain.session_state import SessionState
 
 
+def batch_api(get_task):
+    """WC-B P-02: the precision step asks ``pick_task_by_difficulty_target`` (8 skills per HTTP call); a stub that only knows the per-skill call
+    answers it with the old skill-by-skill scan, which is the contract the batch call keeps."""
+    def pick(ordered, target_b, exclude_ids=None, **_):
+        empty = set()
+        for skill_id in ordered:
+            task = get_task(skill_id, target_b, exclude_ids)
+            if task is not None:
+                return skill_id, task, empty
+            empty.add(skill_id)
+        return None, None, empty
+    return pick
+
+
 def make_state(**overrides) -> SessionState:
     state = SessionState(
         session_id="session-1",
@@ -226,7 +240,8 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
             difficulty=0.5,
         )
         service.task_repo = SimpleNamespace(
-            get_task_by_difficulty_target=lambda skill_id, target_b, exclude_ids: fake_task
+            get_task_by_difficulty_target=lambda skill_id, target_b, exclude_ids: fake_task,
+            pick_task_by_difficulty_target=batch_api(lambda skill_id, target_b, exclude_ids: fake_task),
         )
         service._set_context_for_skill = lambda state, skill_id: None
         service._task_to_out = lambda task, state: SimpleNamespace(id=task.id)
@@ -295,15 +310,17 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
         )
 
         service._prereq_l4_ids = lambda failing_id: ["skill-grade5-prereq"]
+        prereq_task = lambda skill_id, target_b, exclude_ids: SimpleNamespace(
+            id="task-prereq",
+            content={"title": "Grade 5 Prereq"},
+            answer_type="single_choice",
+            options=[],
+            hint=None,
+            difficulty=0.0,
+        )
         service.task_repo = SimpleNamespace(
-            get_task_by_difficulty_target=lambda skill_id, target_b, exclude_ids: SimpleNamespace(
-                id="task-prereq",
-                content={"title": "Grade 5 Prereq"},
-                answer_type="single_choice",
-                options=[],
-                hint=None,
-                difficulty=0.0,
-            )
+            get_task_by_difficulty_target=prereq_task,
+            pick_task_by_difficulty_target=batch_api(prereq_task),
         )
         service._set_context_for_skill = lambda state, skill_id: setattr(state, "current_section_id", "sec-grade5")
         service._task_to_out = lambda task, state: SimpleNamespace(id=task.id)
@@ -352,6 +369,7 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
 
         service.task_repo = SimpleNamespace(
             get_task_by_difficulty_target=mock_get_task_by_difficulty_target,
+            pick_task_by_difficulty_target=batch_api(mock_get_task_by_difficulty_target),
             get_tasks_for_skill=lambda *args, **kwargs: [],
         )
 
@@ -393,6 +411,7 @@ class AdaptiveDiagnosticPolicyTests(unittest.TestCase):
 
         service.task_repo = SimpleNamespace(
             get_task_by_difficulty_target=mock_get_task_by_difficulty_target,
+            pick_task_by_difficulty_target=batch_api(mock_get_task_by_difficulty_target),
             get_tasks_for_skill=lambda *args, **kwargs: [],
         )
 
