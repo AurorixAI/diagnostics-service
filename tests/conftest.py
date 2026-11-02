@@ -10,3 +10,13 @@ def _fresh_abuse_limits():
     counters.reset()
     yield
     counters.reset()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_hierarchy_cache():
+    """The knowledge-hierarchy cache is process-wide (WC-B P-01): every test starts and leaves it empty."""
+    from src.repositories.knowledge_repo import clear_hierarchy_cache
+
+    clear_hierarchy_cache()
+    yield
+    clear_hierarchy_cache()

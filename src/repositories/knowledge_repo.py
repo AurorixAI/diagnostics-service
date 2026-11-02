@@ -9,13 +9,17 @@ need to know about the transport switch.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 import random
+import threading
+import time
 import types
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from src.clients import content_client
+from src.core.config import get_settings
 
 BASE = "/api/v1/content"
 
@@ -47,33 +51,77 @@ def _ns(d: dict) -> types.SimpleNamespace:
     return types.SimpleNamespace(**d)
 
 
+# ── process cache of the knowledge hierarchy (WC-B P-01 / P-03) ────────────────────────────────────────────────────────
+# One answer of a student made 1-4 HTTP calls to content-service for the SAME few nodes (the skill, its subtopic, its topic, the L4 list of the
+# grade), a teacher's report 3 per answer twice over (~240 calls).  The hierarchy changes only with a content release, so a node read a minute ago
+# is as good as one read now: raw answers are kept for ``knowledge_cache_ttl`` seconds (10 min, 0 = off).
+#   * what is cached is the JSON TEXT; every read parses a fresh object, so nobody can change what the next caller gets;
+#   * a 404 and an error are never cached, and a failed refresh drops the entry it was refreshing (no stale answer after an error);
+#   * TASKS are not cached anywhere: the choice of a task follows the live bank.
+_cache: dict[tuple, tuple[float, str]] = {}
+_cache_lock = threading.Lock()
+_CACHE_MAX_ENTRIES = 20_000
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def clear_hierarchy_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
+def _hierarchy_json(key: tuple, path: str, *, allow_404: bool = False, **kwargs: Any) -> Any:
+    """The decoded JSON of a content-service GET, from the cache while it is fresh.  ``None`` only for an allowed 404."""
+    ttl = get_settings().knowledge_cache_ttl
+    if ttl > 0:
+        with _cache_lock:
+            hit = _cache.get(key)
+        if hit is not None and hit[0] > _now():
+            return json.loads(hit[1])
+    try:
+        resp = content_client.get(path, **kwargs)
+        if allow_404 and resp.status_code == 404:
+            data = None
+        else:
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        with _cache_lock:
+            _cache.pop(key, None)  # a failed refresh must not leave the old answer to be served again
+        raise
+    if data is not None and ttl > 0:
+        with _cache_lock:
+            if len(_cache) >= _CACHE_MAX_ENTRIES:
+                now = _now()
+                for stale in [k for k, (expires, _raw) in _cache.items() if expires <= now]:
+                    del _cache[stale]
+                if len(_cache) >= _CACHE_MAX_ENTRIES:
+                    _cache.clear()
+            _cache[key] = (_now() + ttl, json.dumps(data))
+    return data
+
+
 class KnowledgeRepository:
     """Read knowledge_hierarchy via content-service API."""
 
     def get_by_id(self, node_id: str) -> Optional[types.SimpleNamespace]:
-        resp = content_client.get(f"{BASE}/skills/{node_id}")
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        return _ns(resp.json())
+        data = _hierarchy_json(("id", node_id), f"{BASE}/skills/{node_id}", allow_404=True)
+        return None if data is None else _ns(data)
 
     def get_children(self, parent_id: str) -> List[types.SimpleNamespace]:
-        resp = content_client.get(f"{BASE}/skills/{parent_id}/children")
-        resp.raise_for_status()
+        data = _hierarchy_json(("children", parent_id), f"{BASE}/skills/{parent_id}/children")
         # The API orders by sequence_order only; equal values come back in an
         # unspecified order, which made "which child" depend on the database.
         return sorted(
-            (_ns(r) for r in resp.json()),
+            (_ns(r) for r in data),
             key=lambda n: (int(getattr(n, "sequence_order", 0) or 0), str(n.id)),
         )
 
     def get_by_level_and_grade(self, level: str, grade: int) -> List[types.SimpleNamespace]:
-        resp = content_client.get(
-            f"{BASE}/skills",
-            params={"level": level, "grade": grade},
-        )
-        resp.raise_for_status()
-        return [_ns(r) for r in resp.json()]
+        data = _hierarchy_json(("level_grade", level, grade), f"{BASE}/skills", params={"level": level, "grade": grade})
+        return [_ns(r) for r in data]
 
     def get_subtopics_for_topic(self, topic_id: str) -> List[types.SimpleNamespace]:
         """All L3 subtopics for an L2 topic (= direct children)."""
@@ -90,15 +138,13 @@ class SkillPrerequisiteRepository:
     def get_prerequisites(
         self, skill_id: str, *, hard_only: bool = False
     ) -> List[types.SimpleNamespace]:
-        resp = content_client.get(
-            f"{BASE}/skills/{skill_id}/prerequisites",
-            params={"hard_only": hard_only},
+        data = _hierarchy_json(
+            ("prerequisites", skill_id, bool(hard_only)), f"{BASE}/skills/{skill_id}/prerequisites", params={"hard_only": hard_only},
         )
-        resp.raise_for_status()
         # Stable order for the Deep Scan: most critical edge first, then the
         # heavier one, then id (the API only sorts by weight, ties unspecified).
         return sorted(
-            (_ns(r) for r in resp.json()),
+            (_ns(r) for r in data),
             key=lambda p: (
                 -int(getattr(p, "criticality", 5) or 5),
                 -float(getattr(p, "weight", 1.0) or 1.0),

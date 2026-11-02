@@ -30,7 +30,9 @@ class Settings(BaseSettings):
     # Redis — session state (JSON, no Pickle)
     redis_url: str = "redis://localhost:6379"
     redis_session_ttl: int = 7200   # 2 hours
-    redis_task_cache_ttl: int = 600  # 10 minutes
+    # Process-wide cache of the knowledge HIERARCHY read from content-service (nodes, children, L4 lists, prerequisites), seconds; 0 = off.
+    # It replaces the unused ``redis_task_cache_ttl``.  Tasks are never cached: they follow the live bank (repairs, deactivation).
+    knowledge_cache_ttl: int = Field(default=600, ge=0)  # 10 minutes: the hierarchy changes only with a content release
 
     # Blocking work of start / resume / report handlers runs in threads, at most this many at a time per worker (src/core/sync_slots.py).
     # Must stay below the pool of database connections (pool_size 5 + max_overflow 10 = 15): the rest is left to answers and open sessions.

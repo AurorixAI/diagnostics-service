@@ -11,6 +11,7 @@ Retry policy (tenacity):
 """
 from __future__ import annotations
 
+import http.cookiejar
 import logging
 from urllib.parse import quote
 
@@ -43,6 +44,9 @@ def get_client() -> httpx.Client:
                 "X-Internal-Service-Token": s.internal_service_token,
             },
         )
+        # One client for every student and teacher of the worker: it must keep no cookies (LESSONS 80) - a ``Set-Cookie`` of one answer would
+        # ride on the next person's request.  A jar that accepts nothing (``allowed_domains=[]`` refuses every domain).
+        _client.cookies.jar.set_policy(http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))
     return _client
 
 
