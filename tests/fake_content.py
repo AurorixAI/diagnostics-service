@@ -25,6 +25,20 @@ class Response:
             raise RuntimeError(f"HTTP {self.status_code}")
 
 
+# The columns a bank task of content-service carries (what the removed ORM mirror ``TaskMaster`` declared): a row of the bank as the service
+# reads it over HTTP is a namespace with ALL of them (None where the row has nothing), so a code path that reads a missing field fails here as it would there.
+_BANK_TASK_FIELDS = (
+    "id", "skill_id", "question_text", "question_latex", "answer_type", "correct_answer", "correct_answer_latex", "sympy_solution",
+    "answer_options", "difficulty", "irt_discrimination", "irt_difficulty", "irt_guessing", "distractor_meta", "question_image_url", "is_active",
+)
+
+
+def bank_task(**fields) -> types.SimpleNamespace:
+    unknown = set(fields) - set(_BANK_TASK_FIELDS)
+    assert not unknown, f"not a column of the bank task: {sorted(unknown)}"
+    return types.SimpleNamespace(**{name: fields.get(name) for name in _BANK_TASK_FIELDS})
+
+
 def node(node_id, parent, level, grade, order=0):
     return {"id": node_id, "parent_id": parent, "level": level, "name": f"name {node_id}", "name_ru": f"имя {node_id}",
             "class_level_start": grade, "sequence_order": order}

@@ -32,7 +32,7 @@ from src.domain.session_state import SessionState
 from src.domain.sympy_sandbox import SandboxUnavailable
 from src.models.base import Base
 from src.models.diag_models import DiagAnswer, DiagReport, DiagSession
-from src.models.knowledge import TaskMaster
+from tests.fake_content import bank_task
 from src.state import redis_state
 from src.state.redis_state import RedisStateManager
 
@@ -43,7 +43,7 @@ ORDER = ["WB_A", "WB_B", "WB_C"]
 
 
 def _task(task_id, answer, answer_type="numeric"):
-    return TaskMaster(id=task_id, skill_id="WB_SKILL", question_text="Synthetic " + task_id,
+    return bank_task(id=task_id, skill_id="WB_SKILL", question_text="Synthetic " + task_id,
                       question_latex="Synthetic " + task_id, answer_type=answer_type, correct_answer=answer,
                       irt_discrimination=1.0, irt_difficulty=0.0, irt_guessing=0.0)
 

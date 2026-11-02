@@ -23,7 +23,7 @@ import logging
 import math
 import random
 import uuid
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -63,7 +63,6 @@ from src.domain.answer_evaluator import AnswerEvaluator
 from src.domain.task_evidence import capture_task, read_task, task_object
 from src.domain.session_state import SessionState
 from src.models.diag_models import DiagAnswer, DiagSession
-from src.models.knowledge import TaskMaster
 from src.repositories.diag_repo import (
     DiagAnswerRepository,
     DiagReportRepository,
@@ -1813,7 +1812,7 @@ class SessionService:
 
     # ── Utilities ──────────────────────────────────────────────────────────
 
-    def _task_to_out(self, task: TaskMaster, state: SessionState, *, capture: bool = True) -> TaskOut:
+    def _task_to_out(self, task: Any, state: SessionState, *, capture: bool = True) -> TaskOut:
         snapshot = state.current_task_snapshot
         if snapshot is not None and snapshot.get('task', {}).get('id') == task.id:
             payload = read_task(snapshot, task.id)

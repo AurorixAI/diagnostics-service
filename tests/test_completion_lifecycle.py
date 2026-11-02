@@ -29,7 +29,7 @@ from src.domain import auth_sync_jobs as sync_jobs
 from src.domain.session_state import SessionState
 from src.models.base import Base
 from src.models.diag_models import DiagAnswer, DiagReport, DiagSession
-from src.models.knowledge import TaskMaster
+from tests.fake_content import bank_task
 from src.state.redis_state import RedisStateManager
 
 DB_URL = os.getenv("A2_TEST_DATABASE_URL")
@@ -59,7 +59,7 @@ def scenario(monkeypatch):
     state.current_task_id = PAYLOAD["task_id"]
     state.current_skill_id, state.current_topic_id = "A2_SKILL", "A2_TOPIC"
     redis.save(state)
-    task = TaskMaster(id=PAYLOAD["task_id"], skill_id="A2_SKILL", question_text="Synthetic fixture",
+    task = bank_task(id=PAYLOAD["task_id"], skill_id="A2_SKILL", question_text="Synthetic fixture",
                       question_latex="Synthetic fixture", answer_type="numeric", correct_answer="4",
                       irt_discrimination=1.0, irt_difficulty=0.0, irt_guessing=0.0)
     monkeypatch.setattr(sessions.TaskRepository, "get_by_id", lambda *_: task)
@@ -458,7 +458,7 @@ def test_issued_key_and_irt_are_used_after_bank_edit_with_durable_snapshot(scena
     from src.domain.task_evidence import capture_task
     from src.domain.alpha_engine import IRTParams, update_theta
     state = redis.load(str(session_id))
-    original = TaskMaster(id=PAYLOAD['task_id'],skill_id='A2_SKILL',question_text='Original',
+    original = bank_task(id=PAYLOAD['task_id'],skill_id='A2_SKILL',question_text='Original',
                           question_latex='$x=4$',answer_type='numeric',correct_answer='4',
                           irt_discrimination=1.,irt_difficulty=-.5,irt_guessing=0.)
     state.current_task_snapshot = capture_task(original,None,None,'numeric')
@@ -489,7 +489,7 @@ def test_legacy_answer_records_lookup_provenance_without_issued_claim(scenario):
 def test_next_issued_snapshot_does_not_overwrite_saved_previous_answer(scenario, monkeypatch):
     client,session_id,_projection,factory,redis=scenario
     monkeypatch.setattr(sessions.SessionService,'_should_stop',lambda *_,**__:False)
-    next_task=TaskMaster(id='A2_NEXT',skill_id='A2_SKILL',question_text='Next',
+    next_task=bank_task(id='A2_NEXT',skill_id='A2_SKILL',question_text='Next',
                          question_latex='$x=99$',answer_type='numeric',correct_answer='99')
     def advance(service,state,correct):
         state.current_task_id=next_task.id
