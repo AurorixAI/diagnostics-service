@@ -49,10 +49,9 @@ docker compose up -d --build
 
 # Миграции
 docker exec algo-diagnostic alembic upgrade head
-
-# Prod
-docker compose -f docker-compose.prod.yml up -d
 ```
+
+Прод и stage разворачиваются только из репозитория `algo-infrastructure` (там compose-файлы стеков); отдельного prod-compose в этом репозитории нет.
 
 ## API
 
