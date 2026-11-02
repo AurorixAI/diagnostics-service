@@ -162,7 +162,8 @@ class DiagReport(Base):
         unique=True,
         nullable=False,
     )
-    student_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+    # no ``index=True`` here: ``idx_diag_reports_student`` below is the one index of this column (production has only it; P-08)
+    student_id = Column(UUID(as_uuid=True), nullable=False)
     grade_level = Column(Integer, nullable=False)
 
     # Core metrics
