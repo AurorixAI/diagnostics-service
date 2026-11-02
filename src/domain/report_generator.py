@@ -97,22 +97,6 @@ def _all_strings(value: Any) -> Iterator[str]:
         for item in value:
             yield from _all_strings(item)
 
-_LEVEL_RU = {
-    "mastered":    "Отличное владение",
-    "learning":    "Хорошее понимание",
-    "struggling":  "Есть затруднения",
-    "gap":         "Пробел в знаниях",
-    "below_grade": "Ниже уровня класса",
-    "at_grade":    "Соответствует уровню",
-    "above_grade": "Выше уровня класса",
-}
-
-_STATUS_MAP = {
-    "above_grade": "above_level",
-    "at_grade":    "on_level",
-    "below_grade": "below_level",
-}
-
 # Thresholds for deterministic classification
 _THRESHOLD_STRONG   = 70   # mastery % ≥ this → strong skill
 _THRESHOLD_WEAK_HI  = 65   # mastery % < this → weak skill (upper bound)
@@ -1511,7 +1495,6 @@ def _build_deterministic_summary(
     boundary: Dict[str, Any],
     chains: List[Dict[str, Any]],
     strong_skills: List[Dict[str, Any]],
-    deep_scan_run: bool = False,
     solved: Optional[int] = None,
     total: Optional[int] = None,
     achievements: Optional[List[Dict[str, Any]]] = None,
@@ -1521,7 +1504,6 @@ def _build_deterministic_summary(
 
     The level is stated only by its band (``status_label``); there is no
     within-grade equivalent and no author: the text is an automatic summary.
-    ``deep_scan_run`` is accepted for compatibility: the wording no longer depends on it.
     """
     # a root cause is named only from a chain backed by the stored deep-scan link (prefer the one at the breakpoint)
     confirmed = _confirmed_chains(chains)
@@ -1591,7 +1573,6 @@ _AI_SCHEMA = """{
 def _build_prompt(
     *,
     grade_level: int,
-    overall_level: str,
     score_pct: int,
     correct: int,
     total: int,
@@ -2166,7 +2147,6 @@ def generate_and_save_report(
         )
         prompt_args = dict(
             grade_level=grade_level,
-            overall_level=overall_level,
             score_pct=score_pct,
             correct=correct,
             total=total,
@@ -2262,7 +2242,6 @@ def generate_and_save_report(
             boundary=diagnostic_boundary,
             chains=root_cause_chains,
             strong_skills=strong_skills,
-            deep_scan_run=deep_scan_run,
             solved=correct,
             total=total,
             achievements=achievements if error_free else None,

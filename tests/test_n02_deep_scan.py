@@ -128,16 +128,14 @@ def test_legacy_answers_without_link_keep_the_inference_but_keep_same_grade_link
     assert chains[0]["root_gap_skill_id"] == "G8_B"
 
 
-def test_summary_states_the_recorded_difficulties_the_same_way_with_or_without_a_deep_scan():
+def test_summary_states_the_recorded_difficulties_without_a_meta_statement_about_a_deep_scan():
     args = dict(status_label="Соответствует уровню", grade_level=8, score_pct=40,
                 boundary={"breakpoint_skills": ["Дроби"]}, strong_skills=[], chains=[])
-    without = rg._build_deterministic_summary(**args)
-    ran = rg._build_deterministic_summary(**args, deep_scan_run=True)
-    assert without == ran                                              # O4: no meta-statements either way
-    assert "Зафиксированы ключевые затруднения: Дроби." in ran
+    ran = rg._build_deterministic_summary(**args)
+    assert "Зафиксированы ключевые затруднения: Дроби." in ran            # O4: no meta-statements
     assert "первопричин" not in ran and "без углублённой проверки" not in ran
     assert not rg.contains_retired_claim(ran)
-    assert "Deep Scan" not in without + ran
+    assert "Deep Scan" not in ran
 
 
 @pytest.mark.parametrize("label", list(STATUS_LABEL_RU.values()))

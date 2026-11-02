@@ -7,11 +7,6 @@ from typing import Any, Optional
 from .proof_answer import extract_proof_expression, format_proof_answer, is_proof_placeholder
 from .answer_value import answer_value_key, answers_equivalent
 
-# Types that never get auto-built MCQ (no meaningful button choices).
-_DIAG_ALWAYS_OPEN_TYPES = frozenset({
-    "open_text",
-})
-
 # A yes/no question is a natural two-button choice; it needs only the one
 # opposite distractor instead of the usual two.
 _BINARY_ANSWERS = frozenset({"да", "нет", "верно", "неверно", "yes", "no"})
@@ -75,24 +70,6 @@ def _has_stored_options(task: Any) -> bool:
     """True when an author supplied a complete-enough UI option list."""
     existing = getattr(task, "answer_options", None)
     return isinstance(existing, list) and len(existing) >= 2
-
-
-def should_show_diag_mcq(task: Any) -> bool:
-    """Diagnostic: MCQ whenever we have ≥2 choices (stored or from distractor_meta)."""
-    at = (getattr(task, "answer_type", "") or "").lower()
-    if at in _DIAG_ALWAYS_OPEN_TYPES:
-        return False
-
-    # An author-supplied option list is the exact UI source. distractor_meta
-    # enriches matching wrong choices with error logic, but never replaces an
-    # independently authored list.
-    if _has_stored_options(task):
-        return True
-    distractors = _distractor_values(task)
-    if len(distractors) >= 2:
-        return True
-    correct = str(getattr(task, "correct_answer", "") or "").strip()
-    return bool(distractors) and _is_binary_answer(correct)
 
 
 def _latex_for_value(task: Any, value: str) -> str:

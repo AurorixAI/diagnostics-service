@@ -11,7 +11,7 @@ from src.domain import session_service as session_service_module
 from src.domain.answer_evaluator import AnswerEvaluator
 from src.domain.session_service import SessionService
 from src.domain.session_state import SessionState
-from src.domain.task_display import build_diag_answer_options, should_show_diag_mcq
+from src.domain.task_display import build_diag_answer_options
 
 
 def _task(**kwargs):
@@ -201,7 +201,6 @@ def test_yes_no_question_with_one_distractor_is_two_buttons():
     options, _ = build_diag_answer_options(task, seed="s:task-1")
 
     assert sorted(options) == ["да", "нет"]
-    assert should_show_diag_mcq(task) is True
     assert _graded(task, options) == [option == "нет" for option in options]
 
 
@@ -209,7 +208,6 @@ def test_other_answers_with_one_distractor_stay_open_input():
     task = _task(correct_answer="4", distractor_meta=[{"value": "5"}])
 
     assert build_diag_answer_options(task, seed="s:task-1") == (None, None)
-    assert should_show_diag_mcq(task) is False
 
 
 # ── stable per-attempt shuffle ──────────────────────────────────────────────

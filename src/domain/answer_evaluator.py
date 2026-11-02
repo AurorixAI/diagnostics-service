@@ -97,7 +97,6 @@ _SAFE_GLOBALS = {
 # ── Math notation preprocessing ───────────────────────────────────────────────
 
 # Unicode superscripts → ASCII exponent notation for sympy
-_SUPERSCRIPTS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 _SUPERSCRIPT_MAP = {
     "²": "**2", "³": "**3", "⁴": "**4", "⁵": "**5",
     "⁶": "**6", "⁷": "**7", "⁸": "**8", "⁹": "**9",
