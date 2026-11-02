@@ -64,11 +64,6 @@ class NoTasksAvailableError(DiagnosticError):
         )
 
 
-class InvalidAnswerError(DiagnosticError):
-    def __init__(self, detail: str):
-        super().__init__(detail, "INVALID_ANSWER")
-
-
 class TaskOutOfSequenceError(DiagnosticError):
     """An answer was submitted for a task other than the active task."""
 

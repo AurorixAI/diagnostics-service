@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -80,33 +80,3 @@ class ResolvedSessionResponse(BaseModel):
     items_answered: int
     current_task: Optional[TaskOut] = None
     total_time_ms: int = 0
-
-
-# ── Report ────────────────────────────────────────────────────────────────
-
-class TopicBreakdownItem(BaseModel):
-    topic_id: str
-    alpha: float
-    level: str      # below_grade | at_grade | above_grade
-
-
-class DiagnosticReportOut(BaseModel):
-    session_id: uuid.UUID
-    student_id: uuid.UUID
-    grade_level: int
-    overall_theta: float
-    overall_level: str
-    confidence_interval: List[float]    # [lo, hi]
-    topic_breakdown: Dict[str, Any]
-    weak_skills: List[str]
-    recommended_start: Optional[str]
-    items_total: int
-
-
-# ── Health ────────────────────────────────────────────────────────────────
-
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    database: str
-    redis: str
