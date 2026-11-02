@@ -51,7 +51,7 @@ def service_with(content, monkeypatch, grade=7, theta=0.2):
 
 @pytest.mark.parametrize("empty_prefix, probes_before, probes_after", [
     (0, 1, 1),          # the first skill has tasks: one call either way (the batch answer is enough, no second call)
-    (7, 8, 1),          # the first 8 skills are empty: 8 probes -> one batch
+    (7, 8, 2),          # the first 8 skills are empty: 8 probes -> the first alone + one batch
     (40, 41, 6),        # 40 skills without a free task in front: 41 probes -> 6 batches
 ])
 def test_task_probes_of_one_precision_answer(monkeypatch, empty_prefix, probes_before, probes_after):
@@ -84,7 +84,7 @@ def test_a_bank_without_free_tasks_costs_a_scan_of_128_probes_twice_before_and_1
     old_scan(service.task_repo, skills, state.theta.theta, state.used_task_ids)
     before = content.count("/api/v1/content/tasks")
     print(f"P-02 exhausted bank, 128 skills: probes {before} -> {after}")
-    assert before == 256 and after == 16        # 128 + 128 (the any-task pass) -> 16 batches, the any-task pass asks nobody again
+    assert before == 256 and after == 17        # 128 + 128 (the any-task pass) -> 16 batches, the any-task pass asks nobody again
 
 
 @pytest.mark.parametrize("seed", range(60))
@@ -174,3 +174,41 @@ def test_all_content_calls_of_two_consecutive_precision_answers_before_and_after
     print(f"\nP-01+P-02 two precision answers, 40 empty skills in front: content HTTP {before} -> {after}")
     assert picked_before == picked_after
     assert (before, after) == (2 * (1 + 41 + 3), (1 + 3) + 6 + 6)      # 90 -> 16: lists/context once, then only the 6 batches of each answer
+
+
+def test_an_ordinary_turn_pulls_no_more_rows_than_before_and_the_batches_come_only_after_an_exhausted_first_skill(monkeypatch):
+    """R3 B4: rows/bytes that content-service sorts and diag parses, ordinary turn and exhausted bank, origin/main scan vs now vs the first wc-b version
+    (8 skills x limit 200 on every turn)."""
+    def world():
+        content = FakeContent(topics=4, subtopics_per_topic=8, skills_per_subtopic=4)
+        for sid in content.l4(7):
+            content.add_tasks(sid, [round(0.05 * i, 2) for i in range(12)])           # 12 free tasks per skill: a realistic bank
+        return content
+
+    # ordinary turn: the first skill has tasks
+    content = world()
+    service, state = service_with(content, monkeypatch)
+    repo = service.task_repo
+    skills = content.l4(7)
+    old_scan(repo, skills, 0.2, [])
+    old = (content.count("/api/v1/content/tasks"), content.task_rows, content.task_bytes)
+    content.calls.clear(); content.task_rows = content.task_bytes = 0
+    repo.pick_task_by_difficulty_target(skills, 0.2, exclude_ids=[])
+    new = (content.count("/api/v1/content/tasks"), content.task_rows, content.task_bytes)
+    content.calls.clear(); content.task_rows = content.task_bytes = 0
+    repo.get_tasks_for_skills(skills[:8], target_b=0.2, limit=200)                       # what the first wc-b version sent on EVERY turn
+    first_version = (content.count("/api/v1/content/tasks"), content.task_rows, content.task_bytes)
+    print(f"\nP-02 ordinary turn (HTTP, rows, bytes): origin/main {old} | now {new} | first wc-b version {first_version}")
+    assert new == old                                                                    # not one row more than before
+    assert first_version[1] == 8 * 12 and new[1] == 12
+
+    # exhausted bank: 128 empty skills
+    content = FakeContent(topics=4, subtopics_per_topic=8, skills_per_subtopic=4)
+    service, state = service_with(content, monkeypatch)
+    old_scan(service.task_repo, skills, 0.2, [])
+    old_ex = (content.count("/api/v1/content/tasks"), content.task_rows)
+    content.calls.clear()
+    service.task_repo.pick_task_by_difficulty_target(skills, 0.2, exclude_ids=[])
+    new_ex = (content.count("/api/v1/content/tasks"), content.task_rows)
+    print(f"P-02 exhausted bank, 128 empty skills (HTTP, rows): origin/main {old_ex} | now {new_ex}")
+    assert old_ex == (256, 0) and new_ex == (17, 0)

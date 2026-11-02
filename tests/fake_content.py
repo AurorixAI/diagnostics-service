@@ -6,6 +6,7 @@ among equals), else by irt_difficulty, after the filters skill / exclude / is_ac
 """
 from __future__ import annotations
 
+import json
 import random
 import types
 from collections import Counter
@@ -36,6 +37,8 @@ class FakeContent:
         self.tasks: dict[str, list] = {}           # skill_id -> [task dict]
         self.calls: list[tuple[str, dict]] = []
         self.down = False
+        self.task_rows = 0       # rows and JSON bytes that GET /tasks returned (what the content DB sorts and diag parses)
+        self.task_bytes = 0
         for g in grades:
             sec = f"G{g}_L1"
             self.nodes[sec] = node(sec, None, "L1", g)
@@ -78,7 +81,10 @@ class FakeContent:
         if rest == "/skills":
             return Response([n for n in self.nodes.values() if n["level"] == params["level"] and n["class_level_start"] == params["grade"]])
         if rest == "/tasks":
-            return Response(self._list_tasks(params))
+            rows = self._list_tasks(params)
+            self.task_rows += len(rows)
+            self.task_bytes += len(json.dumps(rows))
+            return Response(rows)
         parts = rest.strip("/").split("/")
         assert parts[0] == "skills", path
         node_id = parts[1]

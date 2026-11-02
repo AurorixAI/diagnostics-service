@@ -258,8 +258,8 @@ class TaskRepository:
     ) -> tuple[Optional[str], Optional[types.SimpleNamespace], set]:
         """(skill_id, task, skills known to have no free task): the FIRST skill of the list that has a free task, and a task of it near ``target_b``.
 
-        The answer is the one a skill-by-skill scan gives (``get_task_by_difficulty_target`` for each skill in turn, the first hit wins), at
-        one HTTP call per ``batch`` skills instead of one per skill (P-02).  The batch call returns the tasks of its skills nearest to the target
+        The answer is the one a skill-by-skill scan gives (``get_task_by_difficulty_target`` for each skill in turn, the first hit wins): the
+        first skill alone (as before), the skills after an exhausted first one at one HTTP call per ``batch`` skills instead of one per skill (P-02).  The batch call returns the tasks of its skills nearest to the target
         across all of them, cut at ``limit``; read it like this:
           * fewer rows than ``limit`` - the window is complete: a skill with no row has no free task;
           * ``limit`` rows - the window is cut: a skill with rows has its nearest tasks in it (a prefix of its own order), a skill WITHOUT rows may
@@ -267,8 +267,18 @@ class TaskRepository:
             (its 20 nearest are not all there).
         """
         empty: set = set()
-        for start in range(0, len(ordered_skill_ids), batch):
-            chunk = ordered_skill_ids[start:start + batch]
+        if not ordered_skill_ids:
+            return None, None, empty
+        # The ordinary turn is the old one: ONE skill, the usual window of 20 rows.  Only when the first skill has no free task do the rest go in
+        # batches - an ordinary turn never pulls the rows of 8 skills (R3 B4).
+        first = ordered_skill_ids[0]
+        task = self.get_task_by_difficulty_target(first, target_b, exclude_ids=exclude_ids)
+        if task is not None:
+            return first, task, empty
+        empty.add(first)
+        rest = ordered_skill_ids[1:]
+        for start in range(0, len(rest), batch):
+            chunk = rest[start:start + batch]
             rows = self.get_tasks_for_skills(chunk, target_b=target_b, exclude_ids=exclude_ids, limit=limit)
             cut = len(rows) >= limit
             by_skill: dict[str, list] = {}
