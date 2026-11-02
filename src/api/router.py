@@ -5,7 +5,7 @@ Endpoints:
   POST  /api/v1/diagnostic/sessions              - Create session
   POST  /api/v1/diagnostic/sessions/{id}/answer  - Submit answer
   GET   /api/v1/diagnostic/sessions/{id}/report  - Get final report
-  GET   /api/v1/diagnostic/sessions/active        - Check active session by invite_code
+  GET   /api/v1/diagnostic/sessions/by-invite     - Resolve the attempt of an invite_code (active / completed / not started)
 """
 from __future__ import annotations
 
@@ -29,7 +29,6 @@ from src.core.exceptions import (
 )
 from src.domain.session_service import SessionService
 from src.schemas.diag_schemas import (
-    ActiveSessionResponse,
     AnswerResult,
     CreateSessionRequest,
     CreateSessionResponse,
@@ -118,49 +117,6 @@ async def create_session(
     except Exception as exc:
         log.error("diagnostic_start_failed error_type=%s", type(exc).__name__)
         raise invite_error(500, "SESSION_START_FAILED", "Не удалось начать диагностику. Повторите проверку состояния.", "check_session")
-
-
-@router.get("/sessions/active", response_model=ActiveSessionResponse)
-async def get_active_session(
-    request: Request,
-    invite_code: str = Query(..., description="Diagnostic invite code"),
-    service: SessionService = Depends(_service),
-):
-    """Check if an active (unfinished) session exists for the given invite_code.
-
-    Called on page load by the frontend to offer 'Continue where you left off?'
-    Returns 404 when no active session exists (new student or session completed/expired).
-    """
-    ticket = admit_invite_attempt(request, invite_code)  # #77
-    try:
-        # A callback retry can leave auth-service on ``confirmed`` briefly,
-        # while the diagnostic DB already owns the only valid session.  Resume
-        # that session; never replace it with a fresh one.
-        await validate_invite_capability(
-            invite_code,
-            allowed_statuses={"confirmed", "in_progress"},
-            # An invite cancelled mid-test (student archived): a session that started before it finishes.
-            session_started_at=lambda: _session_start_of(service, invite_code),
-        )
-        ticket.exists()
-        result = await run_sync_limited(service.get_active_session, invite_code)
-        if result is None:
-            raise invite_error(404, "SESSION_NOT_FOUND", "Активная попытка не найдена.", "check_session")
-        session_id, items_answered, current_task, total_time_ms = result
-        return ActiveSessionResponse(
-            session_id=session_id,
-            items_answered=items_answered,
-            current_task=current_task,
-            total_time_ms=total_time_ms,
-        )
-    except DiagnosticError as exc:
-        raise _answer_error(exc)
-    except HTTPException as exc:
-        ticket.record(exc)
-        raise
-    except Exception as exc:
-        log.error("diagnostic_restore_failed error_type=%s", type(exc).__name__)
-        raise invite_error(500, "SESSION_RESTORE_FAILED", "Не удалось проверить состояние попытки.", "retry")
 
 
 @router.post("/sessions/{session_id}/answer", response_model=AnswerResult)

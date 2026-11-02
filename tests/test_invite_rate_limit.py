@@ -60,7 +60,7 @@ def _invite(i: int, status: str = "confirmed", expires_in: timedelta = timedelta
 
 @pytest.fixture
 def api(monkeypatch):
-    """The three public endpoints with a scripted auth-service and a service that has no attempt yet."""
+    """The public endpoints (start a session, resolve by invite) with a scripted auth-service and a service that has no attempt yet."""
     invites: dict[str, dict] = {code_of(i): _invite(i) for i in range(60)}
     calls = {"auth": 0}
 
@@ -99,10 +99,6 @@ def api(monkeypatch):
 
 def resolve(client, code, ip="203.0.113.7"):
     return client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": code}, headers={"X-Real-IP": ip})
-
-
-def active(client, code, ip="203.0.113.7"):
-    return client.get("/api/v1/diagnostic/sessions/active", params={"invite_code": code}, headers={"X-Real-IP": ip})
 
 
 def create(client, code, student_id, ip="203.0.113.7", grade=GRADE):
@@ -211,7 +207,6 @@ class TestLegitimateClassIsNotLockedOut:
         for _ in range(3):
             for i in range(20):
                 assert resolve(api, code_of(i)).status_code == 404
-                assert active(api, code_of(i)).status_code == 404
 
     def test_a_few_mistyped_codes_in_the_class_are_fine(self, api):
         for n in range(5):
@@ -260,11 +255,11 @@ class TestGuessingIsBudgeted:
             resolve(api, guess(n))
         assert resolve(api, code_of(0), ip="198.51.100.9").status_code == 404
 
-    def test_all_three_entries_share_the_budget(self, api):
-        resolve(api, guess(1)), active(api, guess(2)), create(api, guess(3), student_of(0))
-        for n in range(FAILS_PER_MINUTE.count - 3):
+    def test_both_entries_share_the_budget(self, api):
+        resolve(api, guess(1)), create(api, guess(3), student_of(0))
+        for n in range(FAILS_PER_MINUTE.count - 2):
             resolve(api, guess(10 + n))
-        for refused in (resolve(api, code_of(0)), active(api, code_of(0)), create(api, code_of(0), student_of(0))):
+        for refused in (resolve(api, code_of(0)), create(api, code_of(0), student_of(0))):
             assert refused.status_code == 429
 
     def test_the_budget_comes_back(self, api, monkeypatch):

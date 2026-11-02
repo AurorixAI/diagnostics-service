@@ -65,14 +65,6 @@ class CreateSessionResponse(BaseModel):
     first_task: TaskOut
 
 
-class ActiveSessionResponse(BaseModel):
-    """Returned when an unfinished session exists for an invite_code."""
-    session_id: uuid.UUID
-    items_answered: int
-    current_task: TaskOut
-    total_time_ms: int = 0
-
-
 class ResolvedSessionResponse(BaseModel):
     """Resolve the owned attempt, independently of the auth callback's timing."""
     session_id: uuid.UUID

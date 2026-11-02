@@ -1,7 +1,7 @@
 """Abuse limits for the PUBLIC diagnostic invite-code entry (ROADMAP #77).
 
 A diagnostic invite is a code of 8 characters from a 31-character alphabet.  The public endpoints that take it
-(``POST /sessions``, ``GET /sessions/active``, ``GET /sessions/by-invite``) answer differently for an unknown
+(``POST /sessions``, ``GET /sessions/by-invite``) answer differently for an unknown
 code (403 INVITE_INVALID) and a known one, so the code space can be probed.  auth-service cannot throttle this by
 the student's address: diagnostic-service calls it server-to-server, so the address it sees is ours.  The limit
 therefore lives here, where the browser's address is known.

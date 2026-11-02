@@ -70,7 +70,7 @@ Swagger UI (только `development`): http://localhost:8002/docs
 
 ### Защита входа по коду приглашения от перебора (ROADMAP #77)
 
-Публичные входы по коду — `POST /diagnostic/sessions`, `GET /diagnostic/sessions/active`, `GET /diagnostic/sessions/by-invite` — по-разному отвечают на
+Публичные входы по коду — `POST /diagnostic/sessions`, `GET /diagnostic/sessions/by-invite` — по-разному отвечают на
 неизвестный и известный код, поэтому auth-service не может ограничить перебор по IP ученика (мы вызываем его сервер-к-серверу). Лимит здесь:
 
 - IP клиента — только `X-Real-IP` (его ставит nginx; `X-Forwarded-For` не доверяем), IPv6 считается по /64. Счётчики — Redis, без Redis — память процесса с одним предупреждением в лог.

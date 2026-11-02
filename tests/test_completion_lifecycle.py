@@ -203,7 +203,6 @@ def test_a_session_that_started_at_or_after_the_cancellation_is_cut_off(scenario
     for response in (
         submit(client, session_id),
         client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE}),
-        client.get("/api/v1/diagnostic/sessions/active", params={"invite_code": CODE}),
     ):
         assert response.status_code == 410, response.text
         assert response.json()["detail"]["code"] == "INVITE_CANCELLED"
@@ -224,9 +223,9 @@ def test_only_an_archived_student_cancellation_lets_a_session_finish(scenario):
 def test_resume_of_a_running_session_of_a_cancelled_invite_is_allowed_before_the_cancellation_only(scenario):
     client, session_id, _invite, _factory, redis = scenario
     _cancel(scenario, +60)
-    active = client.get("/api/v1/diagnostic/sessions/active", params={"invite_code": CODE})
+    active = client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
     assert active.status_code == 200, active.text                 # the session started before the cancellation: resumable
-    assert active.json()["session_id"] == str(session_id)
+    assert active.json()["session_id"] == str(session_id) and active.json()["status"] == "active"
 
 
 def test_foreign_capability_cannot_submit_or_read_result(scenario):
