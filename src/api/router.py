@@ -46,12 +46,6 @@ def _service(db: Session = Depends(get_db)) -> SessionService:
     return SessionService(db)
 
 
-def _session_start_of(service, invite_code: str):
-    """When the session of this invite was created (``None`` if there is none) - looked up only for a cancelled invite."""
-    session = service.session_repo.get_by_invite_code(invite_code)
-    return session.created_at if session else None
-
-
 _EXPIRED_MESSAGE = "Эту попытку нельзя продолжить: её данные потеряны. Обратитесь в учебный центр: вам выдадут новую ссылку."
 
 
