@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import uuid
 from types import SimpleNamespace
 
 import httpx
@@ -22,7 +23,7 @@ from src.core import access  # noqa: E402
 from src.core.abuse_limit import FAILS_PER_MINUTE, GUESS_CODES  # noqa: E402
 
 from tests.test_invite_rate_limit import (  # noqa: E402,F401  (fixtures and helpers)
-    GRADE, _invite, active, api, code_of, create, resolve, student_of,
+    GRADE, _invite, api, code_of, create, resolve, student_of,
 )
 
 MESSAGE = "Приглашение отменено"
@@ -76,7 +77,7 @@ def test_capability_check_refuses_a_cancelled_projection_for_every_allowed_set(a
 def test_every_public_entry_answers_410_for_a_cancelled_code(api):
     code, student = code_of(2), student_of(2)
     api.invites[code]["status"] = "cancelled"
-    for response in (create(api, code, student), active(api, code), resolve(api, code)):
+    for response in (create(api, code, student), resolve(api, code)):
         assert response.status_code == 410, response.text
         detail = response.json()["detail"]
         assert detail["code"] == "INVITE_CANCELLED" and detail["message"] == MESSAGE
@@ -144,26 +145,39 @@ def test_the_capability_check_returns_the_projection_of_a_running_session_as_in_
     assert exc.value.status_code == 410
 
 
-def test_the_active_session_endpoint_resumes_a_session_that_predates_the_cancellation(api):
+def _resumable(code_index, started, session_id=None):
+    """The service side of GET /sessions/by-invite for an attempt that started at ``started`` (None: no attempt) and is still running."""
+    session = SimpleNamespace(
+        id=session_id or uuid.UUID(int=900 + code_index), student_id=student_of(code_index), grade_level=GRADE,
+        created_at=started, phase="warmup", items_answered=3,
+    ) if started else None
+
+    class Service:
+        def __init__(self):
+            self.session_repo = SimpleNamespace(get_by_invite_code=lambda c: session, get_fresh=lambda _id: session)
+
+        def get_active_session(self, c):
+            return (session.id, 3, None, 1000)
+
+    return Service(), session
+
+
+def test_by_invite_resumes_a_session_that_predates_the_cancellation(api):
     from datetime import datetime
+    from src.api import router as diag_router
     code = code_of(6)
     api.invites[code].update(CANCELLED_BY_ARCHIVE, expires_at=api.invites[code]["expires_at"])
 
-    class Service:
-        def __init__(self, started):
-            self.session_repo = SimpleNamespace(
-                get_by_invite_code=lambda c: SimpleNamespace(created_at=started) if started else None)
-
-        def get_active_session(self, c):
-            return None                                           # (404 below = it got past the invite check)
-
-    from src.api import router as diag_router
-    for started, status_code in ((datetime(2026, 10, 17, 9, 0), 404), (datetime(2026, 10, 17, 11, 0), 410), (None, 410)):
-        api.app.dependency_overrides[diag_router._service] = lambda s=started: Service(s)
-        response = active(api, code)
+    # started before the cancellation: resumable; at/after it, or with no attempt at all: the invite is cancelled
+    for started, status_code in ((datetime(2026, 10, 17, 9, 0), 200), (datetime(2026, 10, 17, 11, 0), 410), (None, 410)):
+        service, session = _resumable(6, started)
+        api.app.dependency_overrides[diag_router._service] = lambda s=service: s
+        response = resolve(api, code)
         assert response.status_code == status_code, (started, response.text)
         if status_code == 410:
             assert response.json()["detail"]["code"] == "INVITE_CANCELLED"
+        else:
+            assert response.json()["status"] == "active" and response.json()["session_id"] == str(session.id)
 
 
 def test_the_start_callback_carries_the_moment_the_session_started(monkeypatch):
@@ -226,17 +240,18 @@ def test_the_session_lookup_for_a_cancelled_invite_runs_off_the_event_loop(api, 
     code = code_of(7)
     api.invites[code].update(CANCELLED_BY_ARCHIVE, expires_at=api.invites[code]["expires_at"])
     threads = {}
+    inner, _session = _resumable(7, datetime(2026, 10, 17, 9, 0))
 
     class Service:
         def __init__(self):
             def lookup(c):
                 threads["lookup"] = threading.get_ident()
-                return SimpleNamespace(created_at=datetime(2026, 10, 17, 9, 0))
-            self.session_repo = SimpleNamespace(get_by_invite_code=lookup)
+                return inner.session_repo.get_by_invite_code(c)
+            self.session_repo = SimpleNamespace(get_by_invite_code=lookup, get_fresh=inner.session_repo.get_fresh)
 
         def get_active_session(self, c):
             threads["active"] = threading.get_ident()        # WC-B B-04: this service call is off the loop too
-            return None
+            return inner.get_active_session(c)
 
     real_validate = diag_router.validate_invite_capability
 
@@ -246,9 +261,5 @@ def test_the_session_lookup_for_a_cancelled_invite_runs_off_the_event_loop(api, 
 
     api.app.dependency_overrides[diag_router._service] = lambda: Service()
     monkeypatch.setattr(diag_router, "validate_invite_capability", validate_on_the_loop)
-    assert active(api, code).status_code == 404               # past the invite check
+    assert resolve(api, code).status_code == 200              # past the invite check (the attempt predates the cancellation)
     assert threads["lookup"] != threads["loop"] and threads["active"] != threads["loop"]
-    # and the lookup is not made at all for an invite that is not cancelled
-    threads.clear()
-    assert active(api, code_of(8)).status_code == 404
-    assert "lookup" not in threads
