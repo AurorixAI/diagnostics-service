@@ -86,11 +86,12 @@ def _alpha_to_status(alpha: float) -> str:
 
 # ── 1. STUDENT SKILL MAP ───────────────────────────────────────────────────────
 
-@router.get("/students/{student_id}/skill-map", dependencies=[Depends(sync_slot)])
+@router.get("/students/{student_id}/skill-map")
 def student_skill_map(
     student_id: str,
     db: Session = Depends(get_db),
     actor: DiagnosticActor = Depends(require_diagnostic_staff),
+    _slot: None = Depends(sync_slot),   # AFTER the access check: a request without rights must not hold a slot (R3 B1)
 ):
     """
     Per-topic mastery карта ученика из последней завершённой диагностики.
@@ -201,11 +202,12 @@ def student_skill_map(
 
 # ── 2. STUDENT TIMELINE ────────────────────────────────────────────────────────
 
-@router.get("/students/{student_id}/timeline", dependencies=[Depends(sync_slot)])
+@router.get("/students/{student_id}/timeline")
 def student_timeline(
     student_id: str,
     db: Session = Depends(get_db),
     actor: DiagnosticActor = Depends(require_diagnostic_staff),
+    _slot: None = Depends(sync_slot),   # AFTER the access check: a request without rights must not hold a slot (R3 B1)
 ):
     """Динамика θ ученика — все завершённые сессии по времени."""
     await_on_loop(require_student_report_access, actor, student_id)
@@ -253,12 +255,13 @@ def student_timeline(
 
 # ── 3. STUDENT REPORT ──────────────────────────────────────────────────────────
 
-@router.get("/students/{student_id}/report", dependencies=[Depends(sync_slot)])
+@router.get("/students/{student_id}/report")
 def student_report(
     student_id: str,
     session_id: Optional[str] = Query(None, description="Exact diagnostic session for this report"),
     db: Session = Depends(get_db),
     actor: DiagnosticActor = Depends(require_diagnostic_staff),
+    _slot: None = Depends(sync_slot),   # AFTER the access check: a request without rights must not hold a slot (R3 B1)
 ):
     import uuid
 
@@ -607,11 +610,12 @@ def _build_diagnostic_trajectory(session: Optional[DiagSession], db: Session, kn
 
 # ── 4. GROUP OVERVIEW ──────────────────────────────────────────────────────────
 
-@router.get("/groups/overview", dependencies=[Depends(sync_slot)])
+@router.get("/groups/overview")
 def group_overview(
     student_ids: List[str] = Query(..., description="Список student_id группы"),
     db: Session = Depends(get_db),
     actor: DiagnosticActor = Depends(require_diagnostic_staff),
+    _slot: None = Depends(sync_slot),   # AFTER the access check: a request without rights must not hold a slot (R3 B1)
 ):
     """
     Обзор группы — принимает список student_ids от фронта/монолита.
@@ -665,11 +669,12 @@ def group_overview(
 
 # ── 5. GROUP SKILL HEATMAP ─────────────────────────────────────────────────────
 
-@router.get("/groups/heatmap", dependencies=[Depends(sync_slot)])
+@router.get("/groups/heatmap")
 def group_skill_heatmap(
     student_ids: List[str] = Query(..., description="Список student_id группы"),
     db: Session = Depends(get_db),
     actor: DiagnosticActor = Depends(require_diagnostic_staff),
+    _slot: None = Depends(sync_slot),   # AFTER the access check: a request without rights must not hold a slot (R3 B1)
 ):
     """
     Тепловая карта навыков группы (students × topics).
