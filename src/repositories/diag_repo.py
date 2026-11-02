@@ -27,14 +27,6 @@ class DiagSessionRepository(BaseRepository[DiagSession]):
             statement = statement.with_for_update()
         return self.session.scalar(statement)
 
-    def get_active(self, session_id: uuid.UUID) -> Optional[DiagSession]:
-        return self.session.scalar(
-            select(DiagSession).where(
-                DiagSession.id == session_id,
-                DiagSession.phase != "completed",
-            )
-        )
-
     def get_by_invite_code(
         self,
         code: str,
@@ -45,20 +37,6 @@ class DiagSessionRepository(BaseRepository[DiagSession]):
         if unfinished_only:
             statement = statement.where(DiagSession.phase != "completed")
         return self.session.scalar(statement.order_by(DiagSession.created_at.desc()))
-
-    def get_student_history(
-        self, student_id: uuid.UUID, limit: int = 10
-    ) -> List[DiagSession]:
-        from sqlalchemy import desc
-
-        return list(
-            self.session.scalars(
-                select(DiagSession)
-                .where(DiagSession.student_id == student_id)
-                .order_by(desc(DiagSession.created_at))
-                .limit(limit)
-            )
-        )
 
     def mark_completed(
         self,
@@ -111,16 +89,6 @@ class DiagAnswerRepository(BaseRepository[DiagAnswer]):
                 .where(DiagAnswer.session_id == session_id)
                 .order_by(DiagAnswer.answered_at)
             )
-        )
-
-    def count_session_answers(self, session_id: uuid.UUID) -> int:
-        return (
-            self.session.scalar(
-                select(func.count(DiagAnswer.id)).where(
-                    DiagAnswer.session_id == session_id
-                )
-            )
-            or 0
         )
 
     def get_total_time_ms(self, session_id: uuid.UUID) -> int:
@@ -186,16 +154,3 @@ class DiagReportRepository(BaseRepository[DiagReport]):
             select(DiagReport).where(DiagReport.session_id == session_id)
         )
 
-    def get_student_reports(
-        self, student_id: uuid.UUID, limit: int = 5
-    ) -> List[DiagReport]:
-        from sqlalchemy import desc
-
-        return list(
-            self.session.scalars(
-                select(DiagReport)
-                .where(DiagReport.student_id == student_id)
-                .order_by(desc(DiagReport.generated_at))
-                .limit(limit)
-            )
-        )
