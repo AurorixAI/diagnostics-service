@@ -40,6 +40,8 @@ from .level_policy import (
     build_level,
     count_solved,
     is_correct,
+    round_percent,
+    topic_mastery_percent,
 )
 
 log = logging.getLogger(__name__)
@@ -1244,8 +1246,7 @@ def _build_skill_blocks(
                 details.append(skill_id)
 
     for tid, info in topic_breakdown.items():
-        alpha = float(info.get("alpha", 0))
-        pct = int(max(0, min(100, (0.5 + alpha / 4.0) * 100)))
+        pct = topic_mastery_percent(info.get("alpha", 0))
         name = skill_map.get(tid, {}).get("name_ru", tid)
         observations, wrong_attempts = _topic_evidence(tid, info, answers)
         is_confirmed = tid in confirmed
@@ -1432,12 +1433,11 @@ def _build_achievements(
         correct = sum(1 for a in mine if is_correct(getattr(a, "outcome", None)))
         if correct < 1 or correct != len(mine):
             continue
-        alpha = float((info or {}).get("alpha", 0))
         result.append({
             "skill_id": topic_id,
             "skill_name_ru": skill_map.get(topic_id, {}).get("name_ru", topic_id),
             "correct_answers": correct,
-            "mastery_percent": int(max(0, min(100, (0.5 + alpha / 4.0) * 100))),
+            "mastery_percent": topic_mastery_percent((info or {}).get("alpha", 0)),
         })
     result.sort(key=lambda x: (-x["correct_answers"], -x["mastery_percent"], x["skill_id"]))
     return result
@@ -2020,7 +2020,7 @@ def generate_and_save_report(
         counts = count_solved(answers_orm)
         correct = counts["solved"]
         total = counts["total"] or (0 if answers_orm else max(int(items_total or 0), 1))
-        score_pct = int(round(correct / total * 100)) if total else 0
+        score_pct = round_percent(correct / total * 100) if total else 0
         prerequisite_answers = [a for a in answers_orm if a.is_deep_scan]
         deep_scan_run = bool(prerequisite_answers)
         # ── Level — only from theta/se (never from %-correct, never from AI) ──
@@ -2100,8 +2100,7 @@ def generate_and_save_report(
         topic_lines = []
         weak_ids = {item["skill_id"] for item in weak_skills_block + critical_gaps}
         for tid, info in topic_breakdown.items():
-            alpha = float(info.get("alpha", 0))
-            pct = int(max(0, min(100, (0.5 + alpha / 4.0) * 100)))
+            pct = topic_mastery_percent(info.get("alpha", 0))
             name = skill_map.get(tid, {}).get("name_ru", tid)
             flag = " ⚠️" if tid in weak_ids else ""
             topic_lines.append(f"  {name}: {pct}%{flag}")

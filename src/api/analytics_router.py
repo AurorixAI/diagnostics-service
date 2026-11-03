@@ -31,6 +31,7 @@ from src.domain.level_policy import (
     classify,
     count_solved,
     is_correct,
+    topic_mastery_fraction,
 )
 
 log = logging.getLogger(__name__)
@@ -182,8 +183,7 @@ def student_report(
             name = getattr(node, "name_ru", getattr(node, "name", tid)) if node else tid
         except Exception:
             name = tid
-        alpha = float(info.get("alpha", 0.0))
-        mastery = round(max(0.0, min(1.0, 0.5 + alpha / 4.0)), 4)
+        mastery = round(topic_mastery_fraction(info.get("alpha", 0.0)), 4)
         info_copy["name_ru"] = name
         info_copy["name"] = name
         info_copy["mastery"] = mastery

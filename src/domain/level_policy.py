@@ -41,6 +41,7 @@ are *counted and reported*; theta of past sessions is never recomputed.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Iterable, Optional
 
 # ── Cut-offs (the only place they are written down) ────────────────────────────
@@ -104,6 +105,31 @@ def count_solved(answers: Iterable[Any], *, include_deep_scan: bool = False) -> 
         if is_correct(getattr(answer, "outcome", None)):
             solved += 1
     return {"solved": solved, "total": total}
+
+
+# ── Percent rule (wave E7, decision 7) ──────────────────────────────────────────
+# One rule for every percent a person reads - the report cards, the achievements, the line of the AI prompt, the score of the report:
+# a whole number, HALF UP (57.5 -> 58; Python's round() goes to the even number and int() cuts).  The analytics API may keep one decimal,
+# but it takes the same mastery fraction.
+
+def round_percent(value: float) -> int:
+    """A percent as a whole number in 0..100, half up (the float noise of x.4999999999 is rounded away first)."""
+    return int(max(0, min(100, math.floor(round(float(value), 6) + 0.5))))
+
+
+def topic_mastery_fraction(alpha: Any) -> float:
+    """The mastery of a topic in [0, 1] from its alpha (alpha 0 = 0.5, +-2 = the ends); a broken alpha is the middle."""
+    try:
+        value = float(alpha)
+    except (TypeError, ValueError):
+        return 0.5
+    if not math.isfinite(value):
+        return 0.5
+    return max(0.0, min(1.0, 0.5 + value / 4.0))
+
+
+def topic_mastery_percent(alpha: Any) -> int:
+    return round_percent(topic_mastery_fraction(alpha) * 100)
 
 
 def theta_category(theta: float) -> str:
