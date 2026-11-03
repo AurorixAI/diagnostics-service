@@ -44,7 +44,7 @@ from sympy.parsing.sympy_parser import (
 
 from src.core.burst_alert import BurstAlert
 from src.core.exceptions import AnswerNotCheckedError
-from .answer_value import MAX_ANSWER_CHARS, answer_value_key, answers_equivalent, is_empty_set
+from .answer_value import MAX_ANSWER_CHARS, answer_value_key, exact_number, typed_answer_matches
 from .sympy_sandbox import SandboxUnavailable, SympySandbox
 
 log = logging.getLogger(__name__)
@@ -428,6 +428,7 @@ class AnswerEvaluator:
             return 0.0, "wrong"
 
         # ── Layer 1: Exact match (case-insensitive) ───────────────────────
+        typed = (getattr(task, "display_answer_type", None) or task.answer_type) != "mcq"
         if answer_value_key(given) == answer_value_key(correct):
             return 1.0, "correct"
 
@@ -436,27 +437,31 @@ class AnswerEvaluator:
         # expression, ...) and the displayed one ('mcq' whenever choices were served) in ``display_answer_type``.
         # A choice is compared as a value; only a typed answer needs layers 2-3.  Old snapshots and live bank
         # rows have no ``display_answer_type`` - the bank type decides, as before.
-        if (getattr(task, "display_answer_type", None) or task.answer_type) != "mcq":
-            # Layer 1b (wave E7, decision 8): another notation of the SAME value - 42/10, 4,2, \\dfrac{21}{5} for the key 21/5; «нет корней» for ∅
-            if answers_equivalent(given, correct) or (is_empty_set(given) and is_empty_set(correct)):
+        if typed:
+            # Layer 1b (wave E7, decision 8): the rule of exam-service for a typed answer - another notation of the SAME value is
+            # correct (4,2 / \dfrac{21}{5} for 21/5, нет корней for ∅), an unreduced fraction (42/10) or `.5` is not
+            if typed_answer_matches(given, correct):
                 return 1.0, "correct"
+            # A numeric key is decided by that rule alone: no float rounding, no SymPy ("2 1/5" is 11/5, never 21/5)
+            numeric_key = exact_number(correct) is not None
 
-            # Layer 2: Numeric normalization
-            given_num = _normalize_number(given)
-            correct_num = _normalize_number(correct)
-            if given_num is not None and correct_num is not None:
-                if given_num == correct_num:
-                    return 1.0, "correct"
-                skip_sympy = True  # both are plain numbers and they differ
-            else:
-                skip_sympy = False
+            if not numeric_key:
+                # Layer 2: Numeric normalization
+                given_num = _normalize_number(given)
+                correct_num = _normalize_number(correct)
+                if given_num is not None and correct_num is not None:
+                    if given_num == correct_num:
+                        return 1.0, "correct"
+                    skip_sympy = True  # both are plain numbers and they differ
+                else:
+                    skip_sympy = False
 
-            # Layer 3: SymPy symbolic equivalence
-            if not skip_sympy:
-                sympy_solution = getattr(task, "sympy_solution", None)
-                canonical = str(sympy_solution).strip() if sympy_solution else correct
-                if _sympy_equivalent_untrusted(given, canonical, getattr(task, "id", None) or getattr(task, "task_id", None)):
-                    return 1.0, "correct"
+                # Layer 3: SymPy symbolic equivalence
+                if not skip_sympy:
+                    sympy_solution = getattr(task, "sympy_solution", None)
+                    canonical = str(sympy_solution).strip() if sympy_solution else correct
+                    if _sympy_equivalent_untrusted(given, canonical, getattr(task, "id", None) or getattr(task, "task_id", None)):
+                        return 1.0, "correct"
 
         # ── Layer 4: Distractor check (MCQ and open) ─────────────────────
         # Records the specific misconception for analytics/AI report.

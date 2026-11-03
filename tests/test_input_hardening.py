@@ -243,7 +243,8 @@ def test_ratio_that_overflows_a_float_is_not_a_number_but_ordinary_ratios_grade(
     assert answer_evaluator._normalize_number("1" * 400 + "/1") is None
     assert answer_evaluator._normalize_number("10/4") == 2.5
     task = SimpleNamespace(id="n", correct_answer="2,5", answer_type="exact_number", distractor_meta=None, sympy_solution=None)
-    assert EV.evaluate(task, "10/4") == (1.0, "correct")
+    assert EV.evaluate(task, "5/2") == (1.0, "correct")
+    assert EV.evaluate(task, "10/4") == (0.0, "wrong")          # wave E7: an unreduced fraction is not accepted (the rule of exam-service)
 
 
 def test_deeply_nested_transport_dict_is_returned_unchanged():
@@ -289,8 +290,9 @@ def test_exception_while_grading_is_wrong_and_the_log_has_no_answer_text(monkeyp
     def boom(value):
         raise ValueError(f"invalid literal for int(): {value!r}")
     monkeypatch.setattr(answer_evaluator, "_normalize_number", boom)
+    symbolic = SimpleNamespace(id="open", correct_answer="x+1", answer_type="open", distractor_meta=[], sympy_solution=None)   # a numeric key is decided before this layer (wave E7)
     with caplog.at_level(logging.WARNING, logger=answer_evaluator.log.name):
-        assert EV.evaluate(OPEN_TASK, "SECRET-ANSWER 7") == (0.0, "wrong")
+        assert EV.evaluate(symbolic, "SECRET-ANSWER 7") == (0.0, "wrong")
     assert "answer_evaluation_failed" in caplog.text
     assert "task_id=open" in caplog.text and "error_type=ValueError" in caplog.text
     assert "SECRET" not in caplog.text
@@ -511,7 +513,7 @@ def test_typed_answers_still_get_numeric_and_symbolic_equivalence(task):
                                        answer_type=task.answer_type, display_answer_type=getattr(task, "display_answer_type", None)),
                        "0,5") == (1.0, "correct")
     assert EV.evaluate(SimpleNamespace(id="r", correct_answer="3", distractor_meta=[], sympy_solution=None,
-                                       answer_type=task.answer_type), "√9") == (1.0, "correct")
+                                       answer_type=task.answer_type), "√9") == (0.0, "wrong")      # wave E7: a numeric key takes only the notations of the same number
 
 
 def test_old_snapshot_without_display_type_keeps_the_bank_type():

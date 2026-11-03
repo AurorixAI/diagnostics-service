@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 from fractions import Fraction
+from math import gcd
 from typing import Optional
 
 # The longest answer text the service looks into: a student's answer (the API rejects longer ones with 422), a
@@ -367,3 +368,57 @@ def is_empty_set(value: object) -> bool:
         return False
     text = re.sub(r"\s+", " ", text.replace("$", "").casefold()).strip().rstrip(".;").strip()
     return _EMPTY_SET_PREFIX_RE.sub("", text).strip() in _EMPTY_SET_FORMS
+
+
+# ── A typed answer against the key - the rule of exam-service (wave E7, decision 8 as settled by the lead) ────────────
+# The same value written another way is correct (0,5 = 1/2 = \dfrac{1}{2}; 3,5 = 7/2 = 3 1/2; нет корней = ∅), but a fraction
+# that is NOT in lowest terms is not accepted for a different spelling of the key (42/10 for 21/5, 2/4 for 1/2): "reduce the
+# fraction" tasks keep such a value as their designed distractor.  A typed fraction with the key's own numerator and
+# denominator is fine.  No numeric tolerance (0.333 is not 1/3), and `.5` (no leading digit) is not a number here.  The golden
+# table ``tests/fixtures/keyboard_answers_golden.json`` is the contract with exam-service.
+_SINGLE_TOKEN_BRACES_TYPED_RE = re.compile(r"([\^_])\{\s*([^\W_])\s*\}")
+_FRACTION_FORM_RES = (
+    re.compile(r"-?\s*(?:(\d+)\s*)?\\frac\{\s*(-?\d+)\s*\}\{\s*(\d+)\s*\}"),      # latex: [-][whole]\frac{num}{den}
+    re.compile(r"-?(\d+)\s+(-?\d+)\s*/\s*(\d+)"),                                      # plain mixed number: [-]whole num/den
+    re.compile(r"()(-?\d+)\s*/\s*(\d+)"),                                                # plain fraction: num/den
+)
+
+
+def _fraction_shape(value: object):
+    """(whole, numerator, denominator) exactly as written, or None if the text is not a fraction / mixed number."""
+    text = str(value or "").replace("$", "").replace("{,}", ",").replace("−", "-")
+    text = text.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac")
+    text = _THIN_SPACE_RE.sub(" ", text).strip()
+    if len(text) > MAX_ANSWER_CHARS:
+        return None
+    for pattern in _FRACTION_FORM_RES:
+        match = pattern.fullmatch(text)
+        if match:
+            whole, num, den = match.groups()
+            return (int(whole) if whole else 0, abs(int(num)), int(den))
+    return None
+
+
+def _in_lowest_terms(shape) -> bool:
+    whole, num, den = shape
+    return den > 1 and gcd(num, den) == 1 and (not whole or num < den)
+
+
+def typed_answer_matches(typed: object, key: object) -> bool:
+    """True only when a typed answer provably says the same as the stored key (the rule above). Never raises."""
+    typed_text, key_text = str(typed or ""), str(key or "")
+    if not typed_text.strip() or not key_text.strip():
+        return False
+    try:
+        if is_empty_set(typed_text) and is_empty_set(key_text):
+            return True
+        typed_text = _SINGLE_TOKEN_BRACES_TYPED_RE.sub(r"\1\2", typed_text)
+        key_text = _SINGLE_TOKEN_BRACES_TYPED_RE.sub(r"\1\2", key_text)
+        if not answers_equivalent(typed_text, key_text):
+            return False
+        if _notation_key(typed_text) == _notation_key(key_text):
+            return True
+        shape = _fraction_shape(typed_text)
+        return shape is None or _in_lowest_terms(shape) or shape == _fraction_shape(key_text)
+    except (ValueError, OverflowError, RecursionError, ZeroDivisionError, MemoryError):
+        return False

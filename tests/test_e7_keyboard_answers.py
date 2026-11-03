@@ -26,7 +26,7 @@ def pairs(*kinds):
             for case in GOLDEN["cases"] for kind in kinds for typed in case.get(kind, [])]
 
 
-@pytest.mark.parametrize("key, typed", pairs("accept", "accept_exam_differs"))
+@pytest.mark.parametrize("key, typed", pairs("accept"))
 def test_equivalent_notations_are_graded_correct(key, typed):
     assert verdict(key, typed) == (1.0, "correct")
 
@@ -38,7 +38,8 @@ def test_other_values_are_graded_wrong(key, typed):
 
 
 @pytest.mark.parametrize("case", GOLDEN["contested"], ids=lambda c: f"{c['key']}|{c['typed']}")
-def test_the_contested_cases_keep_the_verdict_of_diagnostic(case):
+def test_the_contested_cases_have_one_verdict_in_both_services(case):
+    assert case["diag"] == case["exam"]
     assert (verdict(case["key"], case["typed"])[0] == 1.0) is case["diag"]
 
 
@@ -62,3 +63,4 @@ def test_a_distractor_that_is_a_notation_of_the_key_cannot_exist_but_one_of_anot
 def test_is_empty_set(text, expected):
     from src.domain.answer_value import is_empty_set
     assert is_empty_set(text) is expected
+

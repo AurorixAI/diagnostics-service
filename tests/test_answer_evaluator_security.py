@@ -16,7 +16,7 @@ def test_safe_symbolic_equivalence_keeps_supported_school_notation():
     evaluator = AnswerEvaluator()
 
     assert evaluator.evaluate(_open_task("2*x + 2"), "2(x + 1)") == (1.0, "correct")
-    assert evaluator.evaluate(_open_task("3"), "√9") == (1.0, "correct")
+    assert evaluator.evaluate(_open_task("3"), "√9") == (0.0, "wrong")      # wave E7: a numeric key takes only the notations of the same number (rule of exam-service)
     assert evaluator.evaluate(_open_task("pi"), "π") == (1.0, "correct")
     assert evaluator.evaluate(_open_task("1/2"), "0,5") == (1.0, "correct")
 
