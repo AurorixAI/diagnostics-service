@@ -16,7 +16,7 @@ from src.main import app
 MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 # Names that mean «the cookie / credential of a staff member is read», in a dependency or in a handler.
 STAFF_CALLS = {access.require_diagnostic_staff, access.require_student_report_access}
-STAFF_NAMES = ("require_diagnostic_staff", "require_student_report_access", "_forward_auth_headers", "DiagnosticActor", "request.cookies", "Cookie(")
+STAFF_NAMES = ("require_diagnostic_staff", "require_student_report_access", "_forward_auth_headers", "DiagnosticActor", "request.cookies", "Cookie(", "\"cookie\"", "\"authorization\"", "/auth/me")
 
 
 def _calls(dependant):
@@ -42,8 +42,12 @@ def _staff_reading(route):
     why += [f"credential dependency {type(c).__name__}" for c in calls if isinstance(c, SecurityBase)]
     if direct:
         why.append("declares a cookie parameter")
-    source = inspect.getsource(route.endpoint)
-    why += [f"handler mentions {name}" for name in STAFF_NAMES if name in source]
+    for call in [route.endpoint, *calls]:  # the handler AND the source of every dependency under it
+        try:
+            source = inspect.getsource(call)
+        except (OSError, TypeError):
+            continue
+        why += [f"{getattr(call, '__name__', call)} mentions {name}" for name in STAFF_NAMES if name in source]
     return why
 
 
@@ -53,9 +57,22 @@ def test_the_detector_sees_the_staff_routes_it_is_meant_to_find():
     assert reports and _staff_reading(reports[0])
 
 
-def test_the_walk_finds_the_mutating_routes():
+# The mutating routes of diagnostic-service, EXACTLY (method + full path). Both are held by the invitation code / the session of the student.
+KNOWN_MUTATING = {
+    ("POST", "/api/v1/diagnostic/sessions"),
+    ("POST", "/api/v1/diagnostic/sessions/{session_id}/answer"),
+}
+
+
+def test_the_mutating_routes_are_exactly_the_known_ones():
+    """Not «look for the bad» but «know the good» (R3 V-1): a staff check can hide in a wrapper dependency, a helper, a header read - no detector names them all. So ANY new
+    mutating route fails here with a question, whatever it reads."""
     mutating = {(m, r.path) for r in _routes() for m in r.methods & MUTATING}
-    assert {("POST", "/api/v1/diagnostic/sessions"), ("POST", "/api/v1/diagnostic/sessions/{session_id}/answer")} <= mutating, mutating
+    assert mutating == KNOWN_MUTATING, (
+        f"the mutating routes changed: new {sorted(mutating - KNOWN_MUTATING)}, gone {sorted(KNOWN_MUTATING - mutating)}. Does a new one need the source check of mutating "
+        f"requests (Origin/Referer/Sec-Fetch-Site) because a staff member's cookie decides there? If yes, copy exam-service/src/core/origin_guard.py + its guard test. "
+        f"If it is held by an invitation code / a student's session, add it to KNOWN_MUTATING with the reason."
+    )
 
 
 def test_no_mutating_route_depends_on_the_cookie_of_a_staff_member():
