@@ -428,8 +428,11 @@ class AnswerEvaluator:
             return 0.0, "wrong"
 
         # ── Layer 1: Exact match (case-insensitive) ───────────────────────
+        # A typed number against a numeric key skips this layer: its key drops the spaces between digits, so «2 1/5» (= 11/5) would equal «21/5»;
+        # the rule of exam-service below decides those (wave E7).
         typed = (getattr(task, "display_answer_type", None) or task.answer_type) != "mcq"
-        if answer_value_key(given) == answer_value_key(correct):
+        two_numbers = typed and exact_number(correct) is not None and exact_number(given) is not None
+        if not two_numbers and answer_value_key(given) == answer_value_key(correct):
             return 1.0, "correct"
 
         # ── Open/numeric only: numeric normalization + SymPy ─────────────

@@ -64,3 +64,10 @@ def test_is_empty_set(text, expected):
     from src.domain.answer_value import is_empty_set
     assert is_empty_set(text) is expected
 
+
+def test_a_space_in_a_mixed_number_is_not_a_thousands_separator():
+    """«2 1/5» used to be read as 21/5 (a space between digits dropped by the float layer) and was graded correct for the key 21/5."""
+    assert verdict("21/5", "2 1/5")[0] == 0.0
+    assert verdict("11/5", "2 1/5") == (1.0, "correct")
+    assert verdict("3 1/2", "31/2")[0] == 0.0           # and the key 3 1/2 is 7/2, not 31/2
+    assert verdict("3 1/2", "7/2") == (1.0, "correct")
