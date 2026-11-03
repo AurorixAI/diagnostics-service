@@ -286,7 +286,7 @@ def test_regenerate_script_dry_run_then_deterministic_rebuild_without_llm(db, mo
     row = db.query(R).one()
     assert row.generation_status == "ready" and row.report_schema_version == REPORT_SCHEMA_VERSION
     assert calls == []                                    # the paid model was never called
-    assert row.report_json["report_meta"]["narrative_status"] == "deterministic_fallback"
+    assert row.report_json["report_meta"]["narrative_source"] == "rebuild"
     assert report_jobs.REGENERATION_KEY not in row.report_json   # marker disappeared with the new report
     assert row.report_json["level"]["status"] == "on_level"
 

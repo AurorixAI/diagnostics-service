@@ -110,7 +110,7 @@ def gen(monkeypatch):
         report = rg.generate_and_save_report(
             db, session_id=uuid.uuid4(), student_id=uuid.uuid4(), grade_level=8, theta=theta,
             theta_se=se, overall_level="at_grade", topic_breakdown=topics, weak_skills=list(weak),
-            items_total=len(answers), **{"student_name": "Ученик", "test_code": "T", **kw},
+            items_total=len(answers), **kw,
         )
         assert report is not None and report.report_json, "report was not built"
         return report
@@ -175,7 +175,7 @@ def test_narrative_hours_are_dropped_and_the_plan_starts_at_the_recommended_star
 
     rj = gen(answers, weak=["G7_T9_K1"], narrative=narrative).report_json
     plan = rj["action_plan"]
-    assert rj["report_meta"]["narrative_status"] == "ready"
+    assert rj["report_meta"]["narrative_source"] == "ai"
     assert [step["skill_id"] for step in plan][0] == candidates[0]
     assert [step["priority"] for step in plan] == list(range(1, len(plan) + 1))
     assert all("estimated_hours" not in step for step in plan)
@@ -534,7 +534,7 @@ def test_error_free_report_shows_achievements_and_a_development_step_without_def
     assert rj["report_meta"]["error_free"] is True
     # the correction prompt is never sent for a student with nothing to correct
     assert gen.llm_calls == []
-    assert rj["report_meta"]["narrative_status"] == "deterministic_fallback"
+    assert rj["report_meta"]["narrative_source"] == "ai_off"
 
     achieved = {a["skill_id"] for a in rj["achievements"]}
     assert achieved == {"G8_T1", "G8_T2", "G8_T3"}
@@ -768,13 +768,13 @@ def test_model_echoing_the_retired_root_cause_claim_is_rejected_then_replaced(ge
 
     before = len(gen.llm_calls)
     clean = gen(answers, weak=["G8_T1_K1"], narrative=narrative_with("Ученик допускает ошибки в сложении дробей.")).report_json
-    assert clean["report_meta"]["narrative_status"] == "ready" and len(gen.llm_calls) == before + 1
+    assert clean["report_meta"]["narrative_source"] == "ai" and len(gen.llm_calls) == before + 1
 
     before = len(gen.llm_calls)
     echoed = gen(answers, weak=["G8_T1_K1"],
                  narrative=narrative_with("Углублённая проверка не подтвердила единую первопричину.")).report_json
     assert len(gen.llm_calls) == before + 2                         # both attempts rejected by the validator
-    assert echoed["report_meta"]["narrative_status"] == "deterministic_fallback"
+    assert echoed["report_meta"]["narrative_source"] == "ai_failed"
     assert not rg.contains_retired_claim(echoed["overall"]["student_summary"])
     assert "root cause" in gen.llm_calls[-1]                         # the second prompt carries the rejection reason
 
@@ -1228,7 +1228,7 @@ def test_ai_output_with_a_root_cause_is_rejected_when_only_inferred_chains_exist
     echoed = gen(answers, weak=["G7_T9_K1"],
                  narrative=narrative_with("Первопричина затруднений подтверждена углублённой проверкой.")).report_json
     assert len(gen.llm_calls) == before + 2                              # rejected twice
-    assert echoed["report_meta"]["narrative_status"] == "deterministic_fallback"
+    assert echoed["report_meta"]["narrative_source"] == "ai_failed"
     assert "первопричин" not in echoed["overall"]["student_summary"]
     assert "No root cause is confirmed" in gen.llm_calls[-1]             # the retry prompt explains why
     for wording in ("Основная причина сбоя — дроби.", "Первопричиной сбоя является сложение дробей."):
@@ -1237,7 +1237,7 @@ def test_ai_output_with_a_root_cause_is_rejected_when_only_inferred_chains_exist
         assert len(gen.llm_calls) == before + 2, wording
     before = len(gen.llm_calls)
     ok = gen(answers, weak=["G7_T9_K1"], narrative=narrative_with("Ученик допускает ошибки в сложении дробей.")).report_json
-    assert len(gen.llm_calls) == before + 1 and ok["report_meta"]["narrative_status"] == "ready"
+    assert len(gen.llm_calls) == before + 1 and ok["report_meta"]["narrative_source"] == "ai"
 
 
 def test_validator_root_cause_guard_is_off_when_a_chain_is_confirmed():
@@ -1339,20 +1339,3 @@ def test_plain_answers_and_set_notation_reach_the_report_unchanged(gen):
     rj = gen(answers, weak=["G7_T9_K1"], narrative=None).report_json
     by_task = {ep["task_id"]: ep["student_answer"] for ep in rj["error_patterns"]}
     assert by_task["T1"] == "{1; 2}" and by_task["T2"] == "x = 5"
-
-
-def test_the_prompt_line_of_a_topic_uses_the_one_percent_rule(gen, monkeypatch):
-    """Wave E7 / decision 7: alpha 0.30 is 57.5 raw - the topic line built for the AI prompt says «58%» (the cards and the achievements say 58 too), never the
-    truncated 57.  (``_build_prompt`` receives the block as ``topics_block``; its template does not print it today, so the test reads what the builder is given.)"""
-    seen = {}
-    real = rg._build_prompt
-
-    def spy(**kwargs):
-        seen.update(kwargs)
-        return real(**kwargs)
-
-    monkeypatch.setattr(rg, "_build_prompt", spy)
-    breakdown = {"G8_T1": {"alpha": 0.30, "observations": 3}, "G8_T2": {"alpha": 0.02, "observations": 3}, "G8_T3": {"alpha": -0.5, "observations": 3}}
-    gen(_gap_answers(), weak=["G7_T9_K1"], narrative="{}", breakdown=breakdown)
-    lines = {line.split(":")[0].strip(): line.split(":")[1].split("%")[0].strip() for line in seen["topics_block"].splitlines()}
-    assert lines == {"Дроби": "58", "Степени": "51", "Уравнения": "38"}

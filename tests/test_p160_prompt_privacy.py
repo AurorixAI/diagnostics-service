@@ -15,7 +15,6 @@ import pytest
 from src.domain import report_generator as rg
 from tests.test_n03a_report import _gap_answers, gen  # noqa: F401  (gen is a fixture)
 
-NAME = "Айбек Тестов"
 PHONE_ANSWERS = [
     ("+998 90 123 45 67", "[телефон]"),
     ("мой номер 90-123-45-67, звоните", "мой номер [телефон], звоните"),
@@ -26,40 +25,34 @@ PHONE_ANSWERS = [
 MATHS_UNTOUCHED = ["12", "3.14", "1000000", "12.03.2024", "10 12 14 16 18", "1 000 000 000", "x=5, y=7", "-3/4"]
 
 
-# ── the name never enters the prompt ─────────────────────────────────────────────────────────────────
+# ── nothing that identifies a person enters the prompt or the stored report ─────────────────────────
 
-def test_prompt_of_a_named_student_has_no_name(gen):
-    gen(_gap_answers(), weak=["G7_T9_K1"], student_name=NAME)
+def test_prompt_has_no_line_about_the_student_or_the_invite_code(gen):
+    gen(_gap_answers(), weak=["G7_T9_K1"])
     assert gen.llm_calls, "the prompt was not built"
     for prompt in gen.llm_calls:
-        assert "Айбек" not in prompt and "Тестов" not in prompt and NAME not in prompt
-        assert "Ученик: Ученик | Заявленный класс: 8 | Код теста: T" in prompt
+        assert "Ученик:" not in prompt and "Код теста" not in prompt
+        assert "Заявленный класс: 8\n" in prompt
 
 
 def test_prompt_builder_has_no_slot_for_a_name_or_other_person_identifiers():
     params = set(inspect.signature(rg._build_prompt).parameters)
-    assert not {p for p in params if re.search(r"name|phone|email|contact|student_id|school|org", p)}
+    assert not {p for p in params if re.search(r"name|phone|email|contact|student_id|school|org|code", p)}
 
 
-def test_the_user_visible_report_keeps_the_name_where_it_was(gen):
-    report = gen(_gap_answers(), weak=["G7_T9_K1"], student_name=NAME)
-    assert report.report_json["report_meta"]["student_name"] == NAME
-    default = gen(_gap_answers(), weak=["G7_T9_K1"])
-    assert default.report_json["report_meta"]["student_name"] == "Ученик"
+def test_the_generator_takes_no_name_or_code_and_the_stored_report_holds_none(gen):
+    """N03b-1 (7): the placeholder name and the invite code are not written to report_json; staff see the name from the invite data."""
+    params = set(inspect.signature(rg.generate_and_save_report).parameters)
+    assert not {p for p in params if re.search(r"name|code", p)}
+    meta = gen(_gap_answers(), weak=["G7_T9_K1"]).report_json["report_meta"]
+    assert not {key for key in meta if re.search(r"name|code", key)}, sorted(meta)
 
 
-# ── the cache key does not depend on the name, and equals the key of the unchanged prompt ───────────
-
-def test_cache_key_is_the_same_for_any_name_and_for_the_old_default_prompt(gen):
-    gen(_gap_answers(), weak=["G7_T9_K1"], student_name=NAME)
+def test_the_prompt_is_the_same_for_the_same_data(gen):
     gen(_gap_answers(), weak=["G7_T9_K1"])
-    named, default = gen.llm_calls[0], gen.llm_calls[-1]
-    assert named == default
-    # the line the report job always produced before #160 (it never passed a name): same bytes -> same key,
-    # so a paid answer stored before the change is still found
-    legacy_line = "Ученик: Ученик | Заявленный класс: 8 | Код теста: T"
-    assert legacy_line in named
-    assert hashlib.sha256(named.encode()).hexdigest() == hashlib.sha256(default.encode()).hexdigest()
+    gen(_gap_answers(), weak=["G7_T9_K1"])
+    first, second = gen.llm_calls[0], gen.llm_calls[-1]
+    assert hashlib.sha256(first.encode()).hexdigest() == hashlib.sha256(second.encode()).hexdigest()
 
 
 # ── free text of the student: obvious phones and e-mails are masked ─────────────────────────────────

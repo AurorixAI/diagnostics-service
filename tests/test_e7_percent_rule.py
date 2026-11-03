@@ -1,4 +1,4 @@
-"""Wave E7 / decision 7: ONE percent rule - a whole number, half up - for the report cards, the achievements and the line of the AI prompt;
+"""Wave E7 / decision 7: ONE percent rule - a whole number, half up - for the report cards and the achievements;
 the analytics API keeps one decimal, derived from the same mastery fraction."""
 import pathlib
 import re
@@ -40,6 +40,15 @@ def test_the_achievements_show_the_same_number():
     for alpha, percent in TABLE:
         out = _build_achievements({"G9_T1": {"alpha": alpha}}, {"G9_T1": {"name_ru": "Дроби"}}, answers)
         assert out[0]["mastery_percent"] == percent, alpha
+
+
+def test_the_achievements_of_several_topics_round_half_up_in_one_call():
+    """Moved from the test of the prompt's topic line (that block was dead and is gone): alpha 0.30 is 57.5 raw - «58», never the truncated 57."""
+    breakdown = {"G8_T1": {"alpha": 0.30}, "G8_T2": {"alpha": 0.02}, "G8_T3": {"alpha": -0.5}}
+    names = {tid: {"name_ru": name} for tid, name in zip(breakdown, ("Дроби", "Степени", "Уравнения"))}
+    answers = [NS(topic_id=tid, outcome=1.0, skill_id="x", is_deep_scan=False) for tid in breakdown]
+    out = {item["skill_name_ru"]: item["mastery_percent"] for item in _build_achievements(breakdown, names, answers)}
+    assert out == {"Дроби": 58, "Степени": 51, "Уравнения": 38}
 
 
 def test_the_topic_cards_show_the_same_number():

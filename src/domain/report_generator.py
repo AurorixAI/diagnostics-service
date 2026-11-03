@@ -1545,11 +1545,8 @@ def _build_deterministic_summary(
 
 # ── AI prompt ─────────────────────────────────────────────────────────────────
 
-# #160: a student's name (or any other identifier of a person) never goes to an outside model.  The prompt has no slot
-# for it - ``_build_prompt`` takes no name - and the line always reads «Ученик: Ученик».  The wording is the same as
-# before the change (the report job never passed a name, so the default was always sent), so the narrative-cache key
-# of every real prompt stays the same: no stored paid answer is orphaned and no new paid call appears from this change.
-_PROMPT_STUDENT = "Ученик"
+# #160: a student's name or invite code (any identifier of a person) never goes to an outside model: ``_build_prompt``
+# has no slot for them, and ``report_json`` does not hold them either (staff see the name from the invite data).
 
 _AI_SCHEMA = """{
   "overall": {
@@ -1578,7 +1575,6 @@ def _build_prompt(
     total: int,
     computed_status: str,
     status_label: str,
-    topics_block: str,
     wrong_block: str,
     chains_block: str,
     boundary_block: str,
@@ -1588,7 +1584,6 @@ def _build_prompt(
     plan_min_items: int,
     plan_max_items: int,
     root_cause_confirmed: bool,
-    test_code: str,
     validation_errors: Optional[List[str]] = None,
 ) -> str:
     retry = ""
@@ -1611,7 +1606,7 @@ def _build_prompt(
 4. action_plan — от {plan_min_items} до {plan_max_items} приоритетных шагов. Используй ТОЛЬКО цели из списка ниже, не добавляй темы от себя. Первым шагом (priority 1) ОБЯЗАТЕЛЬНО поставь первую цель списка. Не указывай сроки и часы.
 
 ДАННЫЕ АДАПТИВНОЙ ДИАГНОСТИКИ:
-Ученик: {_PROMPT_STUDENT} | Заявленный класс: {grade_level} | Код теста: {test_code}
+Заявленный класс: {grade_level}
 Решено: {correct} из {total} заданий адаптивного теста ({score_pct}%; это факт о выданном наборе, уровень определён по θ, а не по этому проценту)
 Уровень по результатам измерения (IRT): {status_label} | Статус: {computed_status}
 
@@ -1917,6 +1912,20 @@ def _narrative_skip_reason(
     return None
 
 
+def _narrative_source(skip_reason: Optional[str], ai_data: Optional[Dict[str, Any]]) -> str:
+    """Why the wording of a report is what it is (``report_meta.narrative_source``).
+
+    ``ai`` - the model wrote it; ``rebuild`` - a script rebuilt it without the model (by design);
+    ``ai_off`` - the model was not asked (switch, error-free attempt, no answers, degraded evidence);
+    ``ai_failed`` - the model was asked and gave nothing usable, so the template wording was used.  Only the last one is a fault.
+    """
+    if ai_data:
+        return "ai"
+    if skip_reason == "deterministic_job":
+        return "rebuild"
+    return "ai_off" if skip_reason else "ai_failed"
+
+
 def _read_narrative_cache(existing: Any, key: Optional[str]) -> Optional[Dict[str, Any]]:
     cache = getattr(existing, "narrative_cache", None) if existing is not None else None
     if key and isinstance(cache, dict) and cache.get("key") == key and isinstance(cache.get("ai_data"), dict):
@@ -1942,8 +1951,6 @@ def generate_and_save_report(
     deep_scan_incomplete: bool = False,
     deep_scan_params: Optional[Dict[str, Any]] = None,
     classification_confidence: Optional[float] = None,
-    student_name: str = "Ученик",
-    test_code: str = "",
     force: bool = False,
     skip_narrative: bool = False,
 ) -> Optional[DiagReport]:
@@ -2096,16 +2103,6 @@ def generate_and_save_report(
             cog_lines.append(f"  • {cg['title']} ({cg['count']} ошибок): {'; '.join(ex_strs)}")
         cognitive_block = "\n".join(cog_lines) or "  (нет выраженных когнитивных паттернов)"
 
-        # ── Topics block for prompt ───────────────────────────────────────────
-        topic_lines = []
-        weak_ids = {item["skill_id"] for item in weak_skills_block + critical_gaps}
-        for tid, info in topic_breakdown.items():
-            pct = topic_mastery_percent(info.get("alpha", 0))
-            name = skill_map.get(tid, {}).get("name_ru", tid)
-            flag = " ⚠️" if tid in weak_ids else ""
-            topic_lines.append(f"  {name}: {pct}%{flag}")
-        topics_block = "\n".join(topic_lines) or "  (нет данных)"
-
         # ── Wrong answers block for prompt (max 8, unique skills) ────────────
         wrong_answers = [a for a in answers_orm if not is_correct(a.outcome)]
         # Error-free attempt: every journal answer is correct and nothing in the
@@ -2151,7 +2148,6 @@ def generate_and_save_report(
             total=total,
             computed_status=computed_status,
             status_label=computed_label_ru,
-            topics_block=topics_block,
             wrong_block=wrong_block,
             chains_block=chains_block,
             boundary_block=boundary_block,
@@ -2161,7 +2157,6 @@ def generate_and_save_report(
             plan_min_items=min(3, len(plan_candidates)),
             plan_max_items=min(5, len(plan_candidates)),
             root_cause_confirmed=root_cause_confirmed,
-            test_code=test_code,
         )
         validate_kwargs = dict(
             computed_status=computed_status,
@@ -2258,9 +2253,7 @@ def generate_and_save_report(
             "report_meta": {
                 "degraded": degraded_reasons,
                 "session_id":       str(session_id),
-                "student_name":     student_name,
                 "class_level":      grade_level,
-                "test_code":        test_code,
                 "error_patterns_version": ERROR_PATTERNS_VERSION,
                 "report_schema_version": REPORT_SCHEMA_VERSION,
                 # Date of the attempt (not of the rebuild): a regenerated report must
@@ -2283,7 +2276,7 @@ def generate_and_save_report(
                 "covered_section_ids": covered_section_ids or [],
                 "deep_scan_incomplete": deep_scan_incomplete,
                 "deep_scan_params": deep_scan_params,
-                "narrative_status": "ready" if ai_data else "deterministic_fallback",
+                "narrative_source": _narrative_source(narrative_skip, ai_data),
             },
             "overall": {
                 "score_percent":    score_pct,     # always from data

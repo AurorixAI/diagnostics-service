@@ -18,6 +18,9 @@ SERVICE = "diagnostic"
 _OFF_VALUES = {"false", "0", "no", "off", "disabled"}
 _ON_VALUES = {"", "true", "1", "yes", "on", "enabled"}
 
+# One request to either provider.  Without a limit a hung provider holds the report worker (and its slot) for good.
+LLM_REQUEST_TIMEOUT_S = 120
+
 
 def narrative_enabled() -> bool:
     """The ONE place where REPORT_NARRATIVE_ENABLED is read (default: on).
@@ -91,7 +94,7 @@ def call_gemini(
                 "api-key": azure_key,
                 "Authorization": f"Bearer {azure_key}"
             }
-            resp = requests.post(azure_url, json=payload, headers=headers, timeout=120)
+            resp = requests.post(azure_url, json=payload, headers=headers, timeout=LLM_REQUEST_TIMEOUT_S)
             if resp.status_code == 200:
                 data = resp.json()
                 text = data["choices"][0]["message"]["content"].strip()
@@ -126,7 +129,7 @@ def call_gemini(
                 "max_output_tokens": max_tokens,
             },
         )
-        response = client.generate_content(prompt)
+        response = client.generate_content(prompt, request_options={"timeout": LLM_REQUEST_TIMEOUT_S})
         text = response.text.strip() if response.text else None
         ok = bool(text)
         return text

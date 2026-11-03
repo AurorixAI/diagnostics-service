@@ -58,8 +58,8 @@ def wire(monkeypatch):
         def __init__(self, model_name=None, generation_config=None):
             pass
 
-        def generate_content(self, prompt):
-            w.gemini.append(1)
+        def generate_content(self, prompt, request_options=None):
+            w.gemini.append(request_options)
             return types.SimpleNamespace(text=w.gemini_text)
 
     fake_genai = types.ModuleType("google.generativeai")
@@ -148,6 +148,17 @@ def test_every_paid_call_is_logged_without_prompt_or_answer(monkeypatch, wire, c
     assert SECRET_PROMPT not in text and "gemini answer" not in text
 
 
+def test_both_providers_get_the_same_request_timeout(monkeypatch, wire):
+    """N03b-1 (4): the Gemini fallback had no limit at all (a hung call held the report worker); one constant for both."""
+    set_env(monkeypatch, azure=True, gemini=True)
+    wire.azure_status = 500                              # Azure fails -> the Gemini fallback is called
+    assert gemini_client.call_gemini(SECRET_PROMPT) == "gemini answer"
+    limit = gemini_client.LLM_REQUEST_TIMEOUT_S
+    assert isinstance(limit, int) and 0 < limit <= 300
+    assert wire.azure[0]["timeout"] == limit
+    assert wire.gemini == [{"timeout": limit}]
+
+
 def test_switch_off_logs_no_paid_call(monkeypatch, wire, caplog):
     set_env(monkeypatch, flag="false", azure=True)
     with caplog.at_level(logging.INFO, logger="src.core.gemini_client"):
@@ -190,18 +201,45 @@ def valid_model_factory(calls, *, summary="Решено 2 из 11 заданий
     return model
 
 
+def test_narrative_source_has_a_value_for_each_way_the_wording_can_come_about(monkeypatch, gen):
+    """N03b-1 (3): ai / ai_failed / ai_off / rebuild - the staff line «без ИИ из-за сбоя» is for ai_failed only."""
+    def source(answers=None, **kw):
+        report = gen(_gap_answers() if answers is None else answers, weak=["G7_T9_K1"], **kw)
+        return report.report_json["report_meta"]["narrative_source"]
+
+    set_env(monkeypatch, flag=None)
+    assert source(narrative=valid_model_factory([])) == "ai"
+    assert source(narrative=None) == "ai_failed"                    # asked, got nothing usable: a fault
+    assert source(narrative=valid_model_factory([]), skip_narrative=True) == "rebuild"   # a script rebuilt it on purpose
+    set_env(monkeypatch, flag="false")
+    assert source(narrative=None) == "ai_off"                       # the switch: not a fault
+
+
+@pytest.mark.parametrize("skip,ai,expected", [
+    (None, {"overall": {}}, "ai"),
+    (None, None, "ai_failed"),
+    ("deterministic_job", None, "rebuild"),
+    ("disabled_by_REPORT_NARRATIVE_ENABLED", None, "ai_off"),
+    ("error_free", None, "ai_off"),
+    ("no_answers", None, "ai_off"),
+    ("degraded_evidence", None, "ai_off"),
+])
+def test_narrative_source_of_every_skip_reason(skip, ai, expected):
+    assert rg._narrative_source(skip, ai) == expected
+
+
 def test_generator_flag_on_calls_the_model_and_flag_off_does_not(monkeypatch, gen):
     set_env(monkeypatch, flag=None)
     on = gen(_gap_answers(), narrative=None)
     on_calls = len(gen.llm_calls)
     assert on_calls == 2                                  # two attempts when the model returns nothing
-    assert on.report_json["report_meta"]["narrative_status"] == "deterministic_fallback"
+    assert on.report_json["report_meta"]["narrative_source"] == "ai_failed"
 
     gen.llm_calls.clear()
     set_env(monkeypatch, flag="false")
     off = gen(_gap_answers(), narrative=None)
     assert gen.llm_calls == []                            # 0 calls: the switch
-    assert off.report_json["report_meta"]["narrative_status"] == "deterministic_fallback"
+    assert off.report_json["report_meta"]["narrative_source"] == "ai_off"
     assert off.report_json["action_plan"] and off.report_json["overall"]["student_summary"]
     assert off.narrative_generated is False
 
@@ -220,7 +258,7 @@ def test_generator_valid_model_marks_narrative_generated(monkeypatch, gen):
     report = gen(_gap_answers(), narrative=valid_model_factory(calls))
     assert calls == [1]
     assert report.narrative_generated is True
-    assert report.report_json["report_meta"]["narrative_status"] == "ready"
+    assert report.report_json["report_meta"]["narrative_source"] == "ai"
 
 
 def test_double_slash_in_the_narrative_costs_one_call_not_two(monkeypatch, gen):
@@ -326,7 +364,7 @@ def test_retry_of_the_same_job_reuses_the_paid_answer(db, monkeypatch):
     row = db.query(R).one()
     assert len(calls) == 1
     assert row.generation_status == "ready" and row.narrative_generated is True
-    assert row.report_json["report_meta"]["narrative_status"] == "ready"
+    assert row.report_json["report_meta"]["narrative_source"] == "ai"
     assert row.narrative_cache is None                             # cleared once the report is current
     from sqlalchemy import text
     assert db.execute(text("SELECT narrative_cache IS NULL FROM diag_reports")).scalar() is True   # SQL NULL, not JSON null
