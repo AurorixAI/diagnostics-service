@@ -32,6 +32,8 @@ from typing import Dict, List
 
 import numpy as np
 
+from .level_policy import THETA_ABOVE, THETA_AT
+
 # ── Quadrature grid ────────────────────────────────────────────────────────
 _THETA_GRID: np.ndarray = np.linspace(-4.0, 4.0, 61)
 _PRIOR: np.ndarray = np.exp(-0.5 * _THETA_GRID ** 2) / math.sqrt(2 * math.pi)
@@ -150,9 +152,9 @@ def level_confidence(state: ThetaState) -> float:
         return 0.0
     level = theta_to_level(state.theta)
     lower, upper = {
-        "below_grade": (-4.0, -0.5),
-        "at_grade": (-0.5, 1.0),
-        "above_grade": (1.0, 4.0),
+        "below_grade": (-4.0, THETA_AT),
+        "at_grade": (THETA_AT, THETA_ABOVE),
+        "above_grade": (THETA_ABOVE, 4.0),
     }[level]
     half_step = float(_THETA_GRID[1] - _THETA_GRID[0]) / 2
     left = np.maximum(-4.0, _THETA_GRID - half_step)

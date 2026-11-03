@@ -51,6 +51,13 @@ THETA_ON_LEVEL = 0.1       # theta >= this  -> on_level (below: partial_gap)
 THETA_CRITICAL = -1.4      # theta <  this  -> critical
 PROVISIONAL_SE = 0.40      # se > this (or unknown) -> provisional
 
+# Cut-offs of the CAT TASK POOL (session_service), not of the student's level: below the first the pool also takes the tasks of the previous
+# grade, below the second those of two grades back (never below grade 5).  The first is the category cut-off; the second (-1.5) is
+# NOT THETA_CRITICAL (-1.4): "critical" names the student, -1.5 only decides which tasks to serve on the running estimate.
+POOL_PREVIOUS_GRADE_THETA = THETA_AT
+POOL_TWO_GRADES_BACK_THETA = -1.5
+POOL_LOWEST_GRADE = 5
+
 CATEGORY_LABEL_RU: Dict[str, str] = {
     "below_grade": "Ниже уровня класса",
     "at_grade": "На уровне класса",
@@ -130,6 +137,13 @@ def topic_mastery_fraction(alpha: Any) -> float:
 
 def topic_mastery_percent(alpha: Any) -> int:
     return round_percent(topic_mastery_fraction(alpha) * 100)
+
+
+def lower_grade_floor(theta: float, grade: int) -> Optional[int]:
+    """The lowest grade whose tasks join the pool of a student of ``grade`` (``None``: only his own grade)."""
+    if theta >= POOL_PREVIOUS_GRADE_THETA:
+        return None
+    return max(POOL_LOWEST_GRADE, grade - 2 if theta < POOL_TWO_GRADES_BACK_THETA else grade - 1)
 
 
 def theta_category(theta: float) -> str:

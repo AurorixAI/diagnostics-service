@@ -42,7 +42,7 @@ from src.core.exceptions import (
 from src.domain.auth_sync_jobs import enqueue_auth_completion_sync, process_next_auth_completion_sync
 from src.domain.report_jobs import enqueue_report_generation, process_next_report_job
 from src.domain.report_generator import REPORT_SCHEMA_VERSION, strip_retired_report_fields
-from src.domain.level_policy import classify, count_solved, is_correct
+from src.domain.level_policy import classify, count_solved, is_correct, lower_grade_floor
 from src.domain.alpha_engine import (
     AlphaTracker,
     IRTParams,
@@ -1181,8 +1181,8 @@ class SessionService:
     def _pick_precision_targeting_task(self, state: SessionState) -> Optional[TaskOut]:
         """Phase 2 CAT precision targeting: select IRT-informative tasks targeting b ≈ theta.
 
-        For students performing below grade level (theta < -0.5), we expand the candidate pool
-        to include foundational prerequisite skills from lower grades (Grade - 1, and if theta < -1.5,
+        For students performing below grade level (theta < POOL_PREVIOUS_GRADE_THETA = -0.5), we expand the candidate pool
+        to include foundational prerequisite skills from lower grades (Grade - 1, and if theta < POOL_TWO_GRADES_BACK_THETA = -1.5,
         down to Grade - 2, with a floor of grade 5).
 
         Priority 1: Direct prerequisite skills linked to confirmed gaps / failed topics from Phase 1.
@@ -1194,9 +1194,9 @@ class SessionService:
         candidate_skills_ordered: List[str] = []
         visited_skills: set = set()
 
-        if theta_val < -0.5:
+        min_grade = lower_grade_floor(theta_val, current_grade)      # cut-offs: level_policy (POOL_*)
+        if min_grade is not None:
             # 1. Target Lower Grades Pool
-            min_grade = max(5, current_grade - 2 if theta_val < -1.5 else current_grade - 1)
             lower_grades = list(range(min_grade, current_grade))
 
             # Priority 1: Prerequisites of confirmed gaps / failed skills
