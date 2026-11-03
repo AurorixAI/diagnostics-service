@@ -561,25 +561,6 @@ class SessionService:
         )
 
     # ══════════════════════════════════════════════════════════════════════
-    # PUBLIC — Report data
-    # ══════════════════════════════════════════════════════════════════════
-
-    def get_report_status(self, session_id: uuid.UUID) -> dict:
-        """What the invite-code holder may learn: the attempt is completed, how long it took, whether the report is built.
-
-        Never the report itself: it holds the level, the plan and the answer keys (staff read it through the analytics router).
-        """
-        db_session = self.session_repo.get_by_id(session_id)
-        if db_session is None or db_session.phase != "completed":
-            raise ValueError("Session not found or not completed")
-        report = self.report_repo.get_by_session(session_id)
-        return {
-            "phase": db_session.phase,
-            "report_generation": {"status": report.generation_status if report else "pending"},
-            "total_time_ms": self.answer_repo.get_total_time_ms(session_id),
-        }
-
-    # ══════════════════════════════════════════════════════════════════════
     # PRIVATE — Core algorithm helpers
     # ══════════════════════════════════════════════════════════════════════
 

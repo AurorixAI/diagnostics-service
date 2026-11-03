@@ -77,7 +77,6 @@ solution_steps, hints, distractor_meta, is_active
 ```
 POST   /api/v1/diagnostic/sessions              — создать сессию, вернуть первую задачу
 POST   /api/v1/diagnostic/sessions/{id}/answer  — отправить ответ, получить следующую задачу
-GET    /api/v1/diagnostic/sessions/{id}/report  — получить финальный отчёт
 GET    /health                                  — liveness + DB + Redis check
 GET    /docs                                    — Swagger UI (только в development режиме)
 ```

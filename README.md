@@ -60,7 +60,6 @@ docker exec algo-diagnostic alembic upgrade head
 | POST | `/api/v1/diagnostic/sessions` | Начать диагностику |
 | POST | `/api/v1/diagnostic/sessions/{id}/answer` | Ответить на вопрос |
 | GET | `/api/v1/diagnostic/sessions/{id}` | Статус сессии |
-| GET | `/api/v1/diagnostic/sessions/{id}/report` | Итоговый отчёт |
 | GET | `/health/live` | Liveness probe |
 | GET | `/health/ready` | Readiness probe (DB + Redis) |
 | GET | `/metrics` | Prometheus метрики |

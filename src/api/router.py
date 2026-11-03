@@ -4,7 +4,6 @@ Diagnostic Service — HTTP Router (thin layer, no business logic)
 Endpoints:
   POST  /api/v1/diagnostic/sessions              - Create session
   POST  /api/v1/diagnostic/sessions/{id}/answer  - Submit answer
-  GET   /api/v1/diagnostic/sessions/{id}/report  - Get final report
   GET   /api/v1/diagnostic/sessions/by-invite     - Resolve the attempt of an invite_code (active / completed / not started)
 """
 from __future__ import annotations
@@ -17,7 +16,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from src.core.abuse_limit import admit_invite_attempt, admit_report_lookup
+from src.core.abuse_limit import admit_invite_attempt
 from src.core.database import get_db
 from src.core.sync_slots import run_sync_limited
 from src.core.access import invite_error, validate_invite_capability, validate_invite_state
@@ -32,7 +31,6 @@ from src.schemas.diag_schemas import (
     AnswerResult,
     CreateSessionRequest,
     CreateSessionResponse,
-    ReportStatusResponse,
     ResolvedSessionResponse,
     SubmitAnswerRequest,
 )
@@ -220,51 +218,3 @@ async def resolve_session(
     except Exception as exc:
         log.error("diagnostic_restore_failed error_type=%s", type(exc).__name__)
         raise invite_error(500, "SESSION_RESTORE_FAILED", "Не удалось проверить состояние попытки. Повторите проверку.", "retry")
-
-
-@router.get("/sessions/{session_id}/report", response_model=ReportStatusResponse)
-async def get_report(
-    request: Request,
-    session_id: uuid.UUID,
-    service: SessionService = Depends(_service),
-    db: Session = Depends(get_db),
-    # The invite code is a capability: it travels in a header (like ``answer``), not in the URL, where it would stay in
-    # the browser history and in proxy logs (S-02).
-    invite_code: Optional[str] = Header(None, alias="X-Diagnostic-Invite-Code"),
-):
-    """Public, by invite code: only the state of a completed attempt.  The report itself is staff-only (analytics router)."""
-    ticket = admit_report_lookup(request)  # S-03
-    try:
-        session = await run_sync_limited(lambda: db.query(DiagSession).filter(DiagSession.id == session_id).first())
-        if not session or session.invite_code != invite_code:
-            ticket.fail()  # a wrong code for a session id (or no such session) is a guess
-            raise invite_error(404, "REPORT_NOT_FOUND", "Отчёт не найден.", "contact_center")
-        await validate_invite_capability(
-            invite_code,
-            student_id=str(session.student_id),
-            grade_level=session.grade_level,
-            # Completion is durable in diagnostic-service before the async
-            # auth-service projection has necessarily moved the invite from
-            # ``confirmed`` to ``in_progress``/``completed``.  The session
-            # lookup above already binds this exact code to this exact
-            # completed attempt, so allowing that narrow lag cannot expose a
-            # different student's report or revive an invite for a new run.
-            allowed_statuses={"confirmed", "in_progress", "completed", "expired"},
-            enforce_expiry=False,
-            session_started_at=lambda: session.created_at,
-        )
-        if session.phase != "completed":
-            raise invite_error(409, "SESSION_NOT_COMPLETED", "Диагностика ещё не завершена.", "check_session")
-        return await run_sync_limited(service.get_report_status, session_id)
-    except ValueError as exc:
-        raise invite_error(404, "REPORT_NOT_FOUND", "Отчёт не найден.", "contact_center")
-    except HTTPException as exc:
-        # A deliberate 4xx (missing invite capability, wrong student, a
-        # session already started) must reach the client as itself. The
-        # generic handler below would relabel it 500, and the UI would
-        # report a server failure instead of what the user has to do.
-        ticket.record(exc)
-        raise
-    except Exception as exc:
-        log.error("diagnostic_report_failed session_id=%s error_type=%s", session_id, type(exc).__name__)
-        raise invite_error(500, "REPORT_FETCH_FAILED", "Ответы сохранены. Не удалось загрузить отчёт.", "retry")
