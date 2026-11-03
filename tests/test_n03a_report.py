@@ -1339,3 +1339,20 @@ def test_plain_answers_and_set_notation_reach_the_report_unchanged(gen):
     rj = gen(answers, weak=["G7_T9_K1"], narrative=None).report_json
     by_task = {ep["task_id"]: ep["student_answer"] for ep in rj["error_patterns"]}
     assert by_task["T1"] == "{1; 2}" and by_task["T2"] == "x = 5"
+
+
+def test_the_prompt_line_of_a_topic_uses_the_one_percent_rule(gen, monkeypatch):
+    """Wave E7 / decision 7: alpha 0.30 is 57.5 raw - the topic line built for the AI prompt says «58%» (the cards and the achievements say 58 too), never the
+    truncated 57.  (``_build_prompt`` receives the block as ``topics_block``; its template does not print it today, so the test reads what the builder is given.)"""
+    seen = {}
+    real = rg._build_prompt
+
+    def spy(**kwargs):
+        seen.update(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(rg, "_build_prompt", spy)
+    breakdown = {"G8_T1": {"alpha": 0.30, "observations": 3}, "G8_T2": {"alpha": 0.02, "observations": 3}, "G8_T3": {"alpha": -0.5, "observations": 3}}
+    gen(_gap_answers(), weak=["G7_T9_K1"], narrative="{}", breakdown=breakdown)
+    lines = {line.split(":")[0].strip(): line.split(":")[1].split("%")[0].strip() for line in seen["topics_block"].splitlines()}
+    assert lines == {"Дроби": "58", "Степени": "51", "Уравнения": "38"}
