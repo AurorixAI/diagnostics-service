@@ -92,6 +92,7 @@ def gen(monkeypatch):
             return None
 
     monkeypatch.setattr(rg, "KnowledgeRepository", FakeKnowledge)
+    monkeypatch.setattr(rg, "llm_configured", lambda: True)      # the recorder stands for a model with a key (a test may override)
     monkeypatch.setattr(rg, "DiagReportRepository", FakeReports)
     monkeypatch.setattr(rg, "_load_task_context", lambda answer: (None, "unavailable"))
 

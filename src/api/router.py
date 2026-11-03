@@ -12,7 +12,7 @@ import logging
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -31,8 +31,11 @@ from src.schemas.diag_schemas import (
     AnswerResult,
     CreateSessionRequest,
     CreateSessionResponse,
+    PublicAnswerResult,
     ResolvedSessionResponse,
     SubmitAnswerRequest,
+    public_answer,
+    public_task,
 )
 
 log = logging.getLogger(__name__)
@@ -66,6 +69,14 @@ def _answer_error(exc: DiagnosticError) -> HTTPException:
     return invite_error(http_status, exc.code, message, action)
 
 
+async def _public_answer(service: SessionService, session_id: uuid.UUID, result: AnswerResult) -> PublicAnswerResult:
+    """The student's part of an answer result; the final one carries the server's total time (one source for the last screen)."""
+    total_time_ms = None
+    if result.session_completed:
+        total_time_ms = await run_sync_limited(service.answer_repo.get_total_time_ms, session_id)
+    return public_answer(result, total_time_ms)
+
+
 @router.post("/sessions", response_model=CreateSessionResponse, status_code=201)
 async def create_session(
     body: CreateSessionRequest,
@@ -93,7 +104,7 @@ async def create_session(
             invite_code=body.invite_code,
             prior_theta=body.prior_theta,
         )
-        return CreateSessionResponse(session_id=session_id, first_task=first_task)
+        return CreateSessionResponse(session_id=session_id, first_task=public_task(first_task))
     except GradeNotConfiguredError as exc:
         raise _answer_error(exc)
     except SessionAlreadyStartedError as exc:
@@ -112,7 +123,7 @@ async def create_session(
         raise invite_error(500, "SESSION_START_FAILED", "Не удалось начать диагностику. Повторите проверку состояния.", "check_session")
 
 
-@router.post("/sessions/{session_id}/answer", response_model=AnswerResult)
+@router.post("/sessions/{session_id}/answer", response_model=PublicAnswerResult)
 async def submit_answer(
     session_id: uuid.UUID,
     body: SubmitAnswerRequest,
@@ -144,15 +155,16 @@ async def submit_answer(
             service.get_completed_answer_result, session_id, body.task_id, body.student_answer
         )
         if replay is not None:
-            return replay
+            return await _public_answer(service, session_id, replay)
         validate_invite_state(invite, allowed_statuses={"confirmed", "in_progress"})
-        return await run_in_threadpool(
+        result = await run_in_threadpool(
             service.submit_answer,
             session_id=session_id,
             task_id=body.task_id,
             student_answer=body.student_answer,
             time_ms=body.time_ms,
         )
+        return await _public_answer(service, session_id, result)
     except DiagnosticError as exc:
         raise _answer_error(exc)
     except HTTPException:
@@ -169,12 +181,15 @@ async def submit_answer(
 @router.get("/sessions/by-invite", response_model=ResolvedSessionResponse)
 async def resolve_session(
     request: Request,
-    invite_code: str = Query(..., min_length=1),
+    # The code is a capability: in a header, never in the URL (history, proxy logs) - like ``answer`` (S-02).
+    invite_code: Optional[str] = Header(None, alias="X-Diagnostic-Invite-Code"),
     service: SessionService = Depends(_service),
 ):
     """Restore the exact owned attempt, including a durably completed one."""
     ticket = admit_invite_attempt(request, invite_code)  # #77
     try:
+        if not invite_code:  # the lookup below must never run with None (it would match sessions without a code)
+            raise invite_error(403, "INVITE_REQUIRED", "Требуется код приглашения на диагностику.", "contact_center")
         session = await run_sync_limited(service.session_repo.get_by_invite_code, invite_code)
         invite = await validate_invite_capability(
             invite_code,
@@ -208,7 +223,7 @@ async def resolve_session(
         session_id, items_answered, current_task, total_time_ms = active
         return ResolvedSessionResponse(
             session_id=session_id, status="active", items_answered=items_answered,
-            current_task=current_task, total_time_ms=total_time_ms,
+            current_task=public_task(current_task), total_time_ms=total_time_ms,
         )
     except DiagnosticError as exc:
         raise _answer_error(exc)

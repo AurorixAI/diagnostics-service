@@ -760,7 +760,7 @@ def test_answer_endpoint_grades_in_a_worker_thread(monkeypatch):
     app.dependency_overrides[api_router._service] = lambda: Service()
     with TestClient(app) as test_client:
         response = post_answer(SimpleNamespace(post=test_client.post))
-    assert response.status_code == 200 and response.json()["eval_category"] == "correct"
+    assert response.status_code == 200 and response.json() == {"next_task": None, "session_completed": False, "total_time_ms": None}
     assert threads["replay"] != threads["loop"] and threads["submit"] != threads["loop"]
 
 

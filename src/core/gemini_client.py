@@ -31,6 +31,13 @@ def narrative_enabled() -> bool:
     return value not in _OFF_VALUES
 
 
+def llm_configured() -> bool:
+    """A model can be called at all: an Azure key + endpoint, or a Gemini key (the same conditions ``call_gemini`` checks)."""
+    settings = get_settings()
+    azure = settings.azure_deepseek_api_key.strip() and settings.azure_deepseek_endpoint.strip()
+    return bool(azure or settings.gemini_api_key.strip())
+
+
 def warn_if_switch_unrecognised() -> bool:
     """Startup check: a value that is neither a known "on" nor a known "off" keeps the model ON (fail-open) - say so loudly.
 

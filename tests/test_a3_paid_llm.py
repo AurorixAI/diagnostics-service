@@ -225,7 +225,34 @@ def test_narrative_source_has_a_value_for_each_way_the_wording_can_come_about(mo
     ("degraded_evidence", None, "ai_off"),
 ])
 def test_narrative_source_of_every_skip_reason(skip, ai, expected):
-    assert rg._narrative_source(skip, ai) == expected
+    assert rg._narrative_source(skip, ai, True) == expected
+
+
+def test_no_key_of_any_model_is_ai_off_not_a_failure():
+    """An environment without secrets (local, a stage without keys) must not show «без ИИ из-за сбоя» on every report."""
+    assert rg._narrative_source(None, None, False) == "ai_off"
+    assert rg._narrative_source(None, {"overall": {}}, False) == "ai"           # a cached answer is still the model's
+    assert rg._narrative_source("deterministic_job", None, False) == "rebuild"
+
+
+@pytest.mark.parametrize("azure,gemini,configured", [
+    (False, False, False), (True, False, True), (False, True, True), (True, True, True),
+])
+def test_llm_configured_follows_the_keys(monkeypatch, azure, gemini, configured):
+    set_env(monkeypatch, azure=azure, gemini=gemini)
+    assert gemini_client.llm_configured() is configured
+    monkeypatch.setenv("AZURE_DEEPSEEK_API_KEY", "k")                    # a key without its endpoint is not a way to call Azure
+    monkeypatch.delenv("AZURE_DEEPSEEK_ENDPOINT", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    get_settings.cache_clear()
+    assert gemini_client.llm_configured() is False
+
+
+def test_the_generator_marks_a_report_built_without_any_key_as_ai_off(monkeypatch, gen):
+    set_env(monkeypatch, flag=None)
+    monkeypatch.setattr(rg, "llm_configured", lambda: False)             # the environment has no key
+    report = gen(_gap_answers(), weak=["G7_T9_K1"], narrative=None)
+    assert report.report_json["report_meta"]["narrative_source"] == "ai_off"
 
 
 def test_generator_flag_on_calls_the_model_and_flag_off_does_not(monkeypatch, gen):

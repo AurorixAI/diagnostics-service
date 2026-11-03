@@ -125,7 +125,7 @@ def test_final_answer_replay_and_refresh_survive_callback_lag_and_expiry(scenari
     repeat = submit(client, session_id)
     assert repeat.status_code == 200, repeat.text
     assert repeat.json() == first.json()
-    lookup = client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
+    lookup = client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Diagnostic-Invite-Code": CODE})
     assert lookup.status_code == 200, lookup.text
     assert lookup.json()["status"] == "completed"
     assert lookup.json()["session_id"] == str(session_id)
@@ -182,7 +182,7 @@ def test_a_session_that_started_before_the_cancellation_may_finish(scenario):
     response = submit(client, session_id)
     assert response.status_code == 200, response.text
     assert response.json()["session_completed"] is True
-    again = client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
+    again = client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Diagnostic-Invite-Code": CODE})
     assert again.status_code == 200 and again.json()["status"] == "completed"
     assert_single_completion(factory)
     # a NEW session is still refused: nothing here predates the cancellation
@@ -197,7 +197,7 @@ def test_a_session_that_started_at_or_after_the_cancellation_is_cut_off(scenario
     _cancel(scenario, offset)                                     # cancelled at / before the moment the session was created
     for response in (
         submit(client, session_id),
-        client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE}),
+        client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Diagnostic-Invite-Code": CODE}),
     ):
         assert response.status_code == 410, response.text
         assert response.json()["detail"]["code"] == "INVITE_CANCELLED"
@@ -218,7 +218,7 @@ def test_only_an_archived_student_cancellation_lets_a_session_finish(scenario):
 def test_resume_of_a_running_session_of_a_cancelled_invite_is_allowed_before_the_cancellation_only(scenario):
     client, session_id, _invite, _factory, redis = scenario
     _cancel(scenario, +60)
-    active = client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
+    active = client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Diagnostic-Invite-Code": CODE})
     assert active.status_code == 200, active.text                 # the session started before the cancellation: resumable
     assert active.json()["session_id"] == str(session_id) and active.json()["status"] == "active"
 
@@ -235,7 +235,7 @@ def test_invite_projection_must_match_owned_student_and_grade(scenario, field, v
     client, session_id, invite, factory, _redis = scenario
     invite[field] = value
     assert submit(client, session_id).status_code == 403
-    assert client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE}).status_code == 403
+    assert client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Diagnostic-Invite-Code": CODE}).status_code == 403
     with factory() as db:
         assert db.query(DiagAnswer).count() == 0
 
@@ -356,7 +356,7 @@ def test_restore_storage_outage_is_retryable_without_creating_attempt(scenario, 
     client, session_id, _invite, factory, _redis = scenario
     def unavailable(*_args): raise RuntimeError("Synthetic storage outage")
     monkeypatch.setattr(RedisStateManager, "load", unavailable)
-    response = client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
+    response = client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Diagnostic-Invite-Code": CODE})
     assert response.status_code == 500
     assert response.json()["detail"]["code"] == "SESSION_RESTORE_FAILED"
     assert response.json()["detail"]["action"] == "retry"
@@ -389,11 +389,11 @@ def test_late_callback_cannot_overwrite_reclaimed_job(scenario, monkeypatch):
 
 def test_active_restore_and_missing_state_do_not_offer_new_attempt(scenario):
     client, session_id, _invite, _factory, redis = scenario
-    lookup = client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
+    lookup = client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Diagnostic-Invite-Code": CODE})
     assert lookup.status_code == 200, lookup.text
     assert lookup.json()["current_task"]["task_id"] == PAYLOAD["task_id"]
     redis.delete(str(session_id))
-    lookup = client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
+    lookup = client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Diagnostic-Invite-Code": CODE})
     assert lookup.status_code == 410
     assert lookup.json()["detail"]["code"] == "SESSION_EXPIRED"
 
@@ -423,7 +423,7 @@ def test_restore_observes_completion_committed_during_auth_check(scenario, monke
         return invite
     from src.api import router as route_module
     monkeypatch.setattr(route_module, "validate_invite_capability", completing_callback)
-    response = client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
+    response = client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Diagnostic-Invite-Code": CODE})
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "completed"
     assert_single_completion(factory)
@@ -459,12 +459,13 @@ def test_issued_key_and_irt_are_used_after_bank_edit_with_durable_snapshot(scena
     redis.save(state)
     monkeypatch.setattr(sessions.TaskRepository,'get_by_id',lambda *_:pytest.fail('live bank must not re-grade issued content'))
     response = submit(client,session_id)
-    assert response.status_code==200 and response.json()['is_correct'] is True
+    assert response.status_code==200 and response.json()['session_completed'] is True
     with factory() as db:
         saved=db.query(DiagAnswer).one()
         assert saved.task_snapshot['task']['correct_answer']=='4'
         assert saved.task_snapshot['provenance']=='issued'
         assert saved.task_snapshot['task']['question_latex']=='$x=4$'
+        assert float(saved.outcome)==1.0 and saved.eval_category=='correct'     # graded right: read from the journal, not from the public answer
         assert float(saved.theta_after)==pytest.approx(expected.theta,abs=.0001)
     assert submit(client,session_id).json()==response.json()
     assert_single_completion(factory)

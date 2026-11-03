@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.orm import Session
 
-from src.core.gemini_client import call_gemini, narrative_enabled
+from src.core.gemini_client import call_gemini, llm_configured, narrative_enabled
 from src.models.diag_models import DiagReport
 from src.repositories.diag_repo import DiagReportRepository
 from src.repositories.knowledge_repo import KnowledgeRepository
@@ -1912,18 +1912,19 @@ def _narrative_skip_reason(
     return None
 
 
-def _narrative_source(skip_reason: Optional[str], ai_data: Optional[Dict[str, Any]]) -> str:
+def _narrative_source(skip_reason: Optional[str], ai_data: Optional[Dict[str, Any]], model_configured: bool) -> str:
     """Why the wording of a report is what it is (``report_meta.narrative_source``).
 
     ``ai`` - the model wrote it; ``rebuild`` - a script rebuilt it without the model (by design);
-    ``ai_off`` - the model was not asked (switch, error-free attempt, no answers, degraded evidence);
-    ``ai_failed`` - the model was asked and gave nothing usable, so the template wording was used.  Only the last one is a fault.
+    ``ai_off`` - no call was made or none could be: the switch, an error-free attempt, no answers, degraded evidence,
+    or no key of any model at all (an environment without secrets);
+    ``ai_failed`` - the model was called and gave nothing usable, so the template wording was used.  Only this one is a fault.
     """
     if ai_data:
         return "ai"
     if skip_reason == "deterministic_job":
         return "rebuild"
-    return "ai_off" if skip_reason else "ai_failed"
+    return "ai_off" if skip_reason or not model_configured else "ai_failed"
 
 
 def _read_narrative_cache(existing: Any, key: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -2276,7 +2277,7 @@ def generate_and_save_report(
                 "covered_section_ids": covered_section_ids or [],
                 "deep_scan_incomplete": deep_scan_incomplete,
                 "deep_scan_params": deep_scan_params,
-                "narrative_source": _narrative_source(narrative_skip, ai_data),
+                "narrative_source": _narrative_source(narrative_skip, ai_data, llm_configured()),
             },
             "overall": {
                 "score_percent":    score_pct,     # always from data

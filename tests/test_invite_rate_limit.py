@@ -98,7 +98,7 @@ def api(monkeypatch):
 
 
 def resolve(client, code, ip="203.0.113.7"):
-    return client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": code}, headers={"X-Real-IP": ip})
+    return client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Real-IP": ip, "X-Diagnostic-Invite-Code": code})
 
 
 def create(client, code, student_id, ip="203.0.113.7", grade=GRADE):
@@ -294,13 +294,13 @@ class TestGuessingIsBudgeted:
     def test_spoofed_forwarded_for_does_not_open_a_new_bucket(self, api):
         for n in range(FAILS_PER_MINUTE.count):
             response = api.get(
-                "/api/v1/diagnostic/sessions/by-invite", params={"invite_code": guess(n)},
-                headers={"X-Real-IP": "203.0.113.7", "X-Forwarded-For": f"10.{n}.0.1"},
+                "/api/v1/diagnostic/sessions/by-invite",
+                headers={"X-Real-IP": "203.0.113.7", "X-Forwarded-For": f"10.{n}.0.1", "X-Diagnostic-Invite-Code": guess(n)},
             )
             assert response.status_code == 403
         refused = api.get(
-            "/api/v1/diagnostic/sessions/by-invite", params={"invite_code": code_of(0)},
-            headers={"X-Real-IP": "203.0.113.7", "X-Forwarded-For": "192.0.2.77"},
+            "/api/v1/diagnostic/sessions/by-invite",
+            headers={"X-Real-IP": "203.0.113.7", "X-Forwarded-For": "192.0.2.77", "X-Diagnostic-Invite-Code": code_of(0)},
         )
         assert refused.status_code == 429
 
@@ -415,3 +415,19 @@ class TestNothingLeaks:
         assert started.status_code == 201
         body = started.json()
         assert set(body) == {"session_id", "first_task"} and body["first_task"]["task_id"] == "T1"
+        assert set(body["first_task"]) == {"task_id", "question_text", "question_latex", "question_image_url", "answer_type",
+                                           "answer_options", "answer_options_latex", "items_answered", "items_max"}
+
+    def test_the_resolve_reads_the_code_from_the_header_only(self, api):
+        """N03b-1 R3: the capability of the resume lookup is in the header, like ``answer``; the query is not read."""
+        by_header = resolve(api, code_of(5))
+        assert by_header.status_code == 404 and by_header.json()["detail"]["code"] == "SESSION_NOT_FOUND"   # the code was checked
+        asked = api.calls["auth"]
+        assert asked == 1
+        by_query = api.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": code_of(5)}, headers={"X-Real-IP": "203.0.113.7"})
+        assert by_query.status_code == 403 and by_query.json()["detail"]["code"] == "INVITE_REQUIRED"
+        assert api.calls["auth"] == asked                              # a code in the URL is a code that was not sent
+        assert "invite_code" not in str(by_header.request.url) and code_of(5) not in str(by_header.request.url)
+        beside = api.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": code_of(6)},
+                         headers={"X-Real-IP": "203.0.113.7", "X-Diagnostic-Invite-Code": code_of(5)})
+        assert beside.status_code == 404                               # the header wins, the query beside it is ignored

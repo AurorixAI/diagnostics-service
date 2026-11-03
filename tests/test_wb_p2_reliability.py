@@ -140,7 +140,14 @@ def answer(world, task_id, value, code=CODE):
 
 
 def resume(world):
-    return world.client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
+    return world.client.get("/api/v1/diagnostic/sessions/by-invite", headers={"X-Diagnostic-Invite-Code": CODE})
+
+
+def graded(world):
+    """(outcome, eval_category) of the last stored answer: the grading is read from the journal, no longer from the public answer (N03b-1 R3)."""
+    with world.factory() as db:
+        last = db.query(DiagAnswer).order_by(DiagAnswer.answered_at.desc(), DiagAnswer.id.desc()).first()
+        return float(last.outcome), last.eval_category
 
 
 def rows(world):
@@ -178,7 +185,7 @@ def test_redis_blink_in_the_middle_of_the_test_the_student_continues_where_he_wa
     assert lookup.json()["items_answered"] == 1
     second = answer(mid, "WB_B", "2*x+2")
     assert second.status_code == 200, second.text
-    assert second.json()["next_task"]["task_id"] == "WB_C" and second.json()["is_correct"] is True
+    assert second.json()["next_task"]["task_id"] == "WB_C" and graded(mid)[0] == 1.0
     assert rows(mid) == [("WB_A", "4"), ("WB_B", "2*x+2")]
     assert phase(mid) == "warmup"
 
@@ -331,7 +338,7 @@ def test_after_the_sandbox_recovers_the_resend_is_graded_correct(mid, monkeypatc
     assert answer(mid, "WB_B", "2*(x+1)").status_code == 503
     ok = answer(mid, "WB_B", "2*(x+1)")
     assert ok.status_code == 200, ok.text
-    assert ok.json()["is_correct"] is True and ok.json()["eval_category"] == "correct"
+    assert graded(mid) == (1.0, "correct")
     assert rows(mid) == [("WB_A", "4"), ("WB_B", "2*(x+1)")]
 
 
@@ -339,7 +346,7 @@ def test_a_comparison_that_ran_and_said_no_is_still_wrong(mid, monkeypatch):
     _reach_open_task(mid)
     monkeypatch.setattr(answer_evaluator._SANDBOX, "equivalent", lambda *a, **k: False)   # includes "ran too long"
     reply = answer(mid, "WB_B", "x+7")
-    assert reply.status_code == 200 and reply.json()["is_correct"] is False
+    assert reply.status_code == 200 and graded(mid)[0] == 0.0
     assert rows(mid)[-1] == ("WB_B", "x+7")
 
 

@@ -58,11 +58,49 @@ class AnswerResult(BaseModel):
     stop_reason: Optional[str] = None
 
 
+# ── What the student's page may receive ───────────────────────────────────
+# The invite code is a capability held by the student's device.  Everything below is the allowlist of what the page
+# reads (src/app/d/[code]/page.tsx): the task to show, the progress, whether the test is over, how long it took.
+# Never the level, theta/se, was the answer right, its category, the stop reason, the skill or the phase of the
+# test: those are the result, and the result is for the teacher (N03b-1).  ``TaskOut`` / ``AnswerResult`` above stay
+# the INTERNAL shapes; routes answer with these through ``response_model``.
+
+class PublicTask(BaseModel):
+    task_id: str
+    question_text: str
+    question_latex: Optional[str] = None
+    question_image_url: Optional[str] = None
+    answer_type: str
+    answer_options: Optional[List[Any]] = None
+    answer_options_latex: Optional[List[str]] = None
+    items_answered: int
+    items_max: int
+
+
+def public_task(task: Any) -> Optional[PublicTask]:
+    """A ``TaskOut`` (or its dict) cut to what the page reads: the other fields are not copied, they cannot leak."""
+    return PublicTask.model_validate(task, from_attributes=True) if task is not None else None
+
+
+class PublicAnswerResult(BaseModel):
+    next_task: Optional[PublicTask] = None
+    session_completed: bool = False
+    # Server sum of the answers' time: set with the final answer, the one number of time the student ever sees
+    # (the same as ``by-invite`` returns after a refresh).
+    total_time_ms: Optional[int] = None
+
+
+def public_answer(result: AnswerResult, total_time_ms: Optional[int] = None) -> PublicAnswerResult:
+    return PublicAnswerResult(
+        next_task=public_task(result.next_task), session_completed=result.session_completed, total_time_ms=total_time_ms,
+    )
+
+
 # ── Session ───────────────────────────────────────────────────────────────
 
 class CreateSessionResponse(BaseModel):
     session_id: uuid.UUID
-    first_task: TaskOut
+    first_task: PublicTask
 
 
 class ResolvedSessionResponse(BaseModel):
@@ -70,5 +108,5 @@ class ResolvedSessionResponse(BaseModel):
     session_id: uuid.UUID
     status: Literal["active", "completed"]
     items_answered: int
-    current_task: Optional[TaskOut] = None
+    current_task: Optional[PublicTask] = None
     total_time_ms: int = 0
