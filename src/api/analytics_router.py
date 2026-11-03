@@ -223,6 +223,8 @@ def student_report(
                 and report.report_schema_version >= REPORT_SCHEMA_VERSION
                 and report.generation_status == "ready"
             ),
+            # The format of a report built now: the page compares a stored report with THIS, it keeps no copy of the number.
+            "current_schema_version": REPORT_SCHEMA_VERSION,
         },
         # ── Core report fields ──────────────────────────────────────────────
         "grade_level":    (report.grade_level if report else None) or (session.grade_level if session else None),

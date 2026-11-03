@@ -32,6 +32,7 @@ from src.schemas.diag_schemas import (
     AnswerResult,
     CreateSessionRequest,
     CreateSessionResponse,
+    ReportStatusResponse,
     ResolvedSessionResponse,
     SubmitAnswerRequest,
 )
@@ -221,20 +222,17 @@ async def resolve_session(
         raise invite_error(500, "SESSION_RESTORE_FAILED", "Не удалось проверить состояние попытки. Повторите проверку.", "retry")
 
 
-@router.get("/sessions/{session_id}/report")
+@router.get("/sessions/{session_id}/report", response_model=ReportStatusResponse)
 async def get_report(
     request: Request,
     session_id: uuid.UUID,
     service: SessionService = Depends(_service),
     db: Session = Depends(get_db),
     # The invite code is a capability: it travels in a header (like ``answer``), not in the URL, where it would stay in
-    # the browser history and in proxy logs (S-02).  ``?invite_code=`` is still read for one release so that a page
-    # loaded before the deploy keeps working; remove it after that.
-    invite_header: Optional[str] = Header(None, alias="X-Diagnostic-Invite-Code"),
-    invite_query: Optional[str] = Query(None, alias="invite_code", min_length=1, deprecated=True),
+    # the browser history and in proxy logs (S-02).
+    invite_code: Optional[str] = Header(None, alias="X-Diagnostic-Invite-Code"),
 ):
-    """Get diagnostic report for a completed session."""
-    invite_code = invite_header or invite_query
+    """Public, by invite code: only the state of a completed attempt.  The report itself is staff-only (analytics router)."""
     ticket = admit_report_lookup(request)  # S-03
     try:
         session = await run_sync_limited(lambda: db.query(DiagSession).filter(DiagSession.id == session_id).first())
@@ -257,7 +255,7 @@ async def get_report(
         )
         if session.phase != "completed":
             raise invite_error(409, "SESSION_NOT_COMPLETED", "Диагностика ещё не завершена.", "check_session")
-        return await run_sync_limited(service.get_report_data, session_id)
+        return await run_sync_limited(service.get_report_status, session_id)
     except ValueError as exc:
         raise invite_error(404, "REPORT_NOT_FOUND", "Отчёт не найден.", "contact_center")
     except HTTPException as exc:

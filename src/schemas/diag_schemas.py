@@ -65,6 +65,17 @@ class CreateSessionResponse(BaseModel):
     first_task: TaskOut
 
 
+class ReportGenerationStatus(BaseModel):
+    status: str
+
+
+class ReportStatusResponse(BaseModel):
+    """The whole public answer about a report: no level, plan, journal or answer keys (those are for staff only)."""
+    phase: str
+    report_generation: ReportGenerationStatus
+    total_time_ms: int = 0
+
+
 class ResolvedSessionResponse(BaseModel):
     """Resolve the owned attempt, independently of the auth callback's timing."""
     session_id: uuid.UUID

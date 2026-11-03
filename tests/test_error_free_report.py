@@ -28,20 +28,3 @@ def test_summary_keeps_observed_errors_and_confirmed_prerequisites():
     assert 'Зафиксированы ключевые затруднения: Логарифмы' in observed and 'Коррекцию' in observed
     confirmed = _build_deterministic_summary(**args,chains=[{'root_gap_skill_name':'Дроби'}])
     assert 'Углублённая проверка подтвердила первопричину: «Дроби»' in confirmed
-
-import pytest
-from src.domain.session_service import SessionService
-from src.domain.report_generator import REPORT_SCHEMA_VERSION
-
-@pytest.mark.parametrize('version,current',[(2,False),(REPORT_SCHEMA_VERSION,True)])
-def test_public_report_recognizes_the_same_schema_as_the_worker(version,current):
-    service=object.__new__(SessionService)
-    session=NS(id='session',student_id='student',phase='completed',grade_level=10,
-        theta=1.8,theta_se=.35,overall_level='above_grade',topic_breakdown={},weak_skills=[],stop_reason='classification_confident')
-    report=NS(report_json={'error_patterns':[]},report_schema_version=version,generation_status='ready',generation_stage='done',generation_attempts=1)
-    service.session_repo=NS(get_by_id=lambda _:session)
-    service.answer_repo=NS(get_session_answers=lambda _:[])
-    service.report_repo=NS(get_by_session=lambda _:report)
-    result=service.get_report_data('session')
-    assert result['report_generation']['is_current_schema']==current
-    assert result['report_json']==report.report_json

@@ -1,6 +1,6 @@
 """Wave A / A4 (diagnostic): the report read.
 
-S-02 the invite code (a capability) travels in the X-Diagnostic-Invite-Code header, not in the URL;
+S-02 the invite code (a capability) travels in the X-Diagnostic-Invite-Code header, not in the URL (the query form is gone);
 S-03 `GET /sessions/{id}/report` is behind the failed-lookup brake like the other public entries - and a valid read
 (the finished page polls it every few seconds) costs nothing.
 J-01 no production report dumps in the repository or in the image.
@@ -58,8 +58,8 @@ def api(monkeypatch):
         return {"status": "completed"}
 
     class Service:
-        def get_report_data(self, session_id):
-            return {"session_id": str(session_id), "report_generation": {"status": "ready"}}
+        def get_report_status(self, session_id):
+            return {"phase": "completed", "report_generation": {"status": "ready"}, "total_time_ms": 1234}
 
     monkeypatch.setattr(diag_router, "validate_invite_capability", capability)
     app = FastAPI()
@@ -81,15 +81,17 @@ def read(client, code=CODE, ip="203.0.113.7", **kw):
 # ── S-02 ─────────────────────────────────────────────────────────────────────────────────────────────────────
 def test_s02_the_report_is_read_with_the_invite_code_in_the_header(api):
     r = read(api)
-    assert r.status_code == 200 and r.json()["session_id"] == str(SESSION_ID)
+    assert r.status_code == 200 and r.json()["phase"] == "completed"
     assert api.seen["capability_codes"] == [CODE]
     # the URL of the request carries nothing
     assert "invite_code" not in str(r.request.url) and CODE not in str(r.request.url)
 
 
-def test_s02_a_page_loaded_before_the_deploy_still_reads_with_the_query_code(api):
+def test_s02_the_code_in_the_query_is_not_read(api):
+    """The one-release grace of ``?invite_code=`` is over (N03b-1): a code in the URL is a code that was not sent."""
     r = api.get(URL, params={"invite_code": CODE}, headers={"X-Real-IP": "203.0.113.7"})
-    assert r.status_code == 200
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "REPORT_NOT_FOUND"
+    assert api.seen["capability_codes"] == []              # the capability check was never reached with it
 
 
 def test_s02_no_code_at_all_is_not_found_not_a_server_error(api):
@@ -97,9 +99,10 @@ def test_s02_no_code_at_all_is_not_found_not_a_server_error(api):
     assert read(api, code="WRONGCODE9").status_code == 404
 
 
-def test_s02_the_header_wins_over_a_query_code(api):
+def test_s02_the_header_is_used_and_a_query_code_beside_it_is_ignored(api):
     r = api.get(URL, params={"invite_code": "WRONGCODE9"}, headers={"X-Real-IP": "203.0.113.7", "X-Diagnostic-Invite-Code": CODE})
     assert r.status_code == 200
+    assert api.seen["capability_codes"] == [CODE]
 
 
 # ── S-03 ─────────────────────────────────────────────────────────────────────────────────────────────────────

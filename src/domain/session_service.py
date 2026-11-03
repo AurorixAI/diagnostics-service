@@ -41,8 +41,7 @@ from src.core.exceptions import (
 )
 from src.domain.auth_sync_jobs import enqueue_auth_completion_sync, process_next_auth_completion_sync
 from src.domain.report_jobs import enqueue_report_generation, process_next_report_job
-from src.domain.report_generator import REPORT_SCHEMA_VERSION, strip_retired_report_fields
-from src.domain.level_policy import classify, count_solved, is_correct, lower_grade_floor
+from src.domain.level_policy import classify, is_correct, lower_grade_floor
 from src.domain.alpha_engine import (
     AlphaTracker,
     IRTParams,
@@ -565,72 +564,19 @@ class SessionService:
     # PUBLIC — Report data
     # ══════════════════════════════════════════════════════════════════════
 
-    def get_report_data(self, session_id: uuid.UUID) -> dict:
+    def get_report_status(self, session_id: uuid.UUID) -> dict:
+        """What the invite-code holder may learn: the attempt is completed, how long it took, whether the report is built.
+
+        Never the report itself: it holds the level, the plan and the answer keys (staff read it through the analytics router).
+        """
         db_session = self.session_repo.get_by_id(session_id)
         if db_session is None or db_session.phase != "completed":
             raise ValueError("Session not found or not completed")
-        answers = self.answer_repo.get_session_answers(session_id)
-        theta = float(db_session.theta or 0)
-        se = float(db_session.theta_se or 1)
-
-        # Pull full report_json (including error_patterns) from diag_reports
         report = self.report_repo.get_by_session(session_id)
-        report_json: dict = {}
-        error_patterns: list = []
-        if report and report.report_json and isinstance(report.report_json, dict):
-            # Retired claims (O4) of pre-schema-5 reports are never exposed.
-            report_json = strip_retired_report_fields(report.report_json)
-            error_patterns = report_json.get("error_patterns", [])
-
-        report_generation = {
-            "status": report.generation_status if report else "pending",
-            "stage": report.generation_stage if report else "queued",
-            "attempts": int(report.generation_attempts or 0) if report else 0,
-            "is_current_schema": bool(
-                report
-                and report.report_json
-                and report.report_schema_version >= REPORT_SCHEMA_VERSION
-                and report.generation_status == "ready"
-            ),
-        }
-
         return {
-            "session_id": str(session_id),
-            "student_id": str(db_session.student_id),
-            "grade_level": db_session.grade_level,
-            "overall_theta": theta,
-            "overall_level": db_session.overall_level or "at_grade",
-            # Same level object as report_json.level (computed by level_policy).
-            "level": report_json.get("level") or {
-                **classify(theta, se, db_session.grade_level),
-                "theta": theta, "se": se,
-                **count_solved(answers),
-            },
-            "confidence_interval": [theta - 2 * se, theta + 2 * se],
-            "topic_breakdown": db_session.topic_breakdown or {},
-            "weak_skills": db_session.weak_skills or [],
-            # One recommended start: the first plan step of the report.  Only a
-            # report that predates it falls back to the first confirmed gap.
-            "recommended_start": (
-                (report_json.get("recommended_start") or {}).get("skill_id")
-                if "recommended_start" in report_json
-                else (db_session.weak_skills[0] if db_session.weak_skills else None)
-            ),
-            "items_total": len(answers),
-            "total_time_ms": sum(answer.time_ms or 0 for answer in answers),
-            "stop_reason": db_session.stop_reason,
-            # Unified journal: error_patterns + full report_json
-            "error_patterns": error_patterns,
-            "distractor_errors": [
-                ep for ep in error_patterns
-                if isinstance(ep, dict) and ep.get("eval_category") == "distractor"
-            ],
-            "report_json": report_json,
-            # Explicit flag so frontend knows full report is available
-            "has_full_report": bool(report_json),
-            # The public invite route remains informative without disclosing
-            # raw worker exceptions or implementation details.
-            "report_generation": report_generation,
+            "phase": db_session.phase,
+            "report_generation": {"status": report.generation_status if report else "pending"},
+            "total_time_ms": self.answer_repo.get_total_time_ms(session_id),
         }
 
     # ══════════════════════════════════════════════════════════════════════

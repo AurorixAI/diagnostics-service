@@ -33,9 +33,9 @@ class _Service:
     def __init__(self, expected_id):
         self.expected_id = expected_id
 
-    def get_report_data(self, session_id):
+    def get_report_status(self, session_id):
         assert session_id == self.expected_id
-        return {"session_id": str(session_id), "report_generation": {"status": "pending"}}
+        return {"phase": "completed", "report_generation": {"status": "pending"}, "total_time_ms": 0}
 
 
 @pytest.mark.parametrize("invite_status", ["confirmed", "in_progress", "completed", "expired"])
@@ -65,12 +65,11 @@ def test_completed_session_report_is_available_during_auth_projection_lag(monkey
             session_id=session_id,
             service=_Service(session_id),
             db=_Db(db_session),
-            invite_header=invite_code,
-            invite_query=None,
+            invite_code=invite_code,
         )
     )
 
-    assert result["session_id"] == str(session_id)
+    assert result["phase"] == "completed"
     assert observed["code"] == invite_code
     assert observed["student_id"] == str(db_session.student_id)
     assert observed["grade_level"] == 9

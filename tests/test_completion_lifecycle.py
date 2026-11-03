@@ -129,9 +129,9 @@ def test_final_answer_replay_and_refresh_survive_callback_lag_and_expiry(scenari
     assert lookup.status_code == 200, lookup.text
     assert lookup.json()["status"] == "completed"
     assert lookup.json()["session_id"] == str(session_id)
-    report = client.get(f"/api/v1/diagnostic/sessions/{session_id}/report", params={"invite_code": CODE})
+    report = client.get(f"/api/v1/diagnostic/sessions/{session_id}/report", headers={"X-Diagnostic-Invite-Code": CODE})
     assert report.status_code == 200, report.text
-    assert report.json()["items_total"] == 1
+    assert report.json()["phase"] == "completed"
     assert report.json()["total_time_ms"] == PAYLOAD["time_ms"]
     assert_single_completion(factory)
 
@@ -187,7 +187,7 @@ def test_a_session_that_started_before_the_cancellation_may_finish(scenario):
     assert response.json()["session_completed"] is True
     again = client.get("/api/v1/diagnostic/sessions/by-invite", params={"invite_code": CODE})
     assert again.status_code == 200 and again.json()["status"] == "completed"
-    report = client.get(f"/api/v1/diagnostic/sessions/{session_id}/report", params={"invite_code": CODE})
+    report = client.get(f"/api/v1/diagnostic/sessions/{session_id}/report", headers={"X-Diagnostic-Invite-Code": CODE})
     assert report.status_code == 200, report.text
     assert_single_completion(factory)
     # a NEW session is still refused: nothing here predates the cancellation
@@ -233,7 +233,7 @@ def test_foreign_capability_cannot_submit_or_read_result(scenario):
     assert submit(client, session_id).status_code == 200
     assert submit(client, session_id, code="FOREIGN").status_code == 403
     assert client.get(f"/api/v1/diagnostic/sessions/{session_id}/report",
-                      params={"invite_code": "FOREIGN"}).status_code == 404
+                      headers={"X-Diagnostic-Invite-Code": "FOREIGN"}).status_code == 404
     assert_single_completion(factory)
 
 
