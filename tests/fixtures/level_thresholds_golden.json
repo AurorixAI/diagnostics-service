@@ -1,0 +1,30 @@
+{
+  "_about": "One table of the level cut-offs for every service that reads theta: diagnostic-service (tests/test_e7_level_thresholds.py), auth-service (diagnostic_level.py), front (diagnostic-level.ts). Plain data: copy the file or read it as is. Status codes: critical < -1.4 <= below < -0.5 <= partial_gap < 0.1 <= on_level < 1.0 <= above. Category: below_grade < -0.5 <= at_grade < 1.0 <= above_grade.",
+  "thresholds": {"above": 1.0, "at": -0.5, "on_level": 0.1, "critical": -1.4, "provisional_se": 0.4},
+  "cases": [
+    {"theta": -4.0,    "category": "below_grade", "status": "critical"},
+    {"theta": -3.0,    "category": "below_grade", "status": "critical"},
+    {"theta": -1.5,    "category": "below_grade", "status": "critical"},
+    {"theta": -1.4001, "category": "below_grade", "status": "critical"},
+    {"theta": -1.4,    "category": "below_grade", "status": "below"},
+    {"theta": -1.0,    "category": "below_grade", "status": "below"},
+    {"theta": -0.5001, "category": "below_grade", "status": "below"},
+    {"theta": -0.5,    "category": "at_grade",    "status": "partial_gap"},
+    {"theta": 0.0,     "category": "at_grade",    "status": "partial_gap"},
+    {"theta": 0.0999,  "category": "at_grade",    "status": "partial_gap"},
+    {"theta": 0.1,     "category": "at_grade",    "status": "on_level"},
+    {"theta": 0.5,     "category": "at_grade",    "status": "on_level"},
+    {"theta": 0.9999,  "category": "at_grade",    "status": "on_level"},
+    {"theta": 1.0,     "category": "above_grade", "status": "above"},
+    {"theta": 3.5,     "category": "above_grade", "status": "above"}
+  ],
+  "provisional": [
+    {"se": 0.2, "provisional": false}, {"se": 0.4, "provisional": false},
+    {"se": 0.4001, "provisional": true}, {"se": null, "provisional": true}
+  ],
+  "not_level_thresholds": {
+    "_about": "Cut-offs of the CAT task pool in session_service, NOT of the student's level: below the first one the pool also takes tasks of the previous grade, below the second - of two grades back (floor: grade 5). The second (-1.5) is deliberately not the 'critical' cut-off (-1.4): it is a different decision (which tasks to serve), made on the running estimate.",
+    "pool_previous_grade_below": -0.5,
+    "pool_two_grades_back_below": -1.5
+  }
+}
