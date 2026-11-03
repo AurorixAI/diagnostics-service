@@ -12,34 +12,7 @@ GOLDEN = json.loads((pathlib.Path(__file__).parent / "fixtures" / "keyboard_answ
 EVALUATOR = AnswerEvaluator()
 
 # Typed answers the evaluator does not accept YET (decision 8 not applied); the code commit empties this set.
-KNOWN_GAPS = {
-    ("fraction-key", "\\frac{21}{5}"),
-    ("fraction-key", "\\dfrac{21}{5}"),
-    ("fraction-key", "$\\dfrac{21}{5}$"),
-    ("latex-fraction-key", "21/5"),
-    ("latex-fraction-key", "4,2"),
-    ("latex-fraction-key", "4.2"),
-    ("latex-fraction-key", "42/10"),
-    ("decimal-comma-key", "\\frac{21}{5}"),
-    ("half", "\\frac{1}{2}"),
-    ("mixed-number-key", "7/2"),
-    ("mixed-number-key", "3,5"),
-    ("mixed-number-key", "3.5"),
-    ("mixed-number-key", "\\frac{7}{2}"),
-    ("empty-set-latex-key", "\u2205"),
-    ("empty-set-latex-key", "\\emptyset"),
-    ("empty-set-latex-key", "\u043d\u0435\u0442 \u043a\u043e\u0440\u043d\u0435\u0439"),
-    ("empty-set-latex-key", "\u041d\u0435\u0442 \u043a\u043e\u0440\u043d\u0435\u0439."),
-    ("empty-set-latex-key", "\u043a\u043e\u0440\u043d\u0435\u0439 \u043d\u0435\u0442"),
-    ("empty-set-latex-key", "\u043d\u0435\u0442 \u0440\u0435\u0448\u0435\u043d\u0438\u0439"),
-    ("empty-set-latex-key", "\u0440\u0435\u0448\u0435\u043d\u0438\u0439 \u043d\u0435\u0442"),
-    ("empty-set-latex-key", "\u043f\u0443\u0441\u0442\u043e\u0435 \u043c\u043d\u043e\u0436\u0435\u0441\u0442\u0432\u043e"),
-    ("empty-set-latex-key", "x \\in \\varnothing"),
-    ("empty-set-words-key", "\u043a\u043e\u0440\u043d\u0435\u0439 \u043d\u0435\u0442"),
-    ("empty-set-words-key", "\\varnothing"),
-    ("empty-set-words-key", "\u2205"),
-    ("empty-set-words-key", "\\emptyset"),
-}
+KNOWN_GAPS: set = set()                       # decision 8 is applied: every accepted notation of the table is graded correct
 
 
 def verdict(key, typed):
@@ -47,13 +20,13 @@ def verdict(key, typed):
     return EVALUATOR.evaluate(task, typed)
 
 
-def pairs(kind):
+def pairs(*kinds):
     return [pytest.param(case["key"], typed, id=f"{case['id']}|{typed}",
                          marks=[pytest.mark.xfail(strict=True, reason="decision 8 not applied yet")] if (case["id"], typed) in KNOWN_GAPS else [])
-            for case in GOLDEN["cases"] for typed in case[kind]]
+            for case in GOLDEN["cases"] for kind in kinds for typed in case.get(kind, [])]
 
 
-@pytest.mark.parametrize("key, typed", pairs("accept"))
+@pytest.mark.parametrize("key, typed", pairs("accept", "accept_exam_differs"))
 def test_equivalent_notations_are_graded_correct(key, typed):
     assert verdict(key, typed) == (1.0, "correct")
 
@@ -67,3 +40,25 @@ def test_other_values_are_graded_wrong(key, typed):
 @pytest.mark.parametrize("case", GOLDEN["contested"], ids=lambda c: f"{c['key']}|{c['typed']}")
 def test_the_contested_cases_keep_the_verdict_of_diagnostic(case):
     assert (verdict(case["key"], case["typed"])[0] == 1.0) is case["diag"]
+
+
+def test_a_served_choice_is_still_compared_as_a_value_only():
+    """The layer of equivalent notations is for typed answers: a choice of a multiple-choice task keeps the strict comparison."""
+    task = SimpleNamespace(id="golden", correct_answer="21/5", answer_type="text", display_answer_type="mcq", sympy_solution=None, distractor_meta=[])
+    assert EVALUATOR.evaluate(task, "21/5") == (1.0, "correct")
+    assert EVALUATOR.evaluate(task, "42/10")[0] == 0.0
+
+
+def test_a_distractor_that_is_a_notation_of_the_key_cannot_exist_but_one_of_another_value_is_still_found():
+    task = SimpleNamespace(id="golden", correct_answer="21/5", answer_type="text", sympy_solution=None, distractor_meta=[{"value": "5/21"}, {"value": "4,3"}])
+    assert EVALUATOR.evaluate(task, "4,3") == (0.0, "distractor")
+    assert EVALUATOR.evaluate(task, "4,2") == (1.0, "correct")
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("нет корней", True), ("  Нет   корней. ", True), ("$\\varnothing$", True), ("x \\in \\varnothing", True), ("x∈∅", True), ("\\emptyset", True),
+    ("", False), (None, False), ("0", False), ("нет корней у уравнения", False), ("{}", False), ("x" * 3000, False),
+])
+def test_is_empty_set(text, expected):
+    from src.domain.answer_value import is_empty_set
+    assert is_empty_set(text) is expected

@@ -44,7 +44,7 @@ from sympy.parsing.sympy_parser import (
 
 from src.core.burst_alert import BurstAlert
 from src.core.exceptions import AnswerNotCheckedError
-from .answer_value import MAX_ANSWER_CHARS, answer_value_key
+from .answer_value import MAX_ANSWER_CHARS, answer_value_key, answers_equivalent, is_empty_set
 from .sympy_sandbox import SandboxUnavailable, SympySandbox
 
 log = logging.getLogger(__name__)
@@ -437,6 +437,10 @@ class AnswerEvaluator:
         # A choice is compared as a value; only a typed answer needs layers 2-3.  Old snapshots and live bank
         # rows have no ``display_answer_type`` - the bank type decides, as before.
         if (getattr(task, "display_answer_type", None) or task.answer_type) != "mcq":
+            # Layer 1b (wave E7, decision 8): another notation of the SAME value - 42/10, 4,2, \\dfrac{21}{5} for the key 21/5; «нет корней» for ∅
+            if answers_equivalent(given, correct) or (is_empty_set(given) and is_empty_set(correct)):
+                return 1.0, "correct"
+
             # Layer 2: Numeric normalization
             given_num = _normalize_number(given)
             correct_num = _normalize_number(correct)

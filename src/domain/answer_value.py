@@ -349,3 +349,21 @@ def answers_equivalent(first: object, second: object) -> bool:
         return True
     na, nb = exact_number(first), exact_number(second)
     return na is not None and nb is not None and na == nb
+
+
+# ── The empty set (wave E7, decision 8) ────────────────────────────────────────────
+# «нет корней», «корней нет», ∅ and \varnothing are one answer.  Exam-service compares typed answers the same way (golden table
+# ``tests/fixtures/keyboard_answers_golden.json``).
+_EMPTY_SET_PREFIX_RE = re.compile(r"^[a-zа-я]\s*(?:\\in|∈)\s*")
+_EMPTY_SET_FORMS = frozenset({
+    "∅", "\\varnothing", "\\emptyset", "пустое множество", "нет корней", "корней нет", "нет решений", "решений нет",
+})
+
+
+def is_empty_set(value: object) -> bool:
+    """True when the text says «the empty set» (optionally as ``x \\in \\varnothing``); anything else - including an empty text - is False."""
+    text = str(value or "")
+    if len(text) > MAX_ANSWER_CHARS:
+        return False
+    text = re.sub(r"\s+", " ", text.replace("$", "").casefold()).strip().rstrip(".;").strip()
+    return _EMPTY_SET_PREFIX_RE.sub("", text).strip() in _EMPTY_SET_FORMS
