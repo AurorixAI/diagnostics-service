@@ -22,6 +22,13 @@ _ON_VALUES = {"", "true", "1", "yes", "on", "enabled"}
 LLM_REQUEST_TIMEOUT_S = 120
 
 
+class TruncatedText(str):
+    """A model answer that was cut off at ``max_tokens`` (``finish_reason`` = length).  It is a ``str`` - what came back - but a caller that
+    asks the same question again with the same limit gets the same cut-off text and pays again: the report generator does not repeat it."""
+
+    truncated = True
+
+
 def narrative_enabled() -> bool:
     """The ONE place where REPORT_NARRATIVE_ENABLED is read (default: on).
 
@@ -106,8 +113,13 @@ def call_gemini(
                 data = resp.json()
                 text = data["choices"][0]["message"]["content"].strip()
                 if data["choices"][0].get("finish_reason") == "length":
-                    # the answer was cut off at max_tokens: it is not valid JSON, the caller will ask again (and pay again)
-                    log.warning("Azure OpenAI answer was cut off at max_tokens=%s (purpose=%s)", max_tokens, purpose)
+                    # cut off at max_tokens: not valid JSON.  Marked, so that the caller does not ask again with the same limit.
+                    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+                    log.warning(
+                        "Azure OpenAI answer was cut off at max_tokens=%s (purpose=%s, completion_tokens=%s, chars=%d)",
+                        max_tokens, purpose, usage.get("completion_tokens"), len(text),
+                    )
+                    text = TruncatedText(text)
                 if text:
                     ok = True
                     log.info("Successfully generated report narrative via Azure OpenAI/DeepSeek (%d chars)", len(text))
@@ -142,6 +154,13 @@ def call_gemini(
         response = client.generate_content(prompt, request_options={"timeout": LLM_REQUEST_TIMEOUT_S})
         text = response.text.strip() if response.text else None
         ok = bool(text)
+        try:
+            reason = response.candidates[0].finish_reason
+            if text and getattr(reason, "name", str(reason)) in ("MAX_TOKENS", "2"):
+                log.warning("Gemini answer was cut off at max_output_tokens=%s (purpose=%s, chars=%d)", max_tokens, purpose, len(text))
+                text = TruncatedText(text)
+        except Exception:
+            pass
         return text
     except Exception as exc:
         log.warning("Gemini call failed: %s", exc)

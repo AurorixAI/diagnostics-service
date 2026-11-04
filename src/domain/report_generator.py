@@ -1735,11 +1735,65 @@ def _narrative_source(skip_reason: Optional[str], ai_data: Optional[Dict[str, An
     return "ai_off" if skip_reason or not model_configured else "ai_failed"
 
 
-def _merge_plan_wording(steps: List[Dict[str, Any]], ai_plan: Any) -> List[Dict[str, Any]]:
-    """The steps of the plan with the model's wording where it gave one.
+_PERCENT_RE = re.compile(r"\d\s*%|процент", re.IGNORECASE)
+_X_OF_Y_RE = re.compile(r"\d+\s*(?:из|/)\s*\d+", re.IGNORECASE)
+_JOURNAL_REF_RE = re.compile(r"№\s*(\d+)")
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def _numbers_in(value: Any) -> set:
+    """Every number written anywhere in a JSON-like value (strings and ints), as digit strings with a dot decimal point."""
+    found: set = set()
+    for text in _all_strings(value):
+        found.update(n.replace(",", ".") for n in _NUMBER_RE.findall(text))
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, (int, float)):
+            found.add(str(item))
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return found
+
+
+def _ai_step_text_problem(step: Dict[str, Any], text: str, journal_nos: Iterable[int]) -> Optional[str]:
+    """Why the model's wording of a step may NOT be used (``None`` = it may).
+
+    The numbers of a step are facts of the attempt (the journal, the bank, the counts): a model must not add its own.  Not allowed in
+    the title / description: a percentage, an «N из M» (a criterion «3 из 4» is the methodologist's, not ours), a reference «№N» to a row that is
+    not a row of this skill, and any number that is not in the data of the step (basis, material, check, names).
+    """
+    if _PERCENT_RE.search(text):
+        return "percent"
+    if _X_OF_Y_RE.search(text):
+        return "N-of-M"
+    allowed_rows = {str(n) for n in journal_nos}
+    for ref in _JOURNAL_REF_RE.findall(text):
+        if ref not in allowed_rows:
+            return f"journal row №{ref} is not a row of this skill"
+    facts = _numbers_in([
+        step.get("skill_name_ru"), step.get("topic_name_ru"), step.get("errors_count"), step.get("evidence"),
+        step.get("material"), step.get("check"), sorted(allowed_rows),
+    ])
+    foreign = sorted({n.replace(",", ".") for n in _NUMBER_RE.findall(text)} - facts)
+    if foreign:
+        return f"numbers that are not in the data of the step: {foreign[:3]}"
+    return None
+
+
+def _merge_plan_wording(
+    steps: List[Dict[str, Any]], ai_plan: Any, journal_nos: Optional[Dict[str, List[int]]] = None,
+) -> List[Dict[str, Any]]:
+    """The steps of the plan with the model's wording where it gave one and where it may be used.
 
     The steps, their order and their four lines come from the data and are never replaced: of a model's item only the title and the
-    description are read, and only for a skill that is a step.  A step the model left out keeps its wording from the data.
+    description are read, and only for a skill that is a step.  A step the model left out, or whose wording breaks the rules of
+    ``_ai_step_text_problem``, keeps its wording from the data (no second paid call: the rest of the answer is used).  ``journal_nos``
+    = the journal rows of each skill (default: the rows quoted in the step).
     """
     by_skill: Dict[str, Dict[str, Any]] = {}
     if isinstance(ai_plan, list):
@@ -1754,7 +1808,14 @@ def _merge_plan_wording(steps: List[Dict[str, Any]], ai_plan: Any) -> List[Dict[
             title = str(item.get("action_title") or "").strip()
             description = _TIME_PHRASE_RE.sub("", str(item.get("full_description") or "").strip()).strip()
             if title and description:
-                step["action_title"], step["full_description"], step["source"] = title, description, "ai"
+                nos = (journal_nos or {}).get(step["skill_id"]) or [
+                    e.get("journal_no") for e in step.get("evidence") or [] if isinstance(e, dict) and e.get("journal_no") is not None
+                ]
+                problem = _ai_step_text_problem(step, f"{title}\n{description}", nos)
+                if problem:
+                    log.warning("Model wording of the step %s is not used (%s): the wording from the data stays", step["skill_id"], problem)
+                else:
+                    step["action_title"], step["full_description"], step["source"] = title, description, "ai"
         result.append(step)
     return result
 
@@ -1856,9 +1917,10 @@ def generate_and_save_report(
         error_patterns = _build_error_patterns(answers_orm, skill_map, previous_patterns)
         # Tasks taken out of the bank after the attempt (Д14): the journal row says so, the plan does not use it.  A state that could
         # not be read is not "withdrawn" - the report is marked degraded and built again later.
+        # ONE reader for every read of the bank of this report: a time budget, a stop after the first failure, no repeated identical reads.
         bank_failures: List[str] = []       # why the bank could not be read: "task_status" / "bank_tasks" (the report is degraded)
-        unread_skills: List[str] = []       # skills whose tasks could not be read
-        withdrawn, unreadable = rp.find_withdrawn_tasks(p["task_id"] for p in error_patterns)
+        bank = rp.BankReader()
+        withdrawn, unreadable = rp.find_withdrawn_tasks((p["task_id"] for p in error_patterns), bank)
         if unreadable:
             bank_failures.append("task_status")
         rp.number_journal(error_patterns, {str(a.id): a for a in answers_orm}, withdrawn, skill_map)
@@ -1954,7 +2016,7 @@ def generate_and_save_report(
         development_step = (
             rp.build_development_step(
                 achievements, answers_orm, skill_map,
-                attempt_task_ids=attempt_task_ids, failures=unread_skills,
+                attempt_task_ids=attempt_task_ids, reader=bank,
             )
             if error_free else None
         )
@@ -1985,10 +2047,10 @@ def generate_and_save_report(
         # known, before any prompt is built or any call is made (B-01, B-02).
         correction_steps = (
             [] if error_free else rp.build_correction_steps(
-                plan_candidates, attempt_task_ids=attempt_task_ids, names=skill_names, failures=unread_skills,
+                plan_candidates, attempt_task_ids=attempt_task_ids, names=skill_names, reader=bank,
             )
         )
-        if unread_skills:
+        if bank.failure and not bank_failures:
             bank_failures.append("bank_tasks")
         narrative_skip = _narrative_skip_reason(
             skip_narrative=skip_narrative,
@@ -2037,6 +2099,15 @@ def generate_and_save_report(
                 log.warning("Attempt %d: empty AI response", attempt)
                 continue
 
+            if getattr(raw, "truncated", False):
+                # Cut off at the ceiling: the same question gets the same cut-off answer.  Not repeated (no second paid call): the report keeps the
+                # wording from the data, ``narrative_source`` = ai_failed; the ceiling and the length are in the log for the one-off run.
+                log.warning(
+                    "Narrative for session %s was cut off at max_tokens=%s (%d characters received): not asked again, the wording from the data is used",
+                    session_id, NARRATIVE_MAX_TOKENS, len(raw),
+                )
+                break
+
             parsed = _extract_json(raw)
             if not parsed:
                 last_errors = ["Response is not valid JSON"]
@@ -2064,7 +2135,10 @@ def generate_and_save_report(
         if error_free:
             action_plan = [development_step] if development_step else []
         else:
-            action_plan = _merge_plan_wording(correction_steps, (ai_data or {}).get("action_plan"))
+            action_plan = _merge_plan_wording(
+                correction_steps, (ai_data or {}).get("action_plan"),
+                {c["skill_id"]: [r["journal_no"] for r in c["rows"]] for c in plan_candidates},
+            )
         recommended_start = _recommended_start(action_plan)
         checked_topics = rp.build_checked_topics(answers_orm, skill_map)
         more_difficulties = [] if error_free else rp.build_more_difficulties(all_candidates, action_plan)

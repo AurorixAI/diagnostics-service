@@ -48,6 +48,9 @@ class Bank:
         return self
 
     def is_active(self, task_id):
+        self.status_calls = getattr(self, "status_calls", 0) + 1
+        if getattr(self, "on_status", None):
+            self.on_status()
         if self.down_status:
             raise ConnectionError("bank is down")
         return task_id not in self.inactive
@@ -395,7 +398,7 @@ def test_only_the_withdrawn_row_of_a_skill_leaves_the_basis(gen, bank):
 
 
 def test_a_task_that_is_gone_from_the_bank_counts_as_withdrawn():
-    withdrawn, unread = rp.find_withdrawn_tasks(["a", "b", "a"], is_active=lambda t: t != "b")
+    withdrawn, unread = rp.find_withdrawn_tasks(["a", "b", "a"], rp.BankReader(is_active=lambda t: t != "b"))
     assert withdrawn == {"b"} and unread == []
 
 
@@ -416,7 +419,8 @@ def test_an_unreadable_bank_is_not_an_empty_bank_the_report_is_degraded_and_not_
     bank.down_status, bank.down_tasks = False, True
     report = gen(wrongs("G8_T1_K1", 1))
     assert report.report_json["report_meta"]["degraded"] == ["bank_tasks"] and report.report_schema_version == 0
-    assert report.report_json["action_plan"][0]["material"]["on_lesson"] is True
+    step = report.report_json["action_plan"][0]
+    assert step["evidence"] and step["material"] is None and step["check"] is None       # not "at the lesson": the bank was not read
 
 
 # ── Requirement 5: no «Анализ мышления» ─────────────────────────────────────────

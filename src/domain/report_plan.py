@@ -22,6 +22,7 @@ that the same data always gives the same plan.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .level_policy import is_correct
@@ -34,6 +35,12 @@ MATERIAL_MAX = 3            # bank tasks offered as material of one step
 TASK_WINDOW = 50            # active tasks of a skill read from the bank to choose from
 DEVELOPMENT_WINDOW = 200    # the development step wants the hardest tasks: the whole skill (the bank API allows 200)
 
+# All reads of the bank for ONE report together (the first read starts the clock).  Well below report_jobs.STALE_GENERATING_AFTER (10 min):
+# a hanging content-service must not keep a worker busy until another worker takes the job.  A read that is slow but answers is
+# allowed to finish; the NEXT read is refused once the budget is spent.
+BANK_BUDGET_S = 60.0
+
+NO_TOPIC = "Без темы"
 CHECK_STATEMENT = "Ученик решает без ошибки задание этого навыка из банка"
 ON_LESSON = "задание этого навыка на занятии"
 
@@ -82,26 +89,97 @@ def bank_unused_tasks(skill_id: str, exclude_ids: Sequence[str], *, hardest_firs
     return tasks
 
 
-def find_withdrawn_tasks(
-    task_ids: Iterable[str],
-    *,
-    is_active: Optional[Callable[[str], bool]] = None,
-) -> Tuple[Set[str], List[str]]:
+def _now() -> float:
+    return time.monotonic()
+
+
+class BankReader:
+    """The reads of the bank for one report: a time budget, a stop after the FIRST failure, a cache of identical reads.
+
+    After a transport failure (or a timeout, or the spent budget) NO other read is made: ``failure`` says why, every answer is ``None``
+    ("unknown"), and the caller marks the report degraded and builds no material / check - an unread bank is not an empty one.
+    ``is_active`` / ``unused`` replace the real reads in tests; by default the module functions are looked up at call time.
+    """
+
+    def __init__(
+        self,
+        *,
+        budget_s: float = BANK_BUDGET_S,
+        is_active: Optional[Callable[[str], bool]] = None,
+        unused: Optional[Callable[..., List[Dict[str, Any]]]] = None,
+    ) -> None:
+        self.budget_s = budget_s
+        self.failure: Optional[str] = None           # "unreachable" | "budget"
+        self.reads = 0                               # reads that reached the bank
+        self._is_active, self._unused = is_active, unused
+        self._started: Optional[float] = None
+        self._status: Dict[str, bool] = {}
+        self._tasks: Dict[Tuple[str, Tuple[str, ...], bool], List[Dict[str, Any]]] = {}
+
+    def _may_read(self) -> bool:
+        if self.failure:
+            return False
+        now = _now()
+        if self._started is None:
+            self._started = now
+        elif now - self._started >= self.budget_s:
+            self.failure = "budget"
+            log.warning("The bank budget of %.0f s for one report is spent after %d reads: no more reads", self.budget_s, self.reads)
+            return False
+        return True
+
+    def _fail(self, what: str, exc: Exception) -> None:
+        self.failure = "unreachable"
+        log.warning("Could not read %s in the bank: %s - no more reads for this report", what, exc)
+
+    def task_is_active(self, task_id: str) -> Optional[bool]:
+        """True / False (inactive or gone), ``None`` when it could not be read."""
+        if task_id in self._status:
+            return self._status[task_id]
+        if not self._may_read():
+            return None
+        self.reads += 1
+        try:
+            value = bool((self._is_active or bank_task_is_active)(task_id))
+        except Exception as exc:
+            self._fail(f"the state of task {task_id}", exc)
+            return None
+        self._status[task_id] = value
+        return value
+
+    def unused_tasks(self, skill_id: str, exclude_ids: Sequence[str], *, hardest_first: bool = False) -> Optional[List[Dict[str, Any]]]:
+        """Free tasks of the skill, ``None`` when they could not be read."""
+        key = (skill_id, tuple(sorted(exclude_ids)), hardest_first)
+        if key in self._tasks:
+            return self._tasks[key]
+        if not self._may_read():
+            return None
+        self.reads += 1
+        try:
+            tasks = (self._unused or bank_unused_tasks)(skill_id, list(exclude_ids), hardest_first=hardest_first)
+        except Exception as exc:
+            self._fail(f"the tasks of skill {skill_id}", exc)
+            return None
+        self._tasks[key] = tasks
+        return tasks
+
+
+def find_withdrawn_tasks(task_ids: Iterable[str], reader: Optional[BankReader] = None) -> Tuple[Set[str], List[str]]:
     """({tasks no longer active in the bank}, [tasks whose state could not be read]).
 
-    Unknown is not "withdrawn": a failure goes to the second list and the report is marked degraded by the caller.
+    Unknown is not "withdrawn": it goes to the second list and the report is marked degraded by the caller.  The reader stops after the first failure,
+    so the rest of the tasks are unread, not asked.
     """
-    check = is_active or bank_task_is_active
+    reader = reader or BankReader()
     withdrawn: Set[str] = set()
-    failed: List[str] = []
+    unread: List[str] = []
     for task_id in dict.fromkeys(t for t in task_ids if t):
-        try:
-            if not check(task_id):
-                withdrawn.add(task_id)
-        except Exception as exc:
-            log.warning("Could not read the state of task %s in the bank: %s", task_id, exc)
-            failed.append(task_id)
-    return withdrawn, failed
+        state = reader.task_is_active(task_id)
+        if state is None:
+            unread.append(task_id)
+        elif not state:
+            withdrawn.add(task_id)
+    return withdrawn, unread
 
 
 # ── The journal ───────────────────────────────────────────────────────────────
@@ -143,9 +221,8 @@ def build_checked_topics(answers: Sequence[Any], skill_map: Dict[str, Dict[str, 
     for answer in answers:
         if bool(getattr(answer, "is_deep_scan", False)):
             continue
-        topic_id = getattr(answer, "topic_id", None) or getattr(answer, "skill_id", None)
-        if not topic_id:
-            continue
+        # an answer without a topic still counts (one count with the header): it goes to the bucket "Без темы", never silently dropped
+        topic_id = getattr(answer, "topic_id", None) or getattr(answer, "skill_id", None) or ""
         if topic_id not in counts:
             order.append(topic_id)
             counts[topic_id] = [0, 0]
@@ -154,8 +231,8 @@ def build_checked_topics(answers: Sequence[Any], skill_map: Dict[str, Dict[str, 
             counts[topic_id][1] += 1
     return [
         {
-            "topic_id": topic_id,
-            "topic_name_ru": skill_map.get(topic_id, {}).get("name_ru") or topic_id,
+            "topic_id": topic_id or None,
+            "topic_name_ru": (skill_map.get(topic_id, {}).get("name_ru") or topic_id) if topic_id else NO_TOPIC,
             "checked": counts[topic_id][0],
             "errors": counts[topic_id][1],
         }
@@ -268,8 +345,11 @@ def _errors_word(count: int) -> str:
     return "неверных ответов"
 
 
-def deterministic_description(item: Dict[str, Any], names: Dict[str, str]) -> str:
-    """The wording of a correction step built from the facts of the skill: it differs from skill to skill."""
+def deterministic_description(item: Dict[str, Any], names: Dict[str, str], *, first: bool = False) -> str:
+    """The wording of a correction step built from the facts of the skill: it differs from skill to skill.
+
+    «с него следует начать» is said of the FIRST step only (it is where the plan starts); a prerequisite further down is just one.
+    """
     name = item["skill_name_ru"]
     rows = item["rows"]
     parts = [f"В диагностике по навыку «{name}» зафиксировано {item['errors']} {_errors_word(item['errors'])} (журнал: {_numbers_text(rows)})."]
@@ -282,7 +362,10 @@ def deterministic_description(item: Dict[str, Any], names: Dict[str, str]) -> st
     source = item.get("prerequisite_of")
     source_name = names.get(source or "", "")
     if kind == KIND_CONFIRMED_PREREQUISITE and source_name:
-        parts.append(f"Это подтверждённый пререквизит навыка «{source_name}», поэтому с него следует начать коррекцию.")
+        parts.append(
+            f"Это подтверждённый пререквизит навыка «{source_name}», поэтому с него следует начать коррекцию." if first
+            else f"Это подтверждённый пререквизит навыка «{source_name}»."
+        )
     elif kind == KIND_OBSERVED_PREREQUISITE and source_name:
         parts.append(f"Затруднение в этом навыке зафиксировано углублённой проверкой при разборе навыка «{source_name}».")
     parts.append(
@@ -331,24 +414,19 @@ def build_correction_steps(
     *,
     attempt_task_ids: Sequence[str],
     names: Dict[str, str],
-    failures: List[str],
-    fetch_tasks: Optional[Callable[..., List[Dict[str, Any]]]] = None,
+    reader: Optional[BankReader] = None,
 ) -> List[Dict[str, Any]]:
     """The first five candidates as steps with the four lines.  Deterministic: the same data gives the same steps.
 
-    ``failures`` collects the skills whose tasks could not be read: an unread bank is not an empty bank, the caller marks the
-    report degraded (it is retried) instead of printing "a task at the lesson".
+    When the bank could not be read (``reader.failure``: a transport failure, a timeout, the spent budget) the steps keep their basis but get
+    NO material and NO check (``None``): an unread bank is not an empty bank, "a task at the lesson" would be a false statement.  The caller marks
+    the report degraded (it is built again).
     """
-    fetch = fetch_tasks or bank_unused_tasks
+    reader = reader or BankReader()
     steps: List[Dict[str, Any]] = []
     for number, item in enumerate(candidates[:PLAN_STEPS_MAX], 1):
-        try:
-            free = fetch(item["skill_id"], list(attempt_task_ids))
-        except Exception as exc:
-            log.warning("Could not read tasks of skill %s from the bank: %s", item["skill_id"], exc)
-            failures.append(item["skill_id"])
-            free = []
-        material, check = pick_material_and_check(free)
+        free = reader.unused_tasks(item["skill_id"], list(attempt_task_ids))
+        material, check = pick_material_and_check(free or [])
         steps.append({
             "priority": number,
             "kind": "correction",
@@ -357,7 +435,7 @@ def build_correction_steps(
             "topic_id": item.get("topic_id"),
             "topic_name_ru": item.get("topic_name_ru"),
             "action_title": f"Отработать: {item['skill_name_ru']}",
-            "full_description": deterministic_description(item, names),
+            "full_description": deterministic_description(item, names, first=number == 1),
             "evidence_kind": item["evidence_kind"],
             "errors_count": item["errors"],
             "evidence": [_evidence_ref(r) for r in item["rows"][:EVIDENCE_MAX]],
@@ -365,6 +443,9 @@ def build_correction_steps(
             "check": check_block(check),
             "source": "deterministic_fallback",
         })
+    if reader.failure:
+        for step in steps:
+            step["material"], step["check"] = None, None
     return steps
 
 
@@ -398,8 +479,7 @@ def build_development_step(
     skill_map: Dict[str, Dict[str, str]],
     *,
     attempt_task_ids: Sequence[str],
-    failures: List[str],
-    fetch_tasks: Optional[Callable[..., List[Dict[str, Any]]]] = None,
+    reader: Optional[BankReader] = None,
 ) -> Optional[Dict[str, Any]]:
     """The next step of an attempt without errors; no deficit is implied.
 
@@ -410,7 +490,10 @@ def build_development_step(
     if not achievements:
         return None
     topic = min(achievements, key=lambda a: (a["correct_answers"], a["mastery_percent"], a["skill_id"]))
-    mine = [a for a in answers if getattr(a, "topic_id", None) == topic["skill_id"] and is_correct(getattr(a, "outcome", None))]
+    mine = [
+        a for a in answers
+        if getattr(a, "topic_id", None) == topic["skill_id"] and not getattr(a, "is_deep_scan", False) and is_correct(getattr(a, "outcome", None))
+    ]
     per_skill: Dict[str, List[Any]] = {}
     for a in mine:
         per_skill.setdefault(a.skill_id, []).append(a)
@@ -419,15 +502,10 @@ def build_development_step(
     skill_id = min(per_skill, key=lambda s: (len(per_skill[s]), s))
     name = skill_map.get(skill_id, {}).get("name_ru") or skill_id
     topic_name = topic["skill_name_ru"]
-    fetch = fetch_tasks or bank_unused_tasks
-    try:
-        free = fetch(skill_id, list(attempt_task_ids), hardest_first=True)
-    except Exception as exc:
-        log.warning("Could not read tasks of skill %s from the bank: %s", skill_id, exc)
-        failures.append(skill_id)
-        free = []
-    material, check = pick_material_and_check(free)
-    return {
+    reader = reader or BankReader()
+    free = reader.unused_tasks(skill_id, list(attempt_task_ids), hardest_first=True)
+    material, check = pick_material_and_check(free or [])
+    step = {
         "priority": 1,
         "kind": "development",
         "skill_id": skill_id,
@@ -456,3 +534,6 @@ def build_development_step(
         "check": check_block(check),
         "source": "deterministic_development",
     }
+    if reader.failure:
+        step["material"], step["check"] = None, None
+    return step

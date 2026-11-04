@@ -56,22 +56,47 @@ def old_report():
     }
 
 
-def test_the_metrics_see_a_schema_8_report_and_a_report_of_the_old_shape(gen, bank):
+def test_the_metrics_measure_schema_8_only_and_count_the_old_reports_apart(gen, bank):
     for skill in SKILLS:
         bank.add(skill, 6)
     new = gen(_errors_in_many_skills()).report_json
     got, categories = measure([new, old_report()])
-    assert got["отчётов"] == "2" and got["шагов"] == "7"
-    # the new report: 5 steps with all four lines; the old one: 2 steps with none
-    assert got["шагов_с_основанием"] == "5" and got["шагов_с_материалом"] == "5" and got["шагов_с_проверкой"] == "5"
-    assert got["разных_описаний"] == "6"                       # 5 own descriptions + the one template of the old report
-    assert got["отчётов_с_кластерами"] == "1"                  # only the old report has «Анализ мышления»
-    # 7 skills with errors in the new report (all named: 5 steps + more_difficulties), 4 in the old one (C and D are named nowhere)
-    assert got["навыков_с_ошибками"] == "11" and got["из_них_нигде_не_названо"] == "2"
-    assert got["карта_тем_есть"] == "1" and got["карта_сходится_с_шапкой"] == "1"
-    assert got["первый_шаг_равен_старту"] == "2"
+    # the slice: one report of schema 8; the old one (the "before" shape) is only counted, not measured
+    assert got["отчётов"] == "1" and got["отчётов_других_схем_ready_не_в_срезе"] == "1"
+    assert got["шагов"] == "5" and got["шагов_коррекции"] == "5"
+    assert got["шагов_с_основанием"] == "5" and got["шагов_коррекции_с_основанием_из_журнала_попытки"] == "5"
+    assert got["шагов_с_материалом_из_банка"] == "5" and got["шагов_материал_на_занятии"] == "0" and got["шагов_без_материала_банк_не_прочитан"] == "0"
+    assert got["шагов_с_проверкой_заданием_банка"] == "5" and got["шагов_проверка_на_занятии"] == "0"
+    assert got["разных_описаний"] == "5" and got["отчётов_с_кластерами"] == "0"
+    assert got["навыков_с_ошибками"] == "7" and got["из_них_нигде_не_названо"] == "0"      # 5 steps + 2 in "more difficulties"
+    assert got["карта_тем_есть"] == "1" and got["карта_сходится_с_шапкой"] == "1" and got["первый_шаг_равен_старту"] == "1"
     assert got["шагов_с_основанием_из_снятых"] == "0"
     assert "wrong=" in categories
+    # the old report alone: nothing is measured (it is outside the slice), exactly one report waits for the rebuild
+    only_old, _ = measure([old_report()])
+    assert only_old["отчётов"] == "0" and only_old["шагов"] == "0" and only_old["отчётов_других_схем_ready_не_в_срезе"] == "1"
+
+
+def test_material_is_counted_as_bank_tasks_and_as_at_the_lesson_apart(gen, bank):
+    bank.add("G8_T1_K1", 5)                      # the first skill has tasks, the second has none, the third was never read
+    report = gen(wrongs("G8_T1_K1", 2) + wrongs("G8_T2_K1", 1) + wrongs("G8_T3_K1", 1)).report_json
+    got = measure([report])[0]
+    assert (got["шагов_с_материалом_из_банка"], got["шагов_материал_на_занятии"]) == ("1", "2")
+    assert (got["шагов_с_проверкой_заданием_банка"], got["шагов_проверка_на_занятии"]) == ("1", "2")
+    unread = json.loads(json.dumps(report))
+    for step in unread["action_plan"]:
+        step["material"] = step["check"] = None
+    got = measure([unread])[0]
+    assert got["шагов_без_материала_банк_не_прочитан"] == "3" and got["шагов_с_материалом_из_банка"] == "0" and got["шагов_материал_на_занятии"] == "0"
+
+
+def test_the_basis_must_be_rows_of_this_attempts_journal(gen, bank):
+    report = gen(wrongs("G8_T1_K1", 2)).report_json
+    assert measure([report])[0]["шагов_коррекции_с_основанием_из_журнала_попытки"] == "1"
+    forged = json.loads(json.dumps(report))
+    forged["action_plan"][0]["evidence"][0]["answer_id"] = "not-in-this-journal"
+    got = measure([forged])[0]
+    assert got["шагов_коррекции"] == "1" and got["шагов_коррекции_с_основанием_из_журнала_попытки"] == "0"
 
 
 def test_a_step_that_rests_on_a_withdrawn_task_and_a_skill_named_nowhere_are_counted(gen, bank):
