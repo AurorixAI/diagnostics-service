@@ -317,3 +317,14 @@ def test_equal_difficulties_of_the_hardest_tasks_are_ordered_by_id(monkeypatch):
     fc.patch(monkeypatch)
     for _ in range(3):                                                      # the bank breaks ties at random: the result must not
         assert [t["task_id"] for t in REAL_UNUSED("S", [], hardest_first=True)] == ["S_t3", "S_t0", "S_t1", "S_t2"]
+
+
+def test_a_summary_may_quote_an_answer_of_the_student_that_is_in_the_journal(gen):
+    answers = [a("G8_T1_K1", 0, answer="17"), a("G8_T1_K1", 0, answer="17")]
+    base = gen(answers, narrative=None).report_json
+    ok = _valid_answer({"G8_T1_K1": "Навык 1.1"})
+    ok["overall"]["score_percent"], ok["overall"]["status"] = base["overall"]["score_percent"], base["overall"]["status"]
+    for text, used in (("Ученик дважды ответил 17.", True), ("Ученик дважды ответил 18.", False)):
+        ok["overall"]["student_summary"] = text
+        rj = gen(answers, narrative=json.dumps(ok, ensure_ascii=False)).report_json
+        assert (rj["overall"]["student_summary"] == text) is used
