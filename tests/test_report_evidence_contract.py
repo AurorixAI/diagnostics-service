@@ -119,10 +119,17 @@ def test_n03a_contract_no_reliability_equivalent_or_duration_in_the_report_contr
     assert report_generator.REPORT_SCHEMA_VERSION >= 5
     assert "estimated_hours" not in report_generator._AI_SCHEMA
     assert "confidence_of_diagnosis" not in report_generator._AI_SCHEMA
-    fallback = report_generator._build_fallback_action_plan([
-        {"skill_id": "G7_A", "skill_name_ru": "Навык A", "evidence": "confirmed_prerequisite"},
-        {"skill_id": "G7_B", "skill_name_ru": "Навык B", "evidence": "observed_error"},
-    ])
+    from src.domain import report_plan
+
+    fallback = report_plan.build_correction_steps(
+        [
+            {"skill_id": "G7_A", "skill_name_ru": "Навык A", "evidence_kind": "confirmed_prerequisite", "errors": 1,
+             "rows": [{"journal_no": 1, "student_answer": "3"}]},
+            {"skill_id": "G7_B", "skill_name_ru": "Навык B", "evidence_kind": "observed_error", "errors": 1,
+             "rows": [{"journal_no": 2, "student_answer": "4"}]},
+        ],
+        attempt_task_ids=[], names={}, failures=[],
+    )
     assert [step["priority"] for step in fallback] == [1, 2]
     assert all("estimated_hours" not in step for step in fallback)
     assert fallback[0]["skill_id"] == "G7_A"

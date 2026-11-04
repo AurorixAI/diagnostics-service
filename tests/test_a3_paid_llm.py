@@ -365,7 +365,7 @@ def test_retry_of_the_same_job_reuses_the_paid_answer(db, monkeypatch):
     set_env(monkeypatch)
     calls: list = []
     monkeypatch.setattr(rg, "call_gemini", valid_model_factory(calls))
-    real = rg._finalize_action_plan
+    real = rg._merge_plan_wording
     boom = {"left": 1}
 
     def flaky(*a, **k):
@@ -374,7 +374,7 @@ def test_retry_of_the_same_job_reuses_the_paid_answer(db, monkeypatch):
             raise RuntimeError("bug after the model call")
         return real(*a, **k)
 
-    monkeypatch.setattr(rg, "_finalize_action_plan", flaky)
+    monkeypatch.setattr(rg, "_merge_plan_wording", flaky)
     session = make_session(db)
     report_jobs.enqueue_report_generation(db, session.id)
 

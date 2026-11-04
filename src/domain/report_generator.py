@@ -33,6 +33,7 @@ from src.core.gemini_client import call_gemini, llm_configured, narrative_enable
 from src.models.diag_models import DiagReport
 from src.repositories.diag_repo import DiagReportRepository
 from src.repositories.knowledge_repo import KnowledgeRepository
+from . import report_plan as rp
 from .answer_value import display_student_answer, report_answer_key
 from .level_policy import (
     LEGACY_STATUS,
@@ -121,7 +122,13 @@ ERROR_PATTERNS_VERSION = 4
 # same rule.  Schema-5 reports built before this overstated the confirmation.
 # 7 (N03a): the shown student answer is the answer TEXT (historical rows stored a dict repr
 # ``{'text': …, 'is_correct': False}``); see ``answer_value.display_student_answer``.
-REPORT_SCHEMA_VERSION = 7
+# 8 (N03b-2): the content of the report is built from the attempt's own data.  A plan step has four lines - ``evidence`` (journal rows of
+# this attempt), the goal (the skill), ``material`` (up to 3 active bank tasks of the skill) and ``check`` (one more task of the skill the
+# student did not get, or "a task of this skill at the lesson") - and ``evidence_kind`` instead of the old ``evidence`` code; the plan is
+# ordered by the facts of the attempt (``report_plan``), the model only rewords ``action_title`` / ``full_description``.  New top-level
+# fields: ``checked_topics`` (per topic: checked / wrong, the rule of the header), ``more_difficulties`` (skills with errors outside the five
+# steps).  Journal rows carry ``journal_no`` / ``is_deep_scan`` / ``task_withdrawn``.  ``cognitive_error_types`` (R09) is gone.
+REPORT_SCHEMA_VERSION = 8
 
 
 def _distractor_value(distractor: Any) -> str:
@@ -415,6 +422,18 @@ def _extract_json(raw: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+# What the model may write.  A plan step is made of facts (``report_plan``); the model gets two prose fields of it and nothing else.
+# The caps are what keeps the answer inside ``NARRATIVE_MAX_TOKENS`` (see the test of the worst-case plan): an answer that is cut
+# off is not valid JSON, costs two paid calls and used to leave a report without its wording.
+AI_PLAN_ITEM_KEYS = frozenset({"priority", "skill_id", "skill_name_ru", "action_title", "full_description"})
+AI_TITLE_MAX = 120
+AI_DESCRIPTION_MAX = 700
+AI_SUMMARY_MAX = 1500
+# The ceiling of the answer in tokens.  The worst case the validator lets through is ~6.6k characters of Russian text; at the pessimistic
+# 1.5 characters per token that is ~4.4k tokens, plus the room a reasoning model may spend before the JSON.
+NARRATIVE_MAX_TOKENS = 6000
+
+
 def _validate_ai_output(
     data: Dict[str, Any],
     *,
@@ -436,6 +455,8 @@ def _validate_ai_output(
         errors.append("overall.score_percent does not match source answers")
     if not overall.get("student_summary"):
         errors.append("overall.student_summary is missing or empty")
+    elif len(str(overall.get("student_summary"))) > AI_SUMMARY_MAX:
+        errors.append(f"overall.student_summary is longer than {AI_SUMMARY_MAX} characters")
     plan = data.get("action_plan")
     if not isinstance(plan, list):
         errors.append("action_plan must be a list")
@@ -451,6 +472,16 @@ def _validate_ai_output(
                 errors.append("action_plan contains a non-object item")
                 continue
             skill_id = str(item.get("skill_id") or "")
+            foreign = sorted(set(item) - AI_PLAN_ITEM_KEYS)
+            if foreign:
+                errors.append(
+                    f"action_plan item may carry only {sorted(AI_PLAN_ITEM_KEYS)}; the basis, the material and the check are "
+                    f"added by the system, remove: {foreign}"
+                )
+            if len(str(item.get("action_title") or "")) > AI_TITLE_MAX:
+                errors.append(f"action_plan action_title is longer than {AI_TITLE_MAX} characters")
+            if len(str(item.get("full_description") or "")) > AI_DESCRIPTION_MAX:
+                errors.append(f"action_plan full_description is longer than {AI_DESCRIPTION_MAX} characters")
             if skill_id not in allowed_plan_skills:
                 errors.append(f"action_plan skill_id is not evidence-backed: {skill_id!r}")
             elif item.get("skill_name_ru") != allowed_plan_skills[skill_id]:
@@ -664,97 +695,6 @@ def _extract_grade_from_id(sid: Optional[str]) -> Optional[int]:
         except Exception:
             pass
     return None
-
-
-def _build_cognitive_error_types(error_patterns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Cluster student errors by cognitive failure mechanisms and distractor patterns.
-    """
-    clusters = {
-        "signs_and_powers": {
-            "category": "signs_and_powers",
-            "title": "Знаки, степени и свойства корней",
-            "description": "Ошибки при возведении отрицательных чисел в степени, путаница знака основания и свойств корней",
-            "keywords": ["степен", "корен", "знак", "отрицательн", "(-1)^2", "квадрат"],
-            "items": [],
-        },
-        "algebraic_transforms": {
-            "category": "algebraic_transforms",
-            "title": "Алгебраические преобразования и скобки",
-            "description": "Нарушение распределительного закона, пропуск множителей при раскрытии скобок и ошибки приведения подобных",
-            "keywords": ["скобок", "подобн", "раскрыт", "множител", "распределительн", "слагаем", "2(x+7)", "9y"],
-            "items": [],
-        },
-        "fractions_and_rationals": {
-            "category": "fractions_and_rationals",
-            "title": "Рациональные выражения и дроби",
-            "description": "Сложение дробей с разными знаменателями, сокращение слагаемых вместо множителей",
-            "keywords": ["дроб", "знаменател", "числител", "сокращен", "рациональн"],
-            "items": [],
-        },
-        "equations_and_logic": {
-            "category": "equations_and_logic",
-            "title": "Логика уравнений и неравенств",
-            "description": "Ошибки в переносе слагаемых, подстановке корней и анализе условий",
-            "keywords": ["уравнен", "неравенств", "корен", "подстановк", "интервал", "модул"],
-            "items": [],
-        },
-    }
-
-    uncategorized: List[Dict[str, Any]] = []
-
-    for ep in error_patterns:
-        expl = (ep.get("distractor_explanation") or "").lower()
-        name = (ep.get("skill_name_ru") or "").lower()
-        ans = (ep.get("student_answer") or "").lower()
-        text_corpus = f"{expl} {name} {ans}"
-
-        matched_key = None
-        for key, conf in clusters.items():
-            if any(kw in text_corpus for kw in conf["keywords"]):
-                matched_key = key
-                break
-
-        item_summary = {
-            "task_id": ep.get("task_id"),
-            "skill_id": ep.get("skill_id"),
-            "skill_name_ru": ep.get("skill_name_ru"),
-            "question_text": ep.get("question_text"),
-            "question_latex": ep.get("question_latex"),
-            "student_answer": ep.get("student_answer"),
-            "student_answer_latex": ep.get("student_answer_latex"),
-            "correct_answer": ep.get("correct_answer"),
-            "correct_answer_latex": ep.get("correct_answer_latex"),
-            "distractor_explanation": ep.get("distractor_explanation"),
-        }
-
-        if matched_key:
-            clusters[matched_key]["items"].append(item_summary)
-        else:
-            uncategorized.append(item_summary)
-
-    result = []
-    for key, conf in clusters.items():
-        if conf["items"]:
-            result.append({
-                "category": conf["category"],
-                "title": conf["title"],
-                "description": conf["description"],
-                "count": len(conf["items"]),
-                "examples": conf["items"][:3],
-            })
-
-    if uncategorized:
-        result.append({
-            "category": "other_errors",
-            "title": "Прочие предметные затруднения",
-            "description": "Ошибки в вычислениях и формулировках условий",
-            "count": len(uncategorized),
-            "examples": uncategorized[:3],
-        })
-
-    result.sort(key=lambda x: -x["count"])
-    return result
 
 
 def _ordered_answers(answers_orm: list) -> list:
@@ -1299,137 +1239,22 @@ def _build_skill_blocks(
     return strong, weak, critical
 
 
-def _build_plan_candidates(
-    chains: List[Dict[str, Any]],
-    critical_gaps: List[Dict[str, Any]],
-    weak_skills: List[Dict[str, Any]],
-    error_patterns: List[Dict[str, Any]],
-    *,
-    l2_of: Optional[Callable[[str], Optional[str]]] = None,
-) -> List[Dict[str, Any]]:
-    """Return up to five ordered, evidence-backed correction targets.
-
-    The model may improve pedagogical wording but cannot add its own topics.
-    This keeps the plan compact and anchored in either a confirmed prerequisite
-    or an observed error / measured weak skill.
-
-    Parent/child pairs are not duplicated: an L4 skill whose L2 topic is already
-    a candidate becomes a ``details`` entry of that topic; an L2 topic arriving
-    after one of its (more specific) L4 candidates is only noted on that item.
-    """
-    candidates: List[Dict[str, Any]] = []
-    by_id: Dict[str, Dict[str, Any]] = {}
-    parent_of: Dict[str, Optional[str]] = {}
-
-    def parent(sid: str) -> Optional[str]:
-        if sid not in parent_of:
-            parent_of[sid] = l2_of(sid) if l2_of else None
-        return parent_of[sid]
-
-    def add(skill_id: Any, name: Any, evidence: str, details: Optional[List[Dict[str, str]]] = None) -> None:
-        sid = str(skill_id or "").strip()
-        title = str(name or "").strip()
-        if not sid or not title or sid in by_id:
-            return
-        topic = parent(sid)
-        if topic and topic != sid and topic in by_id:
-            known = by_id[topic].setdefault("details", [])
-            if all(d.get("skill_id") != sid for d in known):
-                known.append({"skill_id": sid, "skill_name_ru": title})
-            return
-        if topic == sid:
-            child = next((c for c in candidates if parent(c["skill_id"]) == sid), None)
-            if child is not None:
-                child["parent_topic_id"] = sid
-                child["parent_topic_name_ru"] = title
-                return
-        if len(candidates) >= 5:
-            return
-        item: Dict[str, Any] = {"skill_id": sid, "skill_name_ru": title, "evidence": evidence}
-        if details:
-            item["details"] = [d for d in details if d.get("skill_id") != sid]
-        candidates.append(item)
-        by_id[sid] = item
-
-    for chain in chains:
-        add(
-            chain.get("root_gap_skill_id"), chain.get("root_gap_skill_name"),
-            "observed_prerequisite" if _is_inferred_chain(chain) else "confirmed_prerequisite",
-        )
-    for item in critical_gaps:
-        add(item.get("skill_id"), item.get("skill_name_ru"), "measured_critical_gap", item.get("detail_skills"))
-    for item in weak_skills:
-        add(item.get("skill_id"), item.get("skill_name_ru"), "measured_weak_skill", item.get("detail_skills"))
-    for item in error_patterns:
-        add(item.get("skill_id"), item.get("skill_name_ru"), "observed_error")
-    return candidates
-
-
-def _plan_item_from_candidate(priority: int, candidate: Dict[str, Any]) -> Dict[str, Any]:
-    """One evidence-backed plan step.  No duration: nothing in the data supports one."""
-    name = candidate["skill_name_ru"]
-    evidence = candidate["evidence"]
-    qualifier = (
-        "Это подтверждённый пререквизит, поэтому с него следует начать коррекцию."
-        if evidence == "confirmed_prerequisite"
-        else "Затруднение зафиксировано в диагностике и требует целевой отработки."
-    )
-    return {
-        "priority": priority,
-        "skill_id": candidate["skill_id"],
-        "skill_name_ru": name,
-        "action_title": f"Отработать: {name}",
-        "full_description": (
-            f"Сначала восстановить базовый алгоритм навыка «{name}» на коротких примерах. "
-            f"Затем проверить применение правила в задачах с новым контекстом. {qualifier}"
-        ),
-        "evidence": evidence,
-        "source": "deterministic_fallback",
-    }
-
-
-def _build_fallback_action_plan(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """A usable, evidence-backed plan when the narrative provider is unavailable."""
-    return [_plan_item_from_candidate(priority, c) for priority, c in enumerate(candidates, 1)]
-
-
-def _finalize_action_plan(
-    plan: List[Dict[str, Any]], candidates: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Make the plan consistent with the single recommended start (N03a, point 5).
-
-    * the first mandatory step is always ``candidates[0]`` - the target the plan
-      builder ranked first (confirmed prerequisite, then measured gaps, then
-      observed errors); a narrative that put it elsewhere or left it out is
-      corrected here instead of trusted;
-    * ``estimated_hours`` never survives: there is no basis for durations;
-    * priorities are renumbered 1..n.
-    """
-    items = [dict(item) for item in plan if isinstance(item, dict)]
-    for item in items:
-        item.pop("estimated_hours", None)
-    if candidates:
-        first = candidates[0]
-        index = next((i for i, item in enumerate(items) if item.get("skill_id") == first["skill_id"]), None)
-        if index is None:
-            items.insert(0, _plan_item_from_candidate(1, first))
-            del items[5:]
-        elif index:
-            items.insert(0, items.pop(index))
-    for number, item in enumerate(items, 1):
-        item["priority"] = number
-    return items
-
-
 def _build_achievements(
     topic_breakdown: Dict[str, Any],
     skill_map: Dict[str, Dict[str, str]],
     answers: List[Any],
 ) -> List[Dict[str, Any]]:
-    """L2 topics verified by the answer journal: >= 1 correct and no wrong attempt."""
+    """L2 topics verified by the answer journal: >= 1 correct and no wrong attempt.
+
+    Measured tasks only (N03b-2, Д15): the same rule as the map of checked topics and the header of the level - a Deep Scan probe
+    of an earlier topic does not make that topic a "verified" one.
+    """
     result: List[Dict[str, Any]] = []
     for topic_id, info in topic_breakdown.items():
-        mine = [a for a in answers if getattr(a, "topic_id", None) == topic_id]
+        mine = [
+            a for a in answers
+            if getattr(a, "topic_id", None) == topic_id and not getattr(a, "is_deep_scan", False)
+        ]
         correct = sum(1 for a in mine if is_correct(getattr(a, "outcome", None)))
         if correct < 1 or correct != len(mine):
             continue
@@ -1443,47 +1268,15 @@ def _build_achievements(
     return result
 
 
-def _build_development_step(achievements: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Next development step of an error-free student: no deficit is implied.
-
-    The focus is the verified topic with the lowest mastery estimate - the one
-    that has the most room to grow - which is a plain fact of the data.
-    """
-    if not achievements:
-        return None
-    focus = min(achievements, key=lambda a: (a["mastery_percent"], a["correct_answers"], a["skill_id"]))
-    name = focus["skill_name_ru"]
-    return {
-        "priority": 1,
-        "skill_id": focus["skill_id"],
-        "skill_name_ru": name,
-        "action_title": f"Развитие: {name}",
-        "full_description": (
-            "Все выполненные задания решены верно, дефицит не выявлен. Следующий шаг — развитие: "
-            f"предложить задачи повышенной сложности и в новом контексте по теме «{name}», "
-            "затем сравнить способы решения и обосновать выбор метода. "
-            "Тема выбрана потому, что среди решённых без ошибок тем у неё наименьшая оценка освоения."
-        ),
-        "kind": "development",
-        "evidence": "error_free_development",
-        "source": "deterministic_development",
-    }
-
-
-def _recommended_start(
-    plan: List[Dict[str, Any]], candidates: List[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
+def _recommended_start(plan: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The one recommended start: by construction the first plan step."""
     if not plan:
         return None
     first = plan[0]
-    evidence = first.get("evidence") or next(
-        (c["evidence"] for c in candidates if c["skill_id"] == first.get("skill_id")), None,
-    )
     return {
         "skill_id": first.get("skill_id"),
         "skill_name_ru": first.get("skill_name_ru"),
-        "evidence": evidence,
+        "evidence_kind": first.get("evidence_kind"),
     }
 
 
@@ -1553,7 +1346,7 @@ _AI_SCHEMA = """{
     "score_percent": <int скопируй из данных>,
     "status": "<above_level|on_level|partial_gap|below_level|critical>",
     "status_label_ru": "<строка — название уровня>",
-    "student_summary": "<АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 связных предложений для администратора учебного центра и преподавателя), безличным стилем, не от имени педагога. ТРЕБОВАНИЯ: (1) Назови уровень по его формулировке из данных, без «начала/середины/конца» какого-либо класса. (2) Объясни причину сбоя ТОЛЬКО если она подтверждена цепочкой с пометкой «подтверждённая связь»; иначе опиши наблюдаемые затруднения без причин и без утверждений о том, подтверждена или не подтверждена единая первопричина. (3) Опиши тип ошибок по зафиксированным дистракторам, не приписывая ученику психологических причин. (4) Укажи ТОЧКИ ОПОРЫ (что ученик решает стабильно). (5) Назови стартовую тему плана — первую цель списка ДОПУСТИМЫХ ЦЕЛЕЙ. Не указывай сроки, часы и проценты надёжности диагноза. СТИЛЬ: профессиональный, фактологический, без общих фраз.>"
+    "student_summary": "<АВТОМАТИЧЕСКОЕ РЕЗЮМЕ по данным диагностики (4-6 связных предложений для администратора учебного центра и преподавателя), безличным стилем, не от имени педагога. ТРЕБОВАНИЯ: (1) Назови уровень по его формулировке из данных, без «начала/середины/конца» какого-либо класса. (2) Объясни причину сбоя ТОЛЬКО если она подтверждена цепочкой с пометкой «подтверждённая связь»; иначе опиши наблюдаемые затруднения без причин и без утверждений о том, подтверждена или не подтверждена единая первопричина. (3) Опиши тип ошибок ТОЛЬКО по объяснениям выбранных ответов из блока «ДЕТАЛИЗАЦИЯ НЕВЕРНЫХ ОТВЕТОВ», не приписывая ученику психологических причин и не группируя ошибки по своим «паттернам». (4) Укажи ТОЧКИ ОПОРЫ (что ученик решает стабильно). (5) Назови стартовую тему плана — первую цель списка ДОПУСТИМЫХ ЦЕЛЕЙ. Не указывай сроки, часы и проценты надёжности диагноза. СТИЛЬ: профессиональный, фактологический, без общих фраз.>"
   },
   "action_plan": [
     {
@@ -1561,7 +1354,7 @@ _AI_SCHEMA = """{
       "skill_id": "<ТОЛЬКО идентификатор из списка ДОПУСТИМЫХ ЦЕЛЕЙ>",
       "skill_name_ru": "<ТОЧНОЕ название из списка ДОПУСТИМЫХ ЦЕЛЕЙ>",
       "action_title": "<заголовок MAX 8 слов>",
-      "full_description": "<3-5 предложений: что именно отрабатывать, какие типы задач, на какие правила обратить внимание, как проверить усвоение. НЕ указывай сроки, количество часов и обещания «полной готовности»>"
+      "full_description": "<3-5 предложений (до 600 знаков): что именно отрабатывать, какие типы задач, на какие правила обратить внимание. НЕ указывай сроки, количество часов, проценты и обещания «полной готовности»; номера заданий, ссылки на задания банка и критерий проверки НЕ пиши — они выводятся отдельно>"
     }
   ]
 }"""
@@ -1578,7 +1371,6 @@ def _build_prompt(
     wrong_block: str,
     chains_block: str,
     boundary_block: str,
-    cognitive_block: str,
     anchor_block: str,
     plan_candidates_block: str,
     plan_min_items: int,
@@ -1600,10 +1392,10 @@ def _build_prompt(
    • Назови уровень его формулировкой «{status_label}». НЕ называй «начало/середину/конец» какого-либо класса и не указывай проценты «надёжности диагноза».
    • {'Первопричину, подтверждённую углублённой проверкой (цепочка с пометкой «подтверждённая связь» в блоке ниже), можно назвать первопричиной; объясни только её. Цепочки с пометкой «связь выведена по порядку ответов (не подтверждена)» опиши лишь как наблюдаемые затруднения в более ранних темах: не называй их первопричиной и не пиши, что они подтверждены.' if root_cause_confirmed else 'Не называй наблюдаемый дефицит «первопричиной»: опиши его как ключевое зафиксированное затруднение. Цепочки с пометкой «связь выведена по порядку ответов (не подтверждена)» опиши лишь как наблюдаемые затруднения в более ранних темах; слова «первопричина» и «подтверждена» не используй.'}
    • НИКОГДА не пиши, что первопричина не подтверждена, не установлена, не найдена или отсутствует (в любых формулировках), и не указывай процент или оценку надёжности/достоверности диагноза: передавай только зафиксированные факты.
-   • Разбери когнитивные паттерны мышления ученика по дистракторам.
+   • Причину ошибок бери ТОЛЬКО из объяснений выбранных ответов (блок «ДЕТАЛИЗАЦИЯ НЕВЕРНЫХ ОТВЕТОВ»); если объяснения нет — не придумывай причину.
    • Опиши опорные навыки (базовые темы, решенные верно).
    • Дай четкую рекомендацию: с какой конкретной темы начать коррекцию — это ПЕРВАЯ цель списка ниже.
-4. action_plan — от {plan_min_items} до {plan_max_items} приоритетных шагов. Используй ТОЛЬКО цели из списка ниже, не добавляй темы от себя. Первым шагом (priority 1) ОБЯЗАТЕЛЬНО поставь первую цель списка. Не указывай сроки и часы.
+4. action_plan — от {plan_min_items} до {plan_max_items} приоритетных шагов. Используй ТОЛЬКО цели из списка ниже, не добавляй темы от себя. Порядок целей в списке уже определён по фактам диагностики — сохрани его; первым шагом (priority 1) ОБЯЗАТЕЛЬНО поставь первую цель списка. Ты формулируешь только action_title и full_description: основание шага (ответы ученика), материал и проверку система добавляет сама — не меняй и не пересказывай их. Не указывай сроки и часы.
 
 ДАННЫЕ АДАПТИВНОЙ ДИАГНОСТИКИ:
 Заявленный класс: {grade_level}
@@ -1618,9 +1410,6 @@ def _build_prompt(
 
 ЦЕПОЧКИ ДИАГНОСТИЧЕСКОГО СПУСКА (углублённая проверка):
 {chains_block}
-
-КОГНИТИВНЫЕ ПАТТЕРНЫ ОШИБОК (По дистракторам):
-{cognitive_block}
 
 ДЕТАЛИЗАЦИЯ НЕВЕРНЫХ ОТВЕТОВ:
 {wrong_block}
@@ -1830,7 +1619,20 @@ def drop_preliminary_sentences(text: Any) -> Any:
     return "".join(sentence + gap for sentence, gap in kept[:-1]) + kept[-1][0]
 
 
-_PLAN_IDENTIFIER_KEYS = frozenset({"skill_id", "skill_name_ru", "evidence", "priority"})
+# Keys of a plan step (and of the new top-level lists) that hold FACTS, not prose, and are therefore kept as they are: identifiers, counts,
+# the four lines of a step.  ``evidence`` is the list of journal rows of the attempt (a student's own answers, an explanation of the bank) -
+# a reference to data, never wording that a model writes, so it is NOT swept; any other key (``action_title``, ``full_description`` and every
+# key that is added later without being listed here) is prose and is swept.  A test pins both sides of this rule.
+_PLAN_IDENTIFIER_KEYS = frozenset({
+    "skill_id", "skill_name_ru", "priority", "kind", "source", "topic_id", "topic_name_ru",
+    "evidence", "evidence_kind", "errors_count", "material", "check",
+    "checked", "errors", "skills", "journal_nos",
+})
+# Top-level fields that hold plan prose or the facts around the plan: every one goes through the sweep (schema 8: ``checked_topics``,
+# ``more_difficulties``).
+_SWEPT_TOP_LEVEL_KEYS = ("action_plan", "checked_topics", "more_difficulties")
+# Top-level fields that were retired and must not be served from an older stored report (R09: «Анализ мышления»).
+_RETIRED_TOP_LEVEL_KEYS = ("cognitive_error_types",)
 
 
 def _sweep_plan_prose(value: Any) -> Any:
@@ -1876,9 +1678,13 @@ def strip_retired_report_fields(report_json: Any) -> Any:
         without = drop_preliminary_sentences(summary)
         if without != summary:
             overall["student_summary"] = without or None
-    plan = cleaned.get("action_plan")
-    if isinstance(plan, list):
-        for item in plan:
+    for key in _RETIRED_TOP_LEVEL_KEYS:
+        cleaned.pop(key, None)
+    for field in _SWEPT_TOP_LEVEL_KEYS:
+        items = cleaned.get(field)
+        if not isinstance(items, list):
+            continue
+        for item in items:
             if isinstance(item, dict):
                 item.pop("estimated_hours", None)
                 # plan prose: only the offending sentence goes, the rest of the step stays
@@ -1890,7 +1696,7 @@ def strip_retired_report_fields(report_json: Any) -> Any:
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def _narrative_skip_reason(
-    *, skip_narrative: bool, error_free: bool, has_answers: bool, degraded: bool,
+    *, skip_narrative: bool, error_free: bool, has_answers: bool, degraded: bool, has_targets: bool = True,
 ) -> Optional[str]:
     """Why the paid narrative must NOT be requested for this report (``None`` = it may be).
 
@@ -1905,6 +1711,8 @@ def _narrative_skip_reason(
         return "error_free"
     if not has_answers:
         return "no_answers"
+    if not has_targets:
+        return "no_plan_targets"        # every wrong answer belongs to a task that was taken out of the bank: nothing to word
     if not narrative_enabled():
         return "disabled_by_REPORT_NARRATIVE_ENABLED"
     if degraded:
@@ -1925,6 +1733,36 @@ def _narrative_source(skip_reason: Optional[str], ai_data: Optional[Dict[str, An
     if skip_reason == "deterministic_job":
         return "rebuild"
     return "ai_off" if skip_reason or not model_configured else "ai_failed"
+
+
+def _merge_plan_wording(steps: List[Dict[str, Any]], ai_plan: Any) -> List[Dict[str, Any]]:
+    """The steps of the plan with the model's wording where it gave one.
+
+    The steps, their order and their four lines come from the data and are never replaced: of a model's item only the title and the
+    description are read, and only for a skill that is a step.  A step the model left out keeps its wording from the data.
+    """
+    by_skill: Dict[str, Dict[str, Any]] = {}
+    if isinstance(ai_plan, list):
+        for item in ai_plan:
+            if isinstance(item, dict):
+                by_skill.setdefault(str(item.get("skill_id") or ""), item)
+    result: List[Dict[str, Any]] = []
+    for step in steps:
+        step = dict(step)
+        item = by_skill.get(step["skill_id"])
+        if item is not None:
+            title = str(item.get("action_title") or "").strip()
+            description = _TIME_PHRASE_RE.sub("", str(item.get("full_description") or "").strip()).strip()
+            if title and description:
+                step["action_title"], step["full_description"], step["source"] = title, description, "ai"
+        result.append(step)
+    return result
+
+
+_TIME_PHRASE_RE = re.compile(
+    r"(?:[\.\s,;–—-]*)?(?:Рекомендуем(?:ое|ый)?\s+(?:количество\s+часов|время|объем)|Время\s+на\s+отработку|Примерное\s+время)\s*:\s*\d+\s*(?:часов|часа|час|ч)?\.?$",
+    flags=re.IGNORECASE,
+)
 
 
 def _read_narrative_cache(existing: Any, key: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -2005,6 +1843,7 @@ def generate_and_save_report(
         all_ids = list(dict.fromkeys(
             list(topic_breakdown.keys())
             + [a.skill_id for a in answers_orm if a.skill_id]
+            + [a.topic_id for a in answers_orm if getattr(a, "topic_id", None)]
             + list(weak_skills or [])
         ))
         name_failures: List[str] = []
@@ -2015,6 +1854,14 @@ def generate_and_save_report(
         # ── Deterministic blocks (no AI) ──────────────────────────────────────
         previous_patterns = (existing.report_json or {}).get('error_patterns', []) if existing else []
         error_patterns = _build_error_patterns(answers_orm, skill_map, previous_patterns)
+        # Tasks taken out of the bank after the attempt (Д14): the journal row says so, the plan does not use it.  A state that could
+        # not be read is not "withdrawn" - the report is marked degraded and built again later.
+        bank_failures: List[str] = []       # why the bank could not be read: "task_status" / "bank_tasks" (the report is degraded)
+        unread_skills: List[str] = []       # skills whose tasks could not be read
+        withdrawn, unreadable = rp.find_withdrawn_tasks(p["task_id"] for p in error_patterns)
+        if unreadable:
+            bank_failures.append("task_status")
+        rp.number_journal(error_patterns, {str(a.id): a for a in answers_orm}, withdrawn, skill_map)
         l2_of = _make_l2_resolver(repo, topic_breakdown.keys())
         strong_skills, weak_skills_block, critical_gaps = _build_skill_blocks(
             topic_breakdown, weak_skills, skill_map, answers_orm, l2_of=l2_of,
@@ -2043,15 +1890,17 @@ def generate_and_save_report(
             confirm_probes=(deep_scan_params or {}).get("confirm_probes"),
         )
         diagnostic_boundary = _build_diagnostic_boundary(answers_orm, skill_map, grade_level, root_cause_chains)
-        cognitive_error_types = _build_cognitive_error_types(error_patterns)
-        plan_candidates = _build_plan_candidates(
-            root_cause_chains, critical_gaps, weak_skills_block, error_patterns, l2_of=l2_of,
-        )
+        # The plan is made of the facts of this attempt (``report_plan``): every skill with a live wrong answer is a candidate,
+        # the first five are the steps, the rest is "more difficulties".
+        all_candidates = rp.build_plan_candidates(error_patterns, root_cause_chains, topic_breakdown)
+        plan_candidates = all_candidates[:rp.PLAN_STEPS_MAX]
+        skill_names = {sid: info.get("name_ru") or sid for sid, info in skill_map.items()}
         allowed_plan_skills = {
             item["skill_id"]: item["skill_name_ru"] for item in plan_candidates
         }
         plan_candidates_block = "\n".join(
-            f"  {index}. {item['skill_id']} — {item['skill_name_ru']} ({item['evidence']})"
+            f"  {index}. {item['skill_id']} — {item['skill_name_ru']} "
+            f"(неверных ответов: {item['errors']}; журнал: {rp._numbers_text(item['rows'])})"
             for index, item in enumerate(plan_candidates, 1)
         ) or "  (коррекционный план не требуется: нет зафиксированных ошибок)"
 
@@ -2093,17 +1942,6 @@ def generate_and_save_report(
         # A root cause is "confirmed" only by a chain with the stored deep-scan link (O4)
         root_cause_confirmed = bool(_confirmed_chains(root_cause_chains))
 
-        # ── Cognitive error patterns for prompt ───────────────────────────────
-        cog_lines = []
-        for cg in cognitive_error_types:
-            ex_strs = []
-            for ex in cg.get("examples", [])[:2]:
-                ans_str = _prompt_answer(ex.get("student_answer") or "—")
-                d_exp = ex.get("distractor_explanation")
-                ex_strs.append(f"{ex['skill_name_ru']} (ответ: {repr(ans_str)}{f' — {d_exp}' if d_exp else ''})")
-            cog_lines.append(f"  • {cg['title']} ({cg['count']} ошибок): {'; '.join(ex_strs)}")
-        cognitive_block = "\n".join(cog_lines) or "  (нет выраженных когнитивных паттернов)"
-
         # ── Wrong answers block for prompt (max 8, unique skills) ────────────
         wrong_answers = [a for a in answers_orm if not is_correct(a.outcome)]
         # Error-free attempt: every journal answer is correct and nothing in the
@@ -2111,21 +1949,30 @@ def generate_and_save_report(
         # development step, never a deficit, and does not need the narrative model
         # (its prompt is a correction prompt).
         achievements = _build_achievements(topic_breakdown, skill_map, answers_orm)
-        error_free = bool(answers_orm) and not wrong_answers and not plan_candidates
-        development_step = _build_development_step(achievements) if error_free else None
+        error_free = bool(answers_orm) and not wrong_answers
+        attempt_task_ids = [a.task_id for a in answers_orm]
+        development_step = (
+            rp.build_development_step(
+                achievements, answers_orm, skill_map,
+                attempt_task_ids=attempt_task_ids, failures=unread_skills,
+            )
+            if error_free else None
+        )
+        # Wrong answers for the prompt: one live row per skill (max 8), with the explanation of the chosen option from the bank -
+        # the only cause of an error the report may name.
         seen: set = set()
-        selected_wrong = []
-        for a in wrong_answers:
-            if a.skill_id not in seen and len(selected_wrong) < 8:
-                seen.add(a.skill_id)
-                selected_wrong.append(a)
-
         wrong_lines = []
-        for i, a in enumerate(selected_wrong, 1):
-            name = skill_map.get(a.skill_id, {}).get("name_ru", a.skill_id)
-            ans = (a.student_answer or "").strip()
-            ans = "—" if ans in ("x_wrong_x", "wrong", "") else _prompt_answer(display_student_answer(ans))
-            wrong_lines.append(f"  [{i}] {name}: ответ={repr(ans)}, категория={a.eval_category}")
+        for row in error_patterns:
+            if row.get("task_withdrawn") or row.get("skill_id") in seen or len(seen) >= 8:
+                continue
+            seen.add(row.get("skill_id"))
+            answer_text = _prompt_answer(row.get("student_answer") or "—")
+            explanation = row.get("distractor_explanation")
+            wrong_lines.append(
+                f"  [{row['journal_no']}] {row.get('skill_name_ru') or row.get('skill_id')}: ответ={repr(answer_text)}, "
+                f"категория={row.get('eval_category')}"
+                + (f", объяснение выбранного ответа: {_prompt_answer(explanation)}" if explanation else "")
+            )
         wrong_block = "\n".join(wrong_lines) or "  (нет неверных ответов)"
 
         # ── AI generation (retry x2) ──────────────────────────────────────────
@@ -2136,11 +1983,19 @@ def generate_and_save_report(
 
         # Whether the paid model is used at all is decided HERE, from data that is already
         # known, before any prompt is built or any call is made (B-01, B-02).
+        correction_steps = (
+            [] if error_free else rp.build_correction_steps(
+                plan_candidates, attempt_task_ids=attempt_task_ids, names=skill_names, failures=unread_skills,
+            )
+        )
+        if unread_skills:
+            bank_failures.append("bank_tasks")
         narrative_skip = _narrative_skip_reason(
             skip_narrative=skip_narrative,
             error_free=error_free,
             has_answers=bool(answers_orm),
-            degraded=bool(l2_of.degraded or name_failures),
+            degraded=bool(l2_of.degraded or name_failures or bank_failures),
+            has_targets=bool(plan_candidates),
         )
         prompt_args = dict(
             grade_level=grade_level,
@@ -2152,7 +2007,6 @@ def generate_and_save_report(
             wrong_block=wrong_block,
             chains_block=chains_block,
             boundary_block=boundary_block,
-            cognitive_block=cognitive_block,
             anchor_block=anchor_block,
             plan_candidates_block=plan_candidates_block,
             plan_min_items=min(3, len(plan_candidates)),
@@ -2178,7 +2032,7 @@ def generate_and_save_report(
 
         for attempt in range(1, 1 if (narrative_skip or ai_data) else 3):
             prompt = _build_prompt(**prompt_args, validation_errors=last_errors if attempt > 1 else None)
-            raw = call_gemini(prompt, temperature=0.3, max_tokens=2500, purpose="report_narrative")
+            raw = call_gemini(prompt, temperature=0.3, max_tokens=NARRATIVE_MAX_TOKENS, purpose="report_narrative")
             if not raw:
                 log.warning("Attempt %d: empty AI response", attempt)
                 continue
@@ -2206,27 +2060,14 @@ def generate_and_save_report(
         if not ai_data and not narrative_skip:
             log.warning("AI generation unavailable for session %s; using deterministic report wording.", session_id)
 
-        # ── Clean action plan descriptions ──────────────────────────────────
-        action_plan_cleaned = []
+        # ── The plan: the steps are made of the data, the model only words two fields of each ─────────────────
         if error_free:
-            plan_source: List[Any] = [development_step] if development_step else []
+            action_plan = [development_step] if development_step else []
         else:
-            plan_source = (ai_data or {}).get("action_plan", _build_fallback_action_plan(plan_candidates))
-        for item in plan_source:
-            if isinstance(item, dict):
-                raw_desc = str(item.get("full_description") or "").strip()
-                cleaned_desc = re.sub(
-                    r"(?:[\.\s,;–—-]*)?(?:Рекомендуем(?:ое|ый)?\s+(?:количество\s+часов|время|объем)|Время\s+на\s+отработку|Примерное\s+время)\s*:\s*\d+\s*(?:часов|часа|час|ч)?\.?$",
-                    "",
-                    raw_desc,
-                    flags=re.IGNORECASE,
-                ).strip()
-                item_copy = dict(item)
-                item_copy["full_description"] = cleaned_desc
-                action_plan_cleaned.append(item_copy)
-        # One recommended start: the first mandatory step is plan_candidates[0].
-        action_plan = _finalize_action_plan(action_plan_cleaned, plan_candidates)
-        recommended_start = _recommended_start(action_plan, plan_candidates)
+            action_plan = _merge_plan_wording(correction_steps, (ai_data or {}).get("action_plan"))
+        recommended_start = _recommended_start(action_plan)
+        checked_topics = rp.build_checked_topics(answers_orm, skill_map)
+        more_difficulties = [] if error_free else rp.build_more_difficulties(all_candidates, action_plan)
 
         # ── Merge AI + computed data ──────────────────────────────────────────
         overall_block = (ai_data or {}).get("overall", {})
@@ -2250,6 +2091,7 @@ def generate_and_save_report(
             degraded_reasons.append("knowledge_hierarchy")
         if name_failures:
             degraded_reasons.append("skill_names")
+        degraded_reasons.extend(bank_failures)
         report_json: Dict[str, Any] = {
             "report_meta": {
                 "degraded": degraded_reasons,
@@ -2271,8 +2113,10 @@ def generate_and_save_report(
                 "level_classification_reached": stop_reason == "classification_confident",
                 "classification_confidence": classification_confidence,
                 "measurement_questions": total,
+                "measured_errors": total - correct,
                 "prerequisite_questions": len(prerequisite_answers),
                 "prerequisite_correct": sum(is_correct(a.outcome) for a in prerequisite_answers),
+                "prerequisite_errors": sum(not is_correct(a.outcome) for a in prerequisite_answers),
                 "items_max": items_max,
                 "covered_section_ids": covered_section_ids or [],
                 "deep_scan_incomplete": deep_scan_incomplete,
@@ -2293,7 +2137,6 @@ def generate_and_save_report(
             # ── Diagnostic Anatomy & Root Cause (New) ──
             "diagnostic_boundary":   diagnostic_boundary,
             "root_cause_chains":     root_cause_chains,
-            "cognitive_error_types": cognitive_error_types,
             # ── Computed from data (no AI) ──
             "strong_skills":   strong_skills,
             "weak_skills":     weak_skills_block,
@@ -2301,6 +2144,10 @@ def generate_and_save_report(
             "error_patterns":  error_patterns,
             # Topics solved without a single wrong attempt (journal-verified).
             "achievements":    achievements,
+            # N03b-2: the map of checked topics (measured tasks, the rule of the header) and the skills with errors that are not
+            # a step of the plan.
+            "checked_topics":  checked_topics,
+            "more_difficulties": more_difficulties,
             # ── Plan: narrative wording over deterministic targets ──
             # ``recommended_start`` is the first step of ``action_plan`` (or None).
             "recommended_start": recommended_start,

@@ -1,11 +1,12 @@
 from types import SimpleNamespace as NS
-from src.domain.report_generator import _build_skill_blocks, _build_deterministic_summary, _build_plan_candidates
+from src.domain import report_plan
+from src.domain.report_generator import _build_skill_blocks, _build_deterministic_summary
 
 def test_low_alpha_without_wrong_answers_never_creates_a_correction_plan():
     strong, weak, critical = _build_skill_blocks({'G10_T05': {'alpha': .4}}, [],
         {'G10_T05': {'name_ru': 'Показательные функции'}}, [NS(outcome=1), NS(outcome=1)])
     assert weak == critical == []
-    assert _build_plan_candidates([], critical, weak, []) == []
+    assert report_plan.build_plan_candidates([], [], {'G10_T05': {'alpha': .4}}) == []   # the plan is made of wrong answers only
 
 def test_an_observed_wrong_answer_preserves_the_gap_block():
     _, weak, _ = _build_skill_blocks({'G10_T05': {'alpha': .4}}, [],

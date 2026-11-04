@@ -105,6 +105,9 @@ def call_gemini(
             if resp.status_code == 200:
                 data = resp.json()
                 text = data["choices"][0]["message"]["content"].strip()
+                if data["choices"][0].get("finish_reason") == "length":
+                    # the answer was cut off at max_tokens: it is not valid JSON, the caller will ask again (and pay again)
+                    log.warning("Azure OpenAI answer was cut off at max_tokens=%s (purpose=%s)", max_tokens, purpose)
                 if text:
                     ok = True
                     log.info("Successfully generated report narrative via Azure OpenAI/DeepSeek (%d chars)", len(text))

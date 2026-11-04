@@ -1,7 +1,7 @@
 """N02: a topic is weak only with evidence; L2/L4 are not duplicated."""
 from types import SimpleNamespace as NS
 
-from src.domain.report_generator import _build_plan_candidates, _build_skill_blocks, _make_l2_resolver
+from src.domain.report_generator import _build_skill_blocks, _make_l2_resolver
 
 NAMES = {
     "G9_T1": {"name_ru": "Дроби"}, "G9_T2": {"name_ru": "Степени"},
@@ -97,26 +97,6 @@ def test_observation_count_falls_back_to_the_answer_journal_for_old_sessions():
     assert ids(weak) == ["G9_T1"]
     _, weak, _ = blocks({"G9_T1": {"alpha": -0.2}}, [ans("G9_T1", 0)])
     assert weak == []
-
-
-def test_plan_does_not_duplicate_parent_and_child():
-    weak = [{"skill_id": "G9_T1", "skill_name_ru": "Дроби", "detail_skills": [
-        {"skill_id": "G9_T1_S1_K1", "skill_name_ru": "Сложение дробей"}]}]
-    errors = [{"skill_id": "G9_T1_S1_K1", "skill_name_ru": "Сложение дробей"},
-              {"skill_id": "G9_T1_S1_K2", "skill_name_ru": "Сокращение дробей"},
-              {"skill_id": "G9_T2_S1_K1", "skill_name_ru": "Степень с нулём"}]
-    plan = _build_plan_candidates([], [], weak, errors, l2_of=l2_of)
-    assert ids(plan) == ["G9_T1", "G9_T2_S1_K1"]
-    assert [d["skill_id"] for d in plan[0]["details"]] == ["G9_T1_S1_K1", "G9_T1_S1_K2"]
-
-
-def test_plan_parent_arriving_after_its_confirmed_prerequisite_is_noted_not_repeated():
-    chains = [{"root_gap_skill_id": "G9_T1_S1_K1", "root_gap_skill_name": "Сложение дробей"}]
-    weak = [{"skill_id": "G9_T1", "skill_name_ru": "Дроби"}]
-    plan = _build_plan_candidates(chains, [], weak, [], l2_of=l2_of)
-    assert ids(plan) == ["G9_T1_S1_K1"]
-    assert plan[0]["parent_topic_id"] == "G9_T1"
-    assert plan[0]["evidence"] == "confirmed_prerequisite"
 
 
 def test_l2_resolver_walks_the_hierarchy_and_never_guesses():

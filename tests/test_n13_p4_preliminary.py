@@ -51,7 +51,7 @@ def test_the_prompt_for_the_model_has_no_slot_for_the_flag_and_no_such_wording()
     args = dict(
         grade_level=8, score_pct=40, correct=7, total=12, computed_status="below_level",
         status_label="Ниже уровня класса", wrong_block="  (нет)", chains_block="  (нет)",
-        boundary_block="  (нет)", cognitive_block="  (нет)", anchor_block="  (нет)", plan_candidates_block="  1. G8_T1 — Дроби (x)",
+        boundary_block="  (нет)", anchor_block="  (нет)", plan_candidates_block="  1. G8_T1 — Дроби (x)",
         plan_min_items=1, plan_max_items=1, root_cause_confirmed=False,
     )
     prompt = rg._build_prompt(**args).lower()

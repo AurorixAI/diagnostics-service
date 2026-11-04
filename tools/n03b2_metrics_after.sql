@@ -1,0 +1,54 @@
+-- N03b-2: замер "после" (копия n03b2_metrics.sql с полями схемы 8). Запускать на stage после пересборки отчётов, как и замер "до":
+--   psql ... -f n03b2_metrics_after.sql
+-- Поля схемы 8: шаг плана — evidence (массив строк журнала), material {tasks[], on_lesson}, check {statement, task|null, on_lesson};
+-- верхний уровень — checked_topics, more_difficulties; строка журнала — task_withdrawn.
+-- "До": у шага не было ни одного из этих ключей, evidence был строкой-кодом; поэтому те же формулы дают 0.
+with r as (select id, report_json j from diag_reports where generation_status='ready'),
+steps as (
+  select r.id, s from r,
+  jsonb_array_elements(case when jsonb_typeof(r.j->'action_plan')='array' then r.j->'action_plan' else '[]'::jsonb end) s
+),
+-- навыки с ошибками в живых заданиях (задание, снятое из банка после попытки, не считается: оно помечено в журнале)
+errs as (
+  select r.id, e->>'skill_id' skill_id
+  from r, jsonb_array_elements(case when jsonb_typeof(r.j->'error_patterns')='array' then r.j->'error_patterns' else '[]'::jsonb end) e
+  where coalesce(e->>'eval_category','') not in ('correct','')
+    and coalesce((e->>'task_withdrawn')::boolean, false) = false
+  group by 1, 2
+),
+named as (
+  select id, s->>'skill_id' skill_id from steps
+  union
+  select r.id, k->>'skill_id'
+  from r,
+       jsonb_array_elements(case when jsonb_typeof(r.j->'more_difficulties')='array' then r.j->'more_difficulties' else '[]'::jsonb end) g,
+       jsonb_array_elements(case when jsonb_typeof(g->'skills')='array' then g->'skills' else '[]'::jsonb end) k
+),
+maps as (
+  select r.id, sum((t->>'checked')::int) checked, sum((t->>'errors')::int) wrong
+  from r, jsonb_array_elements(case when jsonb_typeof(r.j->'checked_topics')='array' then r.j->'checked_topics' else '[]'::jsonb end) t
+  group by 1
+)
+select 'отчётов='||(select count(*) from r)
+ ||' шагов='||(select count(*) from steps)
+ ||' шагов_с_основанием='||(select count(*) from steps where jsonb_typeof(s->'evidence')='array' and jsonb_array_length(s->'evidence')>0)
+ ||' шагов_с_материалом='||(select count(*) from steps where jsonb_typeof(s->'material')='object'
+        and (jsonb_array_length(case when jsonb_typeof(s->'material'->'tasks')='array' then s->'material'->'tasks' else '[]'::jsonb end)>0
+             or s->'material'->>'on_lesson'='true'))
+ ||' шагов_с_проверкой='||(select count(*) from steps where jsonb_typeof(s->'check')='object' and s->'check'->>'statement' is not null
+        and (jsonb_typeof(s->'check'->'task')='object' or s->'check'->>'on_lesson'='true'))
+ ||' разных_описаний='||(select count(distinct s->>'full_description') from steps)
+ ||' отчётов_с_кластерами='||(select count(*) from r where jsonb_typeof(j->'cognitive_error_types')='array' and jsonb_array_length(j->'cognitive_error_types')>0)
+ ||' навыков_с_ошибками='||(select count(*) from errs)
+ ||' из_них_нигде_не_названо='||(select count(*) from errs e where not exists (select 1 from named n where n.id=e.id and n.skill_id=e.skill_id))
+ ||' карта_тем_есть='||(select count(*) from r where jsonb_typeof(j->'checked_topics')='array' and jsonb_array_length(j->'checked_topics')>0)
+ ||' карта_сходится_с_шапкой='||(select count(*) from maps m join r using (id)
+        where m.checked=(r.j->'report_meta'->>'total_questions')::int
+          and m.wrong=(r.j->'report_meta'->>'total_questions')::int-(r.j->'report_meta'->>'questions_correct')::int)
+ ||' первый_шаг_равен_старту='||(select count(*) from r where j->'recommended_start'->>'skill_id' = j->'action_plan'->0->>'skill_id')
+ ||' шагов_с_основанием_из_снятых='||(select count(*) from steps s join r using (id)
+        where exists (select 1
+                      from jsonb_array_elements(case when jsonb_typeof(s.s->'evidence')='array' then s.s->'evidence' else '[]'::jsonb end) ev,
+                           jsonb_array_elements(case when jsonb_typeof(r.j->'error_patterns')='array' then r.j->'error_patterns' else '[]'::jsonb end) ep
+                      where ev->>'answer_id'=ep->>'answer_id' and coalesce((ep->>'task_withdrawn')::boolean, false)));
+select 'категории_ошибок: '||string_agg(c||'='||n, ', ') from (select e->>'eval_category' c, count(*) n from diag_reports d, jsonb_array_elements(d.report_json->'error_patterns') e where d.generation_status='ready' group by 1) x;

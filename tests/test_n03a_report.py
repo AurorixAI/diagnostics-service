@@ -134,7 +134,7 @@ def _gap_answers():
 # ── O4: retired claims never appear ───────────────────────────────────────────
 
 def test_schema_version_is_bumped_for_the_contract_change():
-    assert rg.REPORT_SCHEMA_VERSION == 7
+    assert rg.REPORT_SCHEMA_VERSION == 8
 
 
 def test_report_has_no_reliability_percent_no_class_equivalent_no_hours(gen):
@@ -157,7 +157,7 @@ def test_narrative_hours_are_dropped_and_the_plan_starts_at_the_recommended_star
     candidates = [step["skill_id"] for step in first["action_plan"]]
     assert len(candidates) >= 3, candidates
 
-    # the narrative puts the first target LAST and adds hours: both must be corrected
+    # the narrative puts the first target LAST and writes an hours sentence: the order stays the data's, the sentence goes
     shuffled = candidates[1:] + candidates[:1]
     # status/score must match the deterministic values for the narrative to validate
     status, score = first["overall"]["status"], first["overall"]["score_percent"]
@@ -169,7 +169,7 @@ def test_narrative_hours_are_dropped_and_the_plan_starts_at_the_recommended_star
             "overall": {"status": status, "score_percent": score, "student_summary": "Текст."},
             "action_plan": [
                 {"priority": i, "skill_id": sid, "skill_name_ru": names[sid], "action_title": "Тема",
-                 "full_description": "Практика. Рекомендуемое количество часов: 4 часа.", "estimated_hours": 4}
+                 "full_description": "Практика. Рекомендуемое количество часов: 4 часа."}
                 for i, sid in enumerate(shuffled, 1)
             ],
         }, ensure_ascii=False)
@@ -177,29 +177,35 @@ def test_narrative_hours_are_dropped_and_the_plan_starts_at_the_recommended_star
     rj = gen(answers, weak=["G7_T9_K1"], narrative=narrative).report_json
     plan = rj["action_plan"]
     assert rj["report_meta"]["narrative_source"] == "ai"
-    assert [step["skill_id"] for step in plan][0] == candidates[0]
+    assert [step["skill_id"] for step in plan] == candidates          # the model's order is not the plan's order (Б3)
     assert [step["priority"] for step in plan] == list(range(1, len(plan) + 1))
+    assert all(step["source"] == "ai" and step["action_title"] == "Тема" for step in plan)
     assert all("estimated_hours" not in step for step in plan)
     assert all("часов" not in step["full_description"] for step in plan)
 
 
-def test_finalize_inserts_the_first_target_when_the_narrative_plan_lacks_it():
-    candidates = [{"skill_id": f"S{i}", "skill_name_ru": f"Навык {i}", "evidence": "observed_error"}
-                  for i in range(1, 6)]
+def test_wording_merge_keeps_the_steps_and_their_order_and_takes_only_two_prose_fields():
+    def step(i):
+        return {"priority": i, "skill_id": f"S{i}", "skill_name_ru": f"Навык {i}", "action_title": f"Отработать: {i}",
+                "full_description": f"данные {i}", "evidence": [{"journal_no": i}], "source": "deterministic_fallback"}
 
-    def step(i, sid):
-        return {"priority": i, "skill_id": sid, "skill_name_ru": f"Навык {sid[1:]}", "action_title": "Тема",
-                "full_description": "Практика.", "estimated_hours": 2}
-
-    plan = rg._finalize_action_plan([step(1, "S3"), step(2, "S4"), step(3, "S5")], candidates)
-    assert [s["skill_id"] for s in plan] == ["S1", "S3", "S4", "S5"]
-    assert [s["priority"] for s in plan] == [1, 2, 3, 4]
-    assert plan[0]["source"] == "deterministic_fallback" and "estimated_hours" not in plan[1]
-
-    full = rg._finalize_action_plan([step(i, f"S{i}") for i in (2, 3, 4, 5, 6)], candidates)
-    assert len(full) == 5 and full[0]["skill_id"] == "S1"            # the compact plan stays compact
-
-    assert rg._finalize_action_plan([], []) == []
+    steps = [step(i) for i in range(1, 6)]
+    ai = [  # reversed, one step missing, a skill that is not a step, forged lines and a forged priority
+        {"priority": 1, "skill_id": "S4", "action_title": "Т4", "full_description": "текст 4", "evidence": ["forged"], "check": "forged"},
+        {"priority": 2, "skill_id": "S2", "action_title": "Т2", "full_description": "текст 2. Время на отработку: 3 часа"},
+        {"priority": 3, "skill_id": "S99", "action_title": "чужой", "full_description": "чужой"},
+        {"priority": 4, "skill_id": "S1", "action_title": "", "full_description": "пустой заголовок"},
+    ]
+    merged = rg._merge_plan_wording(steps, ai)
+    assert [s["skill_id"] for s in merged] == ["S1", "S2", "S3", "S4", "S5"]
+    assert [s["priority"] for s in merged] == [1, 2, 3, 4, 5]
+    assert merged[3]["action_title"] == "Т4" and merged[3]["full_description"] == "текст 4" and merged[3]["source"] == "ai"
+    assert merged[3]["evidence"] == [{"journal_no": 4}] and "check" not in merged[3]        # the lines are the data's
+    assert merged[1]["full_description"] == "текст 2" and "часов" not in merged[1]["full_description"]
+    for i in (0, 2, 4):                                                                   # not worded by the model: the wording of the data
+        assert merged[i]["source"] == "deterministic_fallback" and merged[i]["full_description"] == f"данные {i + 1}"
+    assert steps[3]["action_title"] == "Отработать: 4"                                    # the input is not modified
+    assert rg._merge_plan_wording([], ai) == [] and rg._merge_plan_wording(steps, None) == steps
 
 
 def test_one_recommended_start_equals_first_plan_step_and_column(gen):
@@ -208,7 +214,7 @@ def test_one_recommended_start_equals_first_plan_step_and_column(gen):
     start, first = rj["recommended_start"], rj["action_plan"][0]
     assert start["skill_id"] == first["skill_id"] == report.recommended_start
     assert start["skill_name_ru"] == first["skill_name_ru"]
-    assert start["evidence"] == "confirmed_prerequisite"
+    assert start["evidence_kind"] == first["evidence_kind"] == "confirmed_prerequisite"
     # a confirmed prerequisite outranks the first Deep Scan id in session.weak_skills order
     assert first["skill_id"] == "G7_T9_K1"
 
@@ -554,9 +560,10 @@ def test_error_free_report_shows_achievements_and_a_development_step_without_def
     plan = rj["action_plan"]
     assert len(plan) == 1 and plan[0]["kind"] == "development" and "estimated_hours" not in plan[0]
     assert "дефицит не выявлен" in plan[0]["full_description"]
-    assert plan[0]["skill_id"] == "G8_T1"                        # lowest mastery among the verified topics
+    assert plan[0]["skill_id"] == "G8_T1_K1"                     # fewest checked tasks among the verified topics (alpha only breaks the tie)
+    assert plan[0]["topic_id"] == "G8_T1" and plan[0]["evidence"] and all(e["correct"] for e in plan[0]["evidence"])
     assert rj["recommended_start"]["skill_id"] == plan[0]["skill_id"] == report.recommended_start
-    assert rj["recommended_start"]["evidence"] == "error_free_development"
+    assert rj["recommended_start"]["evidence_kind"] == "error_free_development"
 
 
 def test_an_attempt_with_a_wrong_answer_is_not_error_free(gen):
@@ -1204,7 +1211,7 @@ def test_inferred_only_chains_are_observed_not_confirmed(gen):
     assert "[подтверждённая связь]" not in prompt
     assert "Не называй наблюдаемый дефицит «первопричиной»" in prompt          # root_cause_confirmed is False
     assert "Ключевой наблюдаемый дефицит" in prompt and "Подтверждённая точка слома" not in prompt
-    assert rj["action_plan"][0]["evidence"] == "observed_prerequisite"
+    assert rj["action_plan"][0]["evidence_kind"] == "observed_prerequisite"
     assert "подтверждённый пререквизит" not in rj["action_plan"][0]["full_description"]
 
 
@@ -1273,7 +1280,7 @@ def test_stored_link_at_the_breakpoint_is_confirmed_with_the_positive_sentence(g
     prompt = gen.llm_calls[0]
     assert "[подтверждённая связь]" in prompt and "Подтверждённая точка слома" in prompt
     assert "можно назвать первопричиной" in prompt
-    assert rj["action_plan"][0]["evidence"] == "confirmed_prerequisite"
+    assert rj["action_plan"][0]["evidence_kind"] == "confirmed_prerequisite"
 
 
 def test_chain_helpers_mirror_the_front_rule():
