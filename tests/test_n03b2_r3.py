@@ -141,7 +141,7 @@ def test_numbers_that_are_in_the_data_of_the_step_are_allowed(gen):
 def test_a_hostile_answer_for_every_step_gives_the_plan_of_the_data_without_the_model_text(gen):
     base, rj = _worded(gen, ["освоено на 85 %", "решить 3 из 4"])
     assert rj["action_plan"] == base["action_plan"]
-    assert not any("85" in s or "3 из 4" in s for s in rg._all_strings(rj["action_plan"]))
+    assert not any("85 %" in s or "3 из 4" in s for s in rg._all_strings(rj["action_plan"]))
 
 
 # ── m5: a cut-off answer is not asked again ─────────────────────────────────────

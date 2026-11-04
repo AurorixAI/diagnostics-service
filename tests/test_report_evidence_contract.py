@@ -128,7 +128,7 @@ def test_n03a_contract_no_reliability_equivalent_or_duration_in_the_report_contr
             {"skill_id": "G7_B", "skill_name_ru": "Навык B", "evidence_kind": "observed_error", "errors": 1,
              "rows": [{"journal_no": 2, "student_answer": "4"}]},
         ],
-        attempt_task_ids=[], names={}, failures=[],
+        attempt_task_ids=[], names={},
     )
     assert [step["priority"] for step in fallback] == [1, 2]
     assert all("estimated_hours" not in step for step in fallback)
