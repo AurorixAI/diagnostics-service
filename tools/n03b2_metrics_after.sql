@@ -2,6 +2,7 @@
 --   psql ... -f n03b2_metrics_after.sql
 -- Поля схемы 8: шаг плана — evidence (массив строк журнала), material {tasks[], on_lesson}, check {statement, task|null, on_lesson};
 -- верхний уровень — checked_topics, more_difficulties; строка журнала — task_withdrawn.
+-- Охранные CASE вместо AND: Postgres не гарантирует порядок AND, а у старых отчётов evidence — строка.
 -- "До": у шага не было ни одного из этих ключей, evidence был строкой-кодом; поэтому те же формулы дают 0.
 with r as (select id, report_json j from diag_reports where generation_status='ready'),
 steps as (
@@ -31,17 +32,17 @@ maps as (
 )
 select 'отчётов='||(select count(*) from r)
  ||' шагов='||(select count(*) from steps)
- ||' шагов_с_основанием='||(select count(*) from steps where jsonb_typeof(s->'evidence')='array' and jsonb_array_length(s->'evidence')>0)
+ ||' шагов_с_основанием='||(select count(*) from steps where case when jsonb_typeof(s->'evidence')='array' then jsonb_array_length(s->'evidence') else 0 end > 0)
  ||' шагов_с_материалом='||(select count(*) from steps where jsonb_typeof(s->'material')='object'
         and (jsonb_array_length(case when jsonb_typeof(s->'material'->'tasks')='array' then s->'material'->'tasks' else '[]'::jsonb end)>0
              or s->'material'->>'on_lesson'='true'))
  ||' шагов_с_проверкой='||(select count(*) from steps where jsonb_typeof(s->'check')='object' and s->'check'->>'statement' is not null
         and (jsonb_typeof(s->'check'->'task')='object' or s->'check'->>'on_lesson'='true'))
  ||' разных_описаний='||(select count(distinct s->>'full_description') from steps)
- ||' отчётов_с_кластерами='||(select count(*) from r where jsonb_typeof(j->'cognitive_error_types')='array' and jsonb_array_length(j->'cognitive_error_types')>0)
+ ||' отчётов_с_кластерами='||(select count(*) from r where case when jsonb_typeof(j->'cognitive_error_types')='array' then jsonb_array_length(j->'cognitive_error_types') else 0 end > 0)
  ||' навыков_с_ошибками='||(select count(*) from errs)
  ||' из_них_нигде_не_названо='||(select count(*) from errs e where not exists (select 1 from named n where n.id=e.id and n.skill_id=e.skill_id))
- ||' карта_тем_есть='||(select count(*) from r where jsonb_typeof(j->'checked_topics')='array' and jsonb_array_length(j->'checked_topics')>0)
+ ||' карта_тем_есть='||(select count(*) from r where case when jsonb_typeof(j->'checked_topics')='array' then jsonb_array_length(j->'checked_topics') else 0 end > 0)
  ||' карта_сходится_с_шапкой='||(select count(*) from maps m join r using (id)
         where m.checked=(r.j->'report_meta'->>'total_questions')::int
           and m.wrong=(r.j->'report_meta'->>'total_questions')::int-(r.j->'report_meta'->>'questions_correct')::int)

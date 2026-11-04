@@ -146,8 +146,11 @@ def test_report_weak_topics_are_evidence_based_and_deduplicated(db):
     assert item["confirmed_by_deep_scan"] is True
     assert [d["skill_id"] for d in item["detail_skills"]] == ["G8_T1_K1"]
     plan_ids = [p["skill_id"] for p in rj["action_plan"]]
-    assert "G8_T1" in plan_ids and "G8_T1_K1" not in plan_ids      # L4 is a detail of its L2, not a second item
-    assert "G8_T2" not in plan_ids
+    # N03b-2: the plan is made of skills with wrong answers (9 on G8_T1_K1, 1 probe on G7_T9_K1); the prerequisite found under
+    # G8_T1_K1 is worked first; T2 (only correct answers) is nowhere in it
+    assert plan_ids == ["G7_T9_K1", "G8_T1_K1"]
+    assert not any(pid.startswith("G8_T2") for pid in plan_ids)
+    assert rj["more_difficulties"] == []
 
 
 def test_report_chain_uses_the_stored_origin_link(db):
