@@ -340,6 +340,13 @@ def test_a_prerequisite_root_goes_before_an_equal_skill_and_a_stored_link_before
     assert kinds == {"G8_T2_K1": "confirmed_prerequisite", "G8_T3_K1": "observed_prerequisite", "G8_T1_K1": "observed_error"}
 
 
+def test_the_prerequisite_fact_outranks_the_hidden_estimate_on_equal_error_counts():
+    journal = [row(1, "G8_T1_K1"), row(2, "G8_T2_K1")]
+    chains = [{"source_skill_id": "G8_T4_K1", "root_gap_skill_id": "G8_T2_K1", "has_prerequisite_gap": True, "evidence_source": "stored_link"}]
+    weakest_first = {"G8_T1": {"alpha": -2.0}, "G8_T2": {"alpha": 2.0}}
+    assert order(journal, chains, breakdown=weakest_first) == ["G8_T2_K1", "G8_T1_K1"]      # the root first although its estimate is the highest
+
+
 def test_a_prerequisite_is_placed_before_the_skill_it_was_found_under_even_with_fewer_errors():
     journal = [row(1, "G8_T1_K1"), row(2, "G8_T1_K1"), row(3, "G8_T1_K1"), row(4, "G7_T9_K1", is_deep_scan=True)]
     chains = [{"source_skill_id": "G8_T1_K1", "root_gap_skill_id": "G7_T9_K1", "has_prerequisite_gap": True, "evidence_source": "stored_link"}]
@@ -561,12 +568,6 @@ def test_scenario_a_long_plan_is_not_cut_off_and_a_cut_off_answer_does_not_empty
     base_overall = gen(answers, narrative=None).report_json["overall"]
     full["overall"]["score_percent"], full["overall"]["status"] = base_overall["score_percent"], base_overall["status"]
     full["overall"]["status_label_ru"] = base_overall["status_label_ru"]
-
-    def llm(prompt, **kwargs):
-        pass
-
-    def respond(prompt):
-        return None
 
     captured = {}
 
