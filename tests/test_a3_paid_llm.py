@@ -291,7 +291,7 @@ def test_generator_valid_model_marks_narrative_generated(monkeypatch, gen):
 def test_double_slash_in_the_narrative_costs_one_call_not_two(monkeypatch, gen):
     set_env(monkeypatch)
     calls: list = []
-    summary = "Решено 2 из 11 заданий. Подробнее https://example.org/a и/или//b."
+    summary = "Решено 1 из 4 заданий. Подробнее https://example.org/a и/или//b."     # k of n of THIS attempt: LESSONS 96 lets only the data's numbers through
     report = gen(_gap_answers(), narrative=valid_model_factory(calls, summary=summary))
     assert calls == [1]                                   # B-08: used to be cut, invalid JSON, a second paid call
     assert "https://example.org/a" in report.report_json["overall"]["student_summary"]

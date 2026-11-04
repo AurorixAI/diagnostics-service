@@ -277,9 +277,9 @@ def test_a_link_never_leads_to_an_inactive_task_the_adapter_filters_what_the_ban
     monkeypatch.setattr(knowledge_repo, "TaskRepository", Repo)
     tasks = rp.bank_unused_tasks("S", ["t3-attempt"])
     assert [t["task_id"] for t in tasks] == ["t4", "t1", "t3"]            # by difficulty, then id; t2 is inactive
-    assert seen["exclude_ids"] == ["t3-attempt"] and seen["limit"] == rp.TASK_WINDOW and "target_b" not in seen
+    assert seen["exclude_ids"] == ["t3-attempt"] and seen["limit"] == rp.TASK_WINDOW and seen["target_b"] is None
     hardest = rp.bank_unused_tasks("S", [], hardest_first=True)
-    assert [t["task_id"] for t in hardest] == ["t1", "t3", "t4"] and seen["limit"] == rp.DEVELOPMENT_WINDOW
+    assert [t["task_id"] for t in hardest] == ["t1", "t3", "t4"] and seen["limit"] == rp.HARDEST_WINDOW and seen["target_b"] == rp.HARDEST_TARGET_B
 
 
 def test_the_same_data_gives_the_same_plan(gen, bank):

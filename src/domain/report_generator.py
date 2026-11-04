@@ -1736,7 +1736,6 @@ def _narrative_source(skip_reason: Optional[str], ai_data: Optional[Dict[str, An
 
 
 _PERCENT_RE = re.compile(r"\d\s*%|процент", re.IGNORECASE)
-_X_OF_Y_RE = re.compile(r"\d+\s*(?:из|/)\s*\d+", re.IGNORECASE)
 _JOURNAL_REF_RE = re.compile(r"№\s*(\d+)")
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
@@ -1760,29 +1759,56 @@ def _numbers_in(value: Any) -> set:
     return found
 
 
-def _ai_step_text_problem(step: Dict[str, Any], text: str, journal_nos: Iterable[int]) -> Optional[str]:
-    """Why the model's wording of a step may NOT be used (``None`` = it may).
+def _ai_text_problem(
+    text: str,
+    *,
+    facts: Any,
+    journal_nos: Iterable[int],
+    allowed_pairs: Iterable[Tuple[int, int]] = (),
+) -> Optional[str]:
+    """Why a model's wording may NOT be used (``None`` = it may).  ONE rule for the text of a plan step and for the summary (LESSONS 96).
 
-    The numbers of a step are facts of the attempt (the journal, the bank, the counts): a model must not add its own.  Not allowed in
-    the title / description: a percentage, an «N из M» (a criterion «3 из 4» is the methodologist's, not ours), a reference «№N» to a row that is
-    not a row of this skill, and any number that is not in the data of the step (basis, material, check, names).
+    The numbers of a report are facts of the attempt (the journal, the bank, the counts): a model must not add its own.  Not allowed: a percentage;
+    an «N из M» (a criterion «3 из 4» is the methodologist's) - except the pair that IS in the data (``allowed_pairs``: «решено k из n»);
+    a reference «№N» to a row that is not in ``journal_nos``; any number that is not in ``facts`` (a JSON-like value of the data it may quote).
     """
     if _PERCENT_RE.search(text):
         return "percent"
-    if _X_OF_Y_RE.search(text):
-        return "N-of-M"
+    pairs = {(int(a), int(b)) for a, b in allowed_pairs}
+    for first, second in re.findall(r"(\d+)\s*(?:из|/)\s*(\d+)", text, flags=re.IGNORECASE):
+        if (int(first), int(second)) not in pairs:
+            return "N-of-M"
     allowed_rows = {str(n) for n in journal_nos}
     for ref in _JOURNAL_REF_RE.findall(text):
         if ref not in allowed_rows:
-            return f"journal row №{ref} is not a row of this skill"
-    facts = _numbers_in([
-        step.get("skill_name_ru"), step.get("topic_name_ru"), step.get("errors_count"), step.get("evidence"),
-        step.get("material"), step.get("check"), sorted(allowed_rows),
-    ])
-    foreign = sorted({n.replace(",", ".") for n in _NUMBER_RE.findall(text)} - facts)
+            return f"journal row №{ref} is not a row of this report"
+    foreign = sorted({n.replace(",", ".") for n in _NUMBER_RE.findall(text)} - _numbers_in([facts, sorted(allowed_rows)]))
     if foreign:
-        return f"numbers that are not in the data of the step: {foreign[:3]}"
+        return f"numbers that are not in the data: {foreign[:3]}"
     return None
+
+
+def _ai_step_text_problem(step: Dict[str, Any], text: str, journal_nos: Iterable[int]) -> Optional[str]:
+    """The text of a plan step: its numbers are those of the step (basis, material, check, names, the count of errors)."""
+    return _ai_text_problem(
+        text, journal_nos=journal_nos,
+        facts=[step.get("skill_name_ru"), step.get("topic_name_ru"), step.get("errors_count"), step.get("evidence"), step.get("material"), step.get("check")],
+    )
+
+
+def _summary_facts(
+    *, grade_level: int, correct: int, total: int, meta: Dict[str, Any], journal: List[Dict[str, Any]], checked_topics: List[Dict[str, Any]],
+    plan: List[Dict[str, Any]], boundary: Dict[str, Any], chains: List[Dict[str, Any]], achievements: List[Dict[str, Any]],
+) -> List[Any]:
+    """What the summary may quote: the class, the counts of the header, the journal numbers and answers, the topics and plan, the chains' grades."""
+    return [
+        grade_level, correct, total,
+        {k: meta.get(k) for k in ("total_questions", "questions_correct", "measured_errors", "prerequisite_questions", "prerequisite_correct", "prerequisite_errors")},
+        [{k: row.get(k) for k in ("journal_no", "skill_name_ru", "topic_name_ru", "student_answer")} for row in journal],
+        checked_topics, plan, boundary,
+        [{k: v for k, v in chain.items() if k != "steps"} for chain in chains],
+        [{"skill_name_ru": a.get("skill_name_ru"), "correct_answers": a.get("correct_answers")} for a in achievements],
+    ]
 
 
 def _merge_plan_wording(
@@ -2157,6 +2183,27 @@ def generate_and_save_report(
             achievements=achievements if error_free else None,
             development_focus=development_step["skill_name_ru"] if development_step else None,
         )
+        # The model's summary is used only when it keeps to the numbers of the data (LESSONS 96, one rule with the text of a step); otherwise the
+        # summary from the data stays - no second paid call.
+        ai_summary = drop_preliminary_sentences(overall_block.get("student_summary")) or None
+        if ai_summary:
+            problem = _ai_text_problem(
+                ai_summary,
+                facts=_summary_facts(
+                    grade_level=grade_level, correct=correct, total=total,
+                    meta={"total_questions": total, "questions_correct": correct, "measured_errors": total - correct,
+                          "prerequisite_questions": len(prerequisite_answers),
+                          "prerequisite_correct": sum(is_correct(a.outcome) for a in prerequisite_answers),
+                          "prerequisite_errors": sum(not is_correct(a.outcome) for a in prerequisite_answers)},
+                    journal=error_patterns, checked_topics=checked_topics, plan=action_plan,
+                    boundary=diagnostic_boundary, chains=root_cause_chains, achievements=achievements,
+                ),
+                journal_nos=[r["journal_no"] for r in error_patterns],
+                allowed_pairs=[(correct, total)],
+            )
+            if problem:
+                log.warning("Model summary of session %s is not used (%s): the summary from the data stays", session_id, problem)
+                ai_summary = None
         # Content-service lookups that failed (transport, not "not found") make the
         # parent-topic mapping / names incomplete.  Such a report is usable but is
         # never stamped as current (see the persist step).
@@ -2201,7 +2248,7 @@ def generate_and_save_report(
                 "score_percent":    score_pct,     # always from data
                 "status":           computed_status,   # legacy code, from level_policy
                 "status_label_ru":  computed_label_ru, # from level_policy
-                "student_summary":  drop_preliminary_sentences(overall_block.get("student_summary")) or deterministic_summary,
+                "student_summary":  ai_summary or deterministic_summary,
                 "category":         level["category"],
                 "provisional":      level["provisional"],
             },

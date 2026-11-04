@@ -33,7 +33,8 @@ PLAN_STEPS_MAX = 5          # steps of the plan (the rest goes to "more difficul
 EVIDENCE_MAX = 5            # journal rows quoted as the basis of one step
 MATERIAL_MAX = 3            # bank tasks offered as material of one step
 TASK_WINDOW = 50            # active tasks of a skill read from the bank to choose from
-DEVELOPMENT_WINDOW = 200    # the development step wants the hardest tasks: the whole skill (the bank API allows 200)
+HARDEST_WINDOW = 50         # the development step wants the hardest tasks of the WHOLE skill: asked nearest to the top of the scale, this many of them
+HARDEST_TARGET_B = 4.0      # content-service orders ``target_b`` requests by |irt_difficulty - target_b|; its range is [-4, 4], so +4 = hardest first
 
 # All reads of the bank for ONE report together (the first read starts the clock).  Well below report_jobs.STALE_GENERATING_AFTER (10 min):
 # a hanging content-service must not keep a worker busy until another worker takes the job.  A read that is slow but answers is
@@ -68,9 +69,13 @@ def bank_unused_tasks(skill_id: str, exclude_ids: Sequence[str], *, hardest_firs
     """
     from src.repositories.knowledge_repo import TaskRepository
 
+    # Easiest first is the bank's own order (``ORDER BY irt_difficulty``).  Hardest first: the bank has no "descending" parameter, but it orders a
+    # ``target_b`` request by the distance to the target BEFORE the limit - with the top of the scale as the target the hardest tasks of the whole
+    # skill come first (not the hardest of its 200 easiest).  The result is sorted again below, so equal difficulties are ordered by id.
     rows = TaskRepository().get_tasks_for_skill(
         skill_id, exclude_ids=list(exclude_ids) or None,
-        limit=DEVELOPMENT_WINDOW if hardest_first else TASK_WINDOW,
+        limit=HARDEST_WINDOW if hardest_first else TASK_WINDOW,
+        target_b=HARDEST_TARGET_B if hardest_first else None,
     )
     excluded = set(exclude_ids)
     tasks: List[Dict[str, Any]] = []
